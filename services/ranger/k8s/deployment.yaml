@@ -57,12 +57,12 @@ spec:
             configMapKeyRef:
               name: ranger-config
               key: shutdown-timeout
-        - name: QUEUE_URL
+        - name: RANGER_QUEUE_URL
           valueFrom:
             secretKeyRef:
               name: ranger-secrets
               key: queue-url
-        - name: QUEUE_API_TOKEN
+        - name: RANGER_QUEUE_API_TOKEN
           valueFrom:
             secretKeyRef:
               name: ranger-secrets
