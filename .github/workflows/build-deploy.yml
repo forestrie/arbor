@@ -31,6 +31,8 @@ jobs:
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
 
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker europe-west2-docker.pkg.dev
