@@ -1,142 +1,125 @@
 # Ranger Kubernetes Deployment
 
-This directory contains the Kubernetes manifests for deploying the ranger service to GKE.
+This directory contains the Kubernetes manifests for deploying the ranger service to GKE using **Kustomize** and **Flux GitOps**.
 
 ## Files
 
-- `deployment.yaml` - Deployment, ConfigMap, and Secret definitions
+- `kustomization.yaml` - Kustomize manifest with namespace, resources, images, and ConfigMap generator
+- `deployment.yaml` - Deployment definition (no image tag - managed by Flux ImageUpdateAutomation)
 - `service.yaml` - ClusterIP service for internal access
+
+## Deployment Architecture
+
+Ranger is deployed via **Flux GitOps** with automatic image updates:
+
+1. **Kustomize Structure**: Manifests organized using Kustomize for namespace, labels, and ConfigMap management
+2. **Flux Kustomization**: Forest-1 repository creates Flux Kustomization that references this directory
+3. **ImageUpdateAutomation**: Flux automatically updates image tags when new images are pushed to Artifact Registry
+4. **Automated Deployment**: Code changes → image build → manifest update → deployment (all automated)
+
+See [ADR-001: Flux GitOps Deployment](../../../docs/adr-001-flux-gitops-deployment.md) for detailed architecture and rationale.
+
+## Kustomize Structure
+
+The `kustomization.yaml` defines:
+
+- **Namespace**: `forestrie-arbor` (created by forest-1)
+- **Resources**: deployment.yaml, service.yaml
+- **Common Labels**: Consistent labeling across resources
+- **Images**: Image reference for ImageUpdateAutomation to update tags
+- **ConfigMap Generator**: Non-sensitive configuration (log-level, poll-interval, etc.)
+
+The image tag in `kustomization.yaml` is automatically updated by Flux ImageUpdateAutomation when new images are available.
 
 ## Prerequisites
 
-1. GKE cluster is running (from forest-1 infrastructure)
-2. Artifact Registry repository exists: `europe-west2-docker.pkg.dev/forest-dev-1/forestrie`
-3. Cloudflare Queue credentials available
+1. GKE cluster running (managed by forest-1)
+2. Artifact Registry repository: `europe-west2-docker.pkg.dev/forest-dev-1/forestrie`
+3. Flux GitOps installed and configured in cluster
+4. Forest-1 GitRepository pointing to arbor repository
+5. ImageUpdateAutomation configured for ranger images
 
 ## Configuration
 
 ### Secrets (Required)
 
-Before deploying, update the secrets in `deployment.yaml`:
-
-```yaml
-stringData:
-  queue-url: "https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/queues/YOUR_QUEUE_NAME"
-  queue-api-token: "YOUR_QUEUE_API_TOKEN"
-```
-
-Or use `kubectl` to create the secret:
+Secrets are managed separately (not in Git). Create the secret in the cluster:
 
 ```bash
 kubectl create secret generic ranger-secrets \
-  --from-literal=queue-url="https://api.cloudflare.com/..." \
-  --from-literal=queue-api-token="your-token" \
+  --from-literal=queue-url="https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/queues/YOUR_QUEUE_NAME" \
+  --from-literal=queue-api-token="YOUR_QUEUE_API_TOKEN" \
+  --namespace=forestrie-arbor \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-### ConfigMap (Optional)
+**Note**: Secrets are not managed by GitOps for security. Future enhancement: Use SOPS or Sealed Secrets.
 
-Adjust polling behavior in the ConfigMap section of `deployment.yaml`:
+### ConfigMap (Managed by Kustomize)
+
+Configuration is managed via `kustomization.yaml` configMapGenerator:
 
 - `log-level`: debug, info, warn, error (default: info)
 - `poll-interval`: How often to poll the queue (default: 5s)
 - `visibility-timeout`: Message visibility timeout (default: 30s)
 - `shutdown-timeout`: Graceful shutdown timeout (default: 30s)
 
-## Manual Deployment
+To change configuration, edit `kustomization.yaml` and commit. Flux will reconcile the changes.
+
+## Deployment Flow
+
+### Automated Deployment (Normal Flow)
+
+1. **Code Change**: Developer pushes code to arbor `main` branch
+2. **Image Build**: GitHub Actions workflow builds and pushes Docker image
+   - Tag format: `main-{short-sha}-{timestamp}`
+   - Pushed to: `europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger`
+3. **Image Detection**: Flux ImageRepository detects new image
+4. **Policy Selection**: Flux ImagePolicy selects latest image (alphabetical sort)
+5. **Manifest Update**: Flux ImageUpdateAutomation updates `kustomization.yaml` image tag
+6. **Reconciliation**: Flux Kustomization reconciles deployment
+7. **Rollout**: Deployment automatically rolls out with new image
+
+### Manual Deployment (Emergency Only)
+
+For emergency deployments or local testing:
 
 ```bash
-# Deploy to cluster
-kubectl apply -f deployment.yaml
-kubectl apply -f service.yaml
+# Build and push image locally
+task ranger:build
+task ranger:push IMAGE_TAG=dev
 
-# Check status
-kubectl get pods -l app=ranger
-kubectl logs -l app=ranger -f
-
-# Check service
-kubectl get svc ranger
+# Apply manifests directly (bypasses Flux)
+kubectl apply -k .
 ```
 
-## GitHub Actions Deployment
+**Note**: Direct kubectl apply bypasses GitOps and may cause drift. Use only for emergency or local testing.
 
-The ranger service is designed to work with the GitHub Actions CI/CD pipeline defined in the forest-1 repo.
+## Image Management
 
-### Workflow Example
+### Image Tagging
 
-Create `.github/workflows/deploy-ranger.yml` in the forest-1 repo:
+Images are tagged with format: `main-{short-sha}-{timestamp}`
 
-```yaml
-name: Build and Deploy Ranger
+- **Sortable**: Timestamp ensures chronological ordering
+- **Traceable**: SHA links to source commit
+- **Unique**: Timestamp prevents tag collisions
+- **Automated**: Flux ImageUpdateAutomation updates manifests automatically
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - 'arbor/services/ranger/**'
-      - '.github/workflows/deploy-ranger.yml'
+### Image Update Process
 
-permissions:
-  contents: read
-  id-token: write
-
-jobs:
-  build-and-deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: forestrie/arbor
-          path: arbor
-
-      - id: auth
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: 'projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool-XXXX/providers/github-provider'
-          service_account: 'forest-dev-1-github-ci@forest-dev-1.iam.gserviceaccount.com'
-
-      - name: Set up Cloud SDK
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker europe-west2-docker.pkg.dev
-
-      - name: Build and push Docker image
-        env:
-          IMAGE_URL: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          cd arbor/services/ranger
-          docker build -t ${IMAGE_URL}:${IMAGE_TAG} -t ${IMAGE_URL}:latest .
-          docker push ${IMAGE_URL}:${IMAGE_TAG}
-          docker push ${IMAGE_URL}:latest
-
-      - name: Deploy to GKE
-        env:
-          CLUSTER_NAME: forest-dev-1
-          CLUSTER_REGION: europe-west2
-          IMAGE_URL: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          gcloud container clusters get-credentials ${CLUSTER_NAME} --region=${CLUSTER_REGION}
-
-          # Update deployment image
-          kubectl set image deployment/ranger ranger=${IMAGE_URL}:${IMAGE_TAG}
-
-          # Wait for rollout
-          kubectl rollout status deployment/ranger --timeout=300s
-```
-
-## Image URLs
-
-- **Latest**: `europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger:latest`
-- **Tagged**: `europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger:SHA`
+1. New image pushed to Artifact Registry
+2. Flux ImageRepository scans for new tags
+3. Flux ImagePolicy filters and selects latest tag
+4. Flux ImageUpdateAutomation updates `kustomization.yaml`
+5. Flux commits change to arbor repository
+6. Flux Kustomization reconciles deployment
 
 ## Service Access
 
 The ranger service is internal-only (ClusterIP):
 
-- **DNS**: `ranger.default.svc.cluster.local:9090` (adjust namespace as needed)
+- **DNS**: `ranger.forestrie-arbor.svc.cluster.local:9090`
 - **Health checks**:
   - Liveness: `http://ranger:9090/healthz`
   - Readiness: `http://ranger:9090/readyz`
@@ -149,41 +132,97 @@ Default resource allocation:
 - **Requests**: 100m CPU, 64Mi memory
 - **Limits**: 500m CPU, 256Mi memory
 
-Adjust based on actual queue throughput and message processing requirements.
+Adjust in `deployment.yaml` and commit. Flux will reconcile changes.
 
 ## Troubleshooting
 
+### Check Flux Status
+
+```bash
+# Check Flux Kustomization status
+flux get kustomizations ranger -n flux-system
+
+# Check ImageRepository status
+flux get image repository ranger -n flux-system
+
+# Check ImagePolicy status
+flux get image policy ranger -n flux-system
+
+# Check ImageUpdateAutomation status
+flux get image update arbor -n flux-system
+
+# View Flux logs
+flux logs --kind=Kustomization --name=ranger
+```
+
+### Check Deployment Status
+
 ```bash
 # Check pod status
-kubectl get pods -l app=ranger
+kubectl get pods -n forestrie-arbor -l app=ranger
 
 # View logs
-kubectl logs -l app=ranger --tail=100 -f
+kubectl logs -n forestrie-arbor -l app=ranger --tail=100 -f
 
 # Describe deployment
-kubectl describe deployment ranger
+kubectl describe deployment ranger -n forestrie-arbor
 
 # Check secrets are mounted correctly
-kubectl get secret ranger-secrets -o yaml
+kubectl get secret ranger-secrets -n forestrie-arbor -o yaml
+```
 
-# Port forward for local testing
-kubectl port-forward svc/ranger 9090:9090
-curl http://localhost:9090/healthz
+### Image Update Issues
+
+```bash
+# Check if ImageRepository is finding images
+flux get image repository ranger -n flux-system -o yaml
+
+# Check ImagePolicy selection
+flux get image policy ranger -n flux-system -o yaml
+
+# Manually trigger image update
+flux reconcile image update arbor -n flux-system
+
+# Check if manifest was updated
+git log --oneline -n 10 --grep="image"
+```
+
+### Manual Rollback
+
+```bash
+# Option 1: Revert manifest commit in arbor repo
+git revert <commit-hash>
+git push
+
+# Option 2: Update kustomization.yaml to pin previous image tag
+# Edit kustomization.yaml, change image tag, commit
+
+# Option 3: Emergency kubectl patch (bypasses Flux)
+kubectl patch deployment ranger -n forestrie-arbor \
+  -p '{"spec":{"template":{"spec":{"containers":[{"name":"ranger","image":"europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger:previous-tag"}]}}}}'
 ```
 
 ## Scaling
 
 ```bash
 # Scale replicas (if queue supports multiple consumers)
-kubectl scale deployment ranger --replicas=3
+kubectl scale deployment ranger --replicas=3 -n forestrie-arbor
 
-# Update autoscaling (optional)
-kubectl autoscale deployment ranger --min=1 --max=5 --cpu-percent=80
+# Or update deployment.yaml and commit (GitOps approach)
 ```
 
 ## Cleanup
 
 ```bash
-kubectl delete -f deployment.yaml
-kubectl delete -f service.yaml
+# Remove via Flux (recommended)
+# Delete Flux Kustomization in forest-1 repository
+
+# Or remove directly
+kubectl delete -k . -n forestrie-arbor
 ```
+
+## References
+
+- [ADR-001: Flux GitOps Deployment](../../../docs/adr-001-flux-gitops-deployment.md)
+- [Kustomize Documentation](https://kustomize.io/)
+- [Flux Image Update Automation](https://fluxcd.io/flux/components/image/imageupdateautomations/)

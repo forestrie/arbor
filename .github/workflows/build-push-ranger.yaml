@@ -1,0 +1,86 @@
+name: Build and Push Ranger
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/ranger/**'
+      - '.github/workflows/build-push-ranger.yaml'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  IMAGE_REPO: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}
+  GCP_REGION: europe-west2
+
+jobs:
+  build-and-push:
+    name: Build and Push Ranger Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Workload Identity Provider
+        run: |
+          if [ -z "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            echo "::error::GCP_WORKLOAD_IDENTITY_PROVIDER variable is not set. Please set it in repository settings."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}-github-ci@${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}.iam.gserviceaccount.com
+          token_format: access_token
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          version: latest
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker $GCP_REGION-docker.pkg.dev
+
+      - name: Set Image Tag
+        id: image-tag
+        run: |
+          SHORT_SHA=$(git rev-parse --short=8 HEAD)
+          TIMESTAMP=$(date +%s)
+          IMAGE_TAG="main-${SHORT_SHA}-${TIMESTAMP}"
+          echo "tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Built image tag: ${IMAGE_TAG}"
+
+      - name: Set Build Args
+        id: build-args
+        run: |
+          VERSION=$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --abbrev-ref HEAD)
+          COMMIT=$(git rev-parse HEAD)
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
+          echo "build-date=${BUILD_DATE}" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image
+        working-directory: services/ranger
+        run: |
+          docker build \
+            --build-arg VERSION=${{ steps.build-args.outputs.version }} \
+            --build-arg COMMIT=${{ steps.build-args.outputs.commit }} \
+            --build-arg BUILD_DATE=${{ steps.build-args.outputs.build-date }} \
+            -t ${{ env.IMAGE_REPO }}:${{ steps.image-tag.outputs.tag }} \
+            -t ${{ env.IMAGE_REPO }}:latest \
+            .
+
+      - name: Push Docker Image
+        run: |
+          docker push ${{ env.IMAGE_REPO }}:${{ steps.image-tag.outputs.tag }}
+          docker push ${{ env.IMAGE_REPO }}:latest
+          echo "Pushed: ${{ env.IMAGE_REPO }}:${{ steps.image-tag.outputs.tag }}"
+          echo "Pushed: ${{ env.IMAGE_REPO }}:latest"

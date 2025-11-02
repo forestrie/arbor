@@ -70,40 +70,59 @@ tasks:
         docker push {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}}
         echo "Push complete: {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}}"
 
-  deploy:
-    desc: Deploy ranger to GKE
-    dir: "{{.ROOT_DIR}}"
-    vars:
-      IMAGE_TAG:
-        sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
-      RANGER_QUEUE_URL: "{{.RANGER_QUEUE_URL}}"
-      RANGER_QUEUE_API_TOKEN: "{{.RANGER_QUEUE_API_TOKEN}}"
-    preconditions:
-      - sh: '[ -n "{{.RANGER_QUEUE_URL}}" ]'
-        msg: "RANGER_QUEUE_URL must be set (pass as var or set in environment)"
-      - sh: '[ -n "{{.RANGER_QUEUE_API_TOKEN}}" ]'
-        msg: "RANGER_QUEUE_API_TOKEN must be set (pass as var or set in environment)"
-    cmds:
-      - |
-        echo "Deploying ranger:{{.IMAGE_TAG}} to {{.CLUSTER_NAME}}"
-
-        # Create or update secrets
-        echo "Creating/updating secrets..."
-        kubectl create secret generic ranger-secrets \
-          --from-literal=queue-url="{{.RANGER_QUEUE_URL}}" \
-          --from-literal=queue-api-token="{{.RANGER_QUEUE_API_TOKEN}}" \
-          --dry-run=client -o yaml | kubectl apply -f -
-
-        # Apply deployment with image tag substitution
-        echo "Applying deployment manifest..."
-        sed "s|IMAGE_TAG|{{.IMAGE_TAG}}|g" ./services/ranger/k8s/deployment.yaml | kubectl apply -f -
-
-        # Apply service
-        echo "Applying service manifest..."
-        kubectl apply -f ./services/ranger/k8s/service.yaml
-
-        # Wait for rollout
-        echo "Waiting for rollout to complete..."
-        kubectl rollout status deployment/ranger
-
-        echo "Deployment complete"
+  # DEPRECATED: deploy task has been replaced by Flux GitOps deployment
+  # Deployment is now automated via Flux GitOps when images are pushed to Artifact Registry.
+  # See: docs/adr-001-flux-gitops-deployment.md
+  # 
+  # For emergency manual deployment, use:
+  #   kubectl apply -k ./services/ranger/k8s
+  #   kubectl create secret generic ranger-secrets --from-literal=queue-url="..." --from-literal=queue-api-token="..." -n forestrie-arbor
+  #
+  # deploy:
+  #   desc: "[DEPRECATED] Deploy ranger to GKE - Use Flux GitOps instead"
+  #   dir: "{{.ROOT_DIR}}"
+  #   vars:
+  #     IMAGE_TAG:
+  #       sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
+  #     RANGER_QUEUE_URL: "{{.RANGER_QUEUE_URL}}"
+  #     RANGER_QUEUE_API_TOKEN: "{{.RANGER_QUEUE_API_TOKEN}}"
+  #   preconditions:
+  #     - sh: '[ -n "{{.RANGER_QUEUE_URL}}" ]'
+  #       msg: "RANGER_QUEUE_URL must be set (pass as var or set in environment)"
+  #     - sh: '[ -n "{{.RANGER_QUEUE_API_TOKEN}}" ]'
+  #       msg: "RANGER_QUEUE_API_TOKEN must be set (pass as var or set in environment)"
+  #   cmds:
+  #     - |
+  #       echo "⚠️  DEPRECATED: This task is deprecated in favor of Flux GitOps deployment"
+  #       echo "Deploying ranger:{{.IMAGE_TAG}} to {{.CLUSTER_NAME}}"
+  #
+  #       # Ensure namespace exists before deploying
+  #       echo "Checking for forestrie-arbor namespace..."
+  #       if ! kubectl get namespace forestrie-arbor &>/dev/null; then
+  #         echo "Namespace forestrie-arbor not found, creating it..."
+  #         kubectl create namespace forestrie-arbor
+  #       else
+  #         echo "Namespace forestrie-arbor exists"
+  #       fi
+  #
+  #       # Create or update secrets
+  #       echo "Creating/updating secrets..."
+  #       kubectl create secret generic ranger-secrets \
+  #         --from-literal=queue-url="{{.RANGER_QUEUE_URL}}" \
+  #         --from-literal=queue-api-token="{{.RANGER_QUEUE_API_TOKEN}}" \
+  #         --namespace=forestrie-arbor \
+  #         --dry-run=client -o yaml | kubectl apply -f -
+  #
+  #       # Apply deployment with image tag substitution
+  #       echo "Applying deployment manifest..."
+  #       sed "s|IMAGE_TAG|{{.IMAGE_TAG}}|g" ./services/ranger/k8s/deployment.yaml | kubectl apply -f -
+  #
+  #       # Apply service
+  #       echo "Applying service manifest..."
+  #       kubectl apply -f ./services/ranger/k8s/service.yaml
+  #
+  #       # Wait for rollout
+  #       echo "Waiting for rollout to complete..."
+  #       kubectl rollout status deployment/ranger --namespace=forestrie-arbor
+  #
+  #       echo "Deployment complete"

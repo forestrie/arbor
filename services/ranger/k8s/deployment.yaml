@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ranger
+  namespace: forestrie-arbor
   labels:
     app: ranger
     component: queue-consumer
@@ -28,7 +29,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: ranger
-        image: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger:IMAGE_TAG
+        image: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
@@ -96,15 +97,3 @@ spec:
           capabilities:
             drop:
             - ALL
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ranger-config
-  labels:
-    app: ranger
-data:
-  log-level: "info"
-  poll-interval: "5s"
-  visibility-timeout: "30s"
-  shutdown-timeout: "30s"
