@@ -1,0 +1,15 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: shard-operator
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["yourgroup.io"]
+    resources: ["shardassignments", "shardassignments/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["*"] # for leader election
+

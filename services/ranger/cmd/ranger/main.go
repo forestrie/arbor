@@ -1,0 +1,124 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/forestrie/arbor/services/ranger"
+)
+
+// Note: the ci does the right thing with go-releaser automatically, as
+// configured in the repo's .goreleaser.yml file.
+// Also, task build:fast sets the ldflags correctly for the version, commit, and
+// build date so it is clear if a developer build is used.
+var (
+	version   string
+	commit    string
+	buildDate string
+)
+
+func main() {
+	// Load configuration from environment
+	cfg := ranger.LoadConfig()
+
+	// Setup structured logging
+	logLevel := slog.LevelInfo
+	switch cfg.LogLevel {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	}
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("starting ranger service",
+		"version", version,
+		"commit", commit,
+		"buildDate", buildDate,
+	)
+
+	// Validate configuration
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
+	// Create context that listens for termination signals
+	ctx, stop := signal.NotifyContext(context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+		syscall.SIGINT,
+	)
+	defer stop()
+
+	// Create HTTP client with persistent connections for queue operations
+	httpClient := ranger.NewHTTPClient(logger)
+
+	// Start health check server
+	healthMux := http.NewServeMux()
+	setupHealthChecks(healthMux)
+
+	healthServer := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: healthMux,
+	}
+
+	go func() {
+		slog.Info("starting health check server", "port", cfg.Port)
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("health server failed", "error", err)
+		}
+	}()
+
+	// Start queue consumer
+	go ranger.ConsumeQueue(ctx, cfg, httpClient, logger)
+
+	// Wait for termination signal
+	<-ctx.Done()
+	slog.Info("shutdown signal received")
+
+	// Create shutdown context with timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer shutdownCancel()
+
+	// Gracefully shutdown health server
+	if err := healthServer.Shutdown(shutdownCtx); err != nil {
+		slog.Error("health server shutdown failed", "error", err)
+	}
+
+	slog.Info("service stopped")
+}
+
+func setupHealthChecks(mux *http.ServeMux) {
+	// Kubernetes liveness probe
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	// Kubernetes readiness probe
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ready"))
+	})
+
+	// Version info
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{
+			"version":   version,
+			"commit":    commit,
+			"buildDate": buildDate,
+		})
+	})
+}

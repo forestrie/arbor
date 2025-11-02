@@ -1,0 +1,109 @@
+---
+version: "3"
+
+tasks:
+  set-secrets:
+    desc: Set GitHub Actions secrets from .secret.env.ranger
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - |
+        if [ ! -f .secret.env.ranger ]; then
+          echo "Error: .secret.env.ranger not found in repository root"
+          exit 1
+        fi
+
+        # Source the env file and validate required variables
+        set -a
+        source .secret.env.ranger
+        set +a
+
+        if [ -z "$QUEUE_URL" ]; then
+          echo "Error: QUEUE_URL must be set in .secret.env.ranger"
+          exit 1
+        fi
+
+        if [ -z "$QUEUE_API_TOKEN" ]; then
+          echo "Error: QUEUE_API_TOKEN must be set in .secret.env.ranger"
+          exit 1
+        fi
+
+        echo "Setting GitHub Actions secrets..."
+        gh secret set RANGER_QUEUE_URL --body "$QUEUE_URL"
+        gh secret set RANGER_QUEUE_API_TOKEN --body "$QUEUE_API_TOKEN"
+        echo "Secrets updated successfully"
+
+  build:
+    desc: Build ranger Docker image
+    dir: "{{.ROOT_DIR}}"
+    vars:
+      IMAGE_TAG:
+        sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
+      VERSION:
+        sh: echo "${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --abbrev-ref HEAD)}"
+      COMMIT:
+        sh: echo "${COMMIT:-$(git rev-parse HEAD)}"
+      BUILD_DATE:
+        sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
+    cmds:
+      - |
+        echo "Building ranger:{{.IMAGE_TAG}}"
+        echo "  VERSION={{.VERSION}}"
+        echo "  COMMIT={{.COMMIT}}"
+        echo "  BUILD_DATE={{.BUILD_DATE}}"
+        docker build \
+          --build-arg VERSION={{.VERSION}} \
+          --build-arg COMMIT={{.COMMIT}} \
+          --build-arg BUILD_DATE={{.BUILD_DATE}} \
+          -t {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}} \
+          ./services/ranger
+        echo "Build complete: {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}}"
+
+  push:
+    desc: Push ranger Docker image
+    dir: "{{.ROOT_DIR}}"
+    vars:
+      IMAGE_TAG:
+        sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
+    cmds:
+      - |
+        echo "Pushing ranger:{{.IMAGE_TAG}}"
+        docker push {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}}
+        echo "Push complete: {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}}"
+
+  deploy:
+    desc: Deploy ranger to GKE
+    dir: "{{.ROOT_DIR}}"
+    vars:
+      IMAGE_TAG:
+        sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
+      QUEUE_URL: "{{.QUEUE_URL}}"
+      QUEUE_API_TOKEN: "{{.QUEUE_API_TOKEN}}"
+    preconditions:
+      - sh: '[ -n "{{.QUEUE_URL}}" ]'
+        msg: "QUEUE_URL must be set (pass as var or set in environment)"
+      - sh: '[ -n "{{.QUEUE_API_TOKEN}}" ]'
+        msg: "QUEUE_API_TOKEN must be set (pass as var or set in environment)"
+    cmds:
+      - |
+        echo "Deploying ranger:{{.IMAGE_TAG}} to {{.CLUSTER_NAME}}"
+
+        # Create or update secrets
+        echo "Creating/updating secrets..."
+        kubectl create secret generic ranger-secrets \
+          --from-literal=queue-url="{{.QUEUE_URL}}" \
+          --from-literal=queue-api-token="{{.QUEUE_API_TOKEN}}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        # Apply deployment with image tag substitution
+        echo "Applying deployment manifest..."
+        sed "s|IMAGE_TAG|{{.IMAGE_TAG}}|g" ./services/ranger/k8s/deployment.yaml | kubectl apply -f -
+
+        # Apply service
+        echo "Applying service manifest..."
+        kubectl apply -f ./services/ranger/k8s/service.yaml
+
+        # Wait for rollout
+        echo "Waiting for rollout to complete..."
+        kubectl rollout status deployment/ranger
+
+        echo "Deployment complete"

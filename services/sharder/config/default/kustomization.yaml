@@ -1,0 +1,9 @@
+resources:
+  - ../crd/bases
+  - ../rbac/service_account.yaml
+  - ../rbac/role.yaml
+  - ../rbac/role_binding.yaml
+  - ../manager/manager.yaml
+images:
+  - name: ghcr.io/you/shard-operator
+    newTag: dev

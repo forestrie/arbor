@@ -1,0 +1,59 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "services/**"
+      - ".github/workflows/build-deploy.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: "projects/887038722151/locations/global/workloadIdentityPools/github-pool-20251026-2329/providers/github-provider"
+          service_account: "forest-dev-1-github-ci@forest-dev-1.iam.gserviceaccount.com"
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west2-docker.pkg.dev
+
+      - name: Build Docker image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: task ranger:build IMAGE_TAG=${IMAGE_TAG} VERSION=${VERSION} COMMIT=${COMMIT} BUILD_DATE=${BUILD_DATE}
+
+      - name: Push Docker image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: task ranger:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Authenticate to GKE cluster
+        run: task cluster-auth
+
+      - name: Deploy to GKE
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          QUEUE_URL: ${{ secrets.RANGER_QUEUE_URL }}
+          QUEUE_API_TOKEN: ${{ secrets.RANGER_QUEUE_API_TOKEN }}
+        run: task ranger:deploy IMAGE_TAG=${IMAGE_TAG} QUEUE_URL="${QUEUE_URL}" QUEUE_API_TOKEN="${QUEUE_API_TOKEN}"

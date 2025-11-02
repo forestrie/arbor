@@ -1,0 +1,63 @@
+---
+version: "3"
+
+vars:
+  IMAGE_URL: europe-west2-docker.pkg.dev/forest-dev-1/forestrie
+  CLUSTER_NAME: forest-dev-1
+  CLUSTER_REGION: europe-west2
+
+includes:
+  gotest:
+    taskfile: ../taskfiles/gotest.yml
+    # optional because the ../taskfiles dir is cloned via bootstrap below
+    optional: true
+    dir: .
+  azurite:
+    taskfile: ../taskfiles/azurite.yml
+    # optional because the ../taskfiles dir is cloned via bootstrap below
+    optional: true
+    dir: .
+  ranger:
+    taskfile: taskfiles/service-ranger.yml
+    dir: .
+
+tasks:
+  registry-auth:
+    desc: Configure Docker authentication for Artifact Registry
+    cmds:
+      - gcloud auth configure-docker europe-west2-docker.pkg.dev
+
+  cluster-auth:
+    desc: Authenticate to GKE cluster
+    cmds:
+      - gcloud container clusters get-credentials {{.CLUSTER_NAME}} --region={{.CLUSTER_REGION}}
+
+  gcp-auth:
+    desc: Authenticate to GCP (both Artifact Registry and GKE)
+    cmds:
+      - task: registry-auth
+      - task: cluster-auth
+
+  bootstrap:
+    desc: bootstrap the development environment
+    cmds:
+      - |
+        GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
+        sh -c "$GIT_BOOTSTRAP_SH" - clone .
+
+  test:
+    desc: run all the tests
+    cmds:
+      - task: test:unit
+      - task: test:integration
+
+  test:unit:
+    desc: run the unit tests
+    cmds:
+      - task: gotest:unit
+
+  test:integration:
+    cmds:
+      - task: azurite:preflight
+      - task: gotest:integration
+      - task: azurite:stop
