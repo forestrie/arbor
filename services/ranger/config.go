@@ -27,9 +27,7 @@ type Config struct {
 	R2PublicURL  string
 
 	// Deployment configuration (not from messages)
-	CanopyID        string
-	ForestProjectID string
-	TrustCanopy     bool // If true, verify hash by reading object. If false, trust path hash.
+	TrustCanopy bool // If true, verify hash by reading object. If false, trust path hash.
 }
 
 // LoadConfig loads configuration from environment variables with sensible defaults
@@ -76,15 +74,13 @@ func LoadConfig() Config {
 		Port:              getEnvOrDefault("PORT", "9090"),
 		LogLevel:          getEnvOrDefault("LOG_LEVEL", "info"),
 		ShutdownTimeout:   getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:          os.Getenv("QUEUE_URL"),
-		QueueAPIToken:     os.Getenv("QUEUE_API_TOKEN"),
+		QueueURL:          os.Getenv("RANGER_QUEUE_URL"),
+		QueueAPIToken:     os.Getenv("RANGER_QUEUE_API_TOKEN"),
 		PollInterval:      getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout: getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		R2BucketName:      os.Getenv("R2_BUCKET_NAME"),
 		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
 		R2PublicURL:       r2PublicURL,
-		CanopyID:          os.Getenv("CANOPY_ID"),
-		ForestProjectID:   os.Getenv("FOREST_PROJECT_ID"),
 		TrustCanopy:       trustCanopy,
 	}
 }
@@ -92,10 +88,10 @@ func LoadConfig() Config {
 // Validate checks that all required configuration is present
 func (c Config) Validate() error {
 	if c.QueueURL == "" {
-		return fmt.Errorf("QUEUE_URL is required")
+		return fmt.Errorf("RANGER_QUEUE_URL is required")
 	}
 	if c.QueueAPIToken == "" {
-		return fmt.Errorf("QUEUE_API_TOKEN is required")
+		return fmt.Errorf("RANGER_QUEUE_API_TOKEN is required")
 	}
 	return nil
 }
