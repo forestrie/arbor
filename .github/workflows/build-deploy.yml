@@ -50,12 +50,12 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: task ranger:push IMAGE_TAG=${IMAGE_TAG}
 
-      - name: Authenticate to GKE cluster
-        run: task cluster-auth
+      # - name: Authenticate to GKE cluster
+      #   run: task cluster-auth
 
-      - name: Deploy to GKE
-        env:
-          IMAGE_TAG: ${{ github.sha }}
-          RANGER_QUEUE_URL: ${{ secrets.RANGER_QUEUE_URL }}
-          RANGER_QUEUE_API_TOKEN: ${{ secrets.RANGER_QUEUE_API_TOKEN }}
-        run: task ranger:deploy IMAGE_TAG=${IMAGE_TAG} RANGER_QUEUE_URL="${RANGER_QUEUE_URL}" RANGER_QUEUE_API_TOKEN="${RANGER_QUEUE_API_TOKEN}"
+      # - name: Deploy to GKE
+      #   env:
+      #     IMAGE_TAG: ${{ github.sha }}
+      #     RANGER_QUEUE_URL: ${{ secrets.RANGER_QUEUE_URL }}
+      #     RANGER_QUEUE_API_TOKEN: ${{ secrets.RANGER_QUEUE_API_TOKEN }}
+      #   run: task ranger:deploy IMAGE_TAG=${IMAGE_TAG} RANGER_QUEUE_URL="${RANGER_QUEUE_URL}" RANGER_QUEUE_API_TOKEN="${RANGER_QUEUE_API_TOKEN}"
