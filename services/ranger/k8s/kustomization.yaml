@@ -9,7 +9,7 @@ commonLabels:
   component: queue-consumer
 images:
   - name: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
-    newTag: main-888b071-81 # {"$imagepolicy": "flux-system:ranger:tag"}
+    newTag: main-524ae84-82 # {"$imagepolicy": "flux-system:ranger:tag"}
 configMapGenerator:
   - name: ranger-config
     literals:
