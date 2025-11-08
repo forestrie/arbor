@@ -42,20 +42,6 @@ Ranger is a 12-factor Go microservice that consumes messages from Cloudflare Que
 - **Readiness**: `GET /readyz` (fails if service cannot process messages)
 - **Version**: `GET /version` (returns version metadata)
 
-### Secrets
-
-Ranger requires a Kubernetes secret `ranger-secrets` in namespace `forestrie-arbor`:
-- `queue-url`: Cloudflare Queue endpoint
-- `queue-api-token`: Bearer token
-
-**Create secret**:
-```bash
-kubectl create secret generic ranger-secrets \
-  --from-literal=queue-url="https://api.cloudflare.com/client/v4/accounts/{id}/queues/{name}" \
-  --from-literal=queue-api-token="your-token" \
-  --namespace=forestrie-arbor
-```
-
 ### ConfigMap
 
 Non-sensitive configuration is stored in `ranger-config` ConfigMap:
@@ -66,38 +52,16 @@ Non-sensitive configuration is stored in `ranger-config` ConfigMap:
 
 ## Deployment
 
-### First Deployment
-
-1. Ensure namespace exists:
-   ```bash
-   kubectl create namespace forestrie-arbor
-   ```
-
-2. Create secrets (see above)
-
-3. Apply manifests:
-   ```bash
-   kubectl apply -f services/ranger/k8s/
-   ```
-
-4. Verify deployment:
-   ```bash
-   kubectl get pods -n forestrie-arbor -l app=ranger
-   kubectl logs -n forestrie-arbor -l app=ranger
-   ```
-
 ### Automated Deployment
 
-GitHub Actions workflow automatically deploys on push to `main` when `services/ranger/**` changes. See `DEVELOPMENT.md` for CI/CD details.
+All production deployments are handled through GitHub Actions + Flux:
 
-### Manual Deployment
+1. Push to `main` triggers the build workflow.
+2. The workflow builds and pushes `main-<short-sha>-<run>` images.
+3. Flux ImageAutomation updates `services/ranger/k8s/kustomization.yaml`.
+4. Flux applies the manifest via the `forestrie-arbor` Kustomization.
 
-```bash
-task gcp-auth
-task ranger:build
-task ranger:push IMAGE_TAG=dev
-task ranger:deploy IMAGE_TAG=dev RANGER_QUEUE_URL="..." RANGER_QUEUE_API_TOKEN="..."
-```
+Refer to `ops-first-deploy.md` for the one-time secret bootstrap (`ranger-secrets`).
 
 ## Monitoring
 

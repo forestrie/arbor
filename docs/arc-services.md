@@ -118,11 +118,11 @@ Sharder implements a Kubernetes operator using controller-runtime:
 
 ### CI/CD Pipeline
 
-- GitHub Actions workflow
-- Workload Identity Federation for GCP authentication
-- Docker images tagged with git SHA
-- Automatic deployment on `main` branch changes
-- Taskfile-based build for consistency
+- GitHub Actions workflow builds and pushes images when `services/**` changes
+- Images tagged `main-<short-sha>-<run>` for sortable, traceable versioning
+- Flux ImageRepository/ImagePolicy/ImageUpdateAutomation propagate new tags into manifests
+- Kustomize manifests stay co-located with service code; no manual `kubectl apply`
+- Taskfile commands mirror CI steps for local builds or debugging
 
 ## Design Decisions
 

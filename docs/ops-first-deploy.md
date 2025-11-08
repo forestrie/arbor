@@ -30,13 +30,12 @@ gh secret set RANGER_QUEUE_API_TOKEN --body "your-api-token-here"
 
 ## Automated Deployment
 
-Once secrets are configured, deployment is automated:
+With secrets in place, deployments are fully automated via GitHub Actions and Flux:
 
-1. Push changes to `main` branch affecting `services/**` or `.github/workflows/build-deploy.yml`
-2. GitHub Actions workflow triggers automatically
-3. Service is built, pushed to Artifact Registry, and deployed to GKE
-4. Kubernetes secrets are created/updated from GitHub Actions secrets
-5. Deployment rollout is monitored
+1. Push changes to `main` that impact `services/**` or `.github/workflows/build-deploy.yml`
+2. GitHub Actions builds `ranger` and tags the image as `main-<short-sha>-<run>`
+3. Flux ImageRepository detects the new tag, ImagePolicy selects it, and ImageUpdateAutomation commits the tag to `services/ranger/k8s/kustomization.yaml`
+4. Flux Kustomization reconciles the updated manifest into the cluster
 
 ## Verification
 
@@ -64,12 +63,18 @@ curl http://localhost:9090/version
 - **Artifact Registry**: europe-west2-docker.pkg.dev/forest-dev-1/forestrie
 - **Namespace**: forestrie-arbor
 
-## Service Account Permissions
+## Kubernetes Secrets
 
-The GitHub Actions service account requires:
-- `roles/container.developer` - Deploy to GKE
-- `roles/artifactregistry.writer` - Push Docker images
-- Workload Identity User binding to Kubernetes service account
+Flux does not manage sensitive data; create the `ranger-secrets` secret once:
+
+```bash
+kubectl create secret generic ranger-secrets \
+  --from-literal=queue-url="https://api.cloudflare.com/client/v4/accounts/{id}/queues/{name}" \
+  --from-literal=queue-api-token="your-api-token-here" \
+  --namespace=forestrie-arbor
+```
+
+Update the secret manually if credentials change.
 
 ## Troubleshooting
 
@@ -83,22 +88,18 @@ Verify Workload Identity Federation is correctly configured and service account 
 
 ### Pods Fail to Start with "ImagePullBackOff"
 
-Verify service account has permission to pull from Artifact Registry and image was successfully pushed.
+- Confirm the GitHub Actions workflow completed successfully
+- Check Flux image automation resources:
+  ```bash
+  flux get image policy ranger -n flux-system
+  flux get image update arbor -n flux-system
+  ```
+- Verify the artifact exists in Artifact Registry
 
 ### Pods Fail to Start with Configuration Error
 
-Check pod logs:
-```bash
-kubectl logs -n forestrie-arbor -l app=ranger
-```
-
-Common issues include missing or invalid secret values.
-
-## Adding Additional Services
-
-For new services:
-
-1. Add required secrets to GitHub Actions following pattern `{SERVICE_NAME}_{SECRET_KEY}`
-2. Update `.github/workflows/build-deploy.yml` to include the new service
-3. Ensure Kubernetes manifests exist in `services/{service_name}/k8s/`
-4. Document required secrets
+- Ensure `ranger-secrets` is present and contains valid values
+- Check application logs:
+  ```bash
+  kubectl logs -n forestrie-arbor -l app=ranger
+  ```
