@@ -136,8 +136,9 @@ Arbor services use **Flux GitOps** for automated deployment, managed by the fore
 
 **Required Kubernetes Secrets** (managed separately):
 - `ranger-secrets` in `forestrie-arbor` namespace:
-  - `queue-url`: Cloudflare Queue endpoint
   - `queue-api-token`: Bearer token for queue access
+
+Non-secret configuration, including the Cloudflare queue URL, lives in the `ranger-config` ConfigMap generated from `services/ranger/k8s/kustomization.yaml`.
 
 **See**: [ADR-001: Flux GitOps Deployment](docs/adr-001-flux-gitops-deployment.md) for detailed rationale and architecture.
 

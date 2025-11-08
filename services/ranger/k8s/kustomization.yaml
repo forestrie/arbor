@@ -17,3 +17,4 @@ configMapGenerator:
       - poll-interval=5s
       - visibility-timeout=30s
       - shutdown-timeout=30s
+      - queue-url=https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/737f83759cf84ef2abfe3fe56b816449

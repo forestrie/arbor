@@ -10,8 +10,8 @@ Ranger is a 12-factor Go microservice that consumes messages from Cloudflare Que
 
 ### Required Environment Variables
 
-- `RANGER_QUEUE_URL`: Cloudflare Queue HTTP endpoint URL
-  - Format: `https://api.cloudflare.com/client/v4/accounts/{account_id}/queues/{queue_name}`
+- `RANGER_QUEUE_URL`: Cloudflare Queue HTTP endpoint URL (provided via ConfigMap)
+  - Current value: `https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/737f83759cf84ef2abfe3fe56b816449`
 - `RANGER_QUEUE_API_TOKEN`: Bearer token for Cloudflare Queue authentication
 
 ### Optional Environment Variables
@@ -49,6 +49,7 @@ Non-sensitive configuration is stored in `ranger-config` ConfigMap:
 - `poll-interval`: Poll interval duration
 - `visibility-timeout`: Message visibility timeout
 - `shutdown-timeout`: Shutdown timeout duration
+- `queue-url`: Cloudflare Queue HTTP endpoint URL (see value above)
 
 ## Deployment
 

@@ -47,7 +47,6 @@ Secrets are managed separately (not in Git). Create the secret in the cluster:
 
 ```bash
 kubectl create secret generic ranger-secrets \
-  --from-literal=queue-url="https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/queues/YOUR_QUEUE_NAME" \
   --from-literal=queue-api-token="YOUR_QUEUE_API_TOKEN" \
   --namespace=forestrie-arbor \
   --dry-run=client -o yaml | kubectl apply -f -
@@ -57,14 +56,15 @@ kubectl create secret generic ranger-secrets \
 
 ### ConfigMap (Managed by Kustomize)
 
-Configuration is managed via `kustomization.yaml` configMapGenerator:
+Non-secret configuration (including the Cloudflare queue URL) is committed to the repository and rendered via the `configMapGenerator` in `kustomization.yaml`. The generated ConfigMap (`ranger-config`) provides:
 
 - `log-level`: debug, info, warn, error (default: info)
 - `poll-interval`: How often to poll the queue (default: 5s)
 - `visibility-timeout`: Message visibility timeout (default: 30s)
 - `shutdown-timeout`: Graceful shutdown timeout (default: 30s)
+- `queue-url`: `https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/737f83759cf84ef2abfe3fe56b816449`
 
-To change configuration, edit `kustomization.yaml` and commit. Flux will reconcile the changes.
+Flux reconciles the ConfigMap directly from Git, keeping the desired state in version control.
 
 ## Deployment Flow
 

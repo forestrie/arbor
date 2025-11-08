@@ -1,7 +1,10 @@
 package ranger
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -70,7 +73,7 @@ func LoadConfig() Config {
 		}
 	}
 
-	return Config{
+	cfg := Config{
 		Port:              getEnvOrDefault("PORT", "9090"),
 		LogLevel:          getEnvOrDefault("LOG_LEVEL", "info"),
 		ShutdownTimeout:   getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
@@ -83,6 +86,11 @@ func LoadConfig() Config {
 		R2PublicURL:       r2PublicURL,
 		TrustCanopy:       trustCanopy,
 	}
+
+	logConfigValue("RANGER_QUEUE_URL", cfg.QueueURL)
+	logSecretDigest("RANGER_QUEUE_API_TOKEN", cfg.QueueAPIToken)
+
+	return cfg
 }
 
 // Validate checks that all required configuration is present
@@ -94,4 +102,25 @@ func (c Config) Validate() error {
 		return fmt.Errorf("RANGER_QUEUE_API_TOKEN is required")
 	}
 	return nil
+}
+
+func logConfigValue(name, value string) {
+	if value == "" {
+		slog.Info("config value", "name", name, "value", "", "empty", true)
+		return
+	}
+	slog.Info("config value", "name", name, "value", value, "empty", false)
+}
+
+func logSecretDigest(name, value string) {
+	if value == "" {
+		slog.Info("config secret empty", "name", name, "empty", true)
+		return
+	}
+	sum := sha256.Sum256([]byte(value))
+	slog.Info("config secret sha256",
+		"name", name,
+		"sha256", hex.EncodeToString(sum[:]),
+		"empty", false,
+	)
 }

@@ -74,12 +74,15 @@ The `ranger-secrets` secret is **automatically created/updated** by the GitHub A
 
 ```bash
 kubectl create secret generic ranger-secrets \
-  --from-literal=queue-url="https://api.cloudflare.com/client/v4/accounts/{id}/queues/{name}" \
   --from-literal=queue-api-token="your-api-token-here" \
   --namespace=forestrie-arbor
 ```
 
 To update credentials: Update the GitHub Actions secrets, then push a change to trigger the workflow.
+
+## ConfigMap
+
+Non-secret configuration lives in `services/ranger/k8s/kustomization.yaml` via a `configMapGenerator`. Update the `queue-url` literal there if the Cloudflare Queue endpoint changes, then commit and push so Flux reconciles the new value.
 
 ## Troubleshooting
 

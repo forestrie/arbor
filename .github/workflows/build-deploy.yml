@@ -47,11 +47,10 @@ jobs:
 
       - name: Create/Update ranger secrets
         env:
-          RANGER_QUEUE_URL: ${{ secrets.RANGER_QUEUE_URL }}
           RANGER_QUEUE_API_TOKEN: ${{ secrets.RANGER_QUEUE_API_TOKEN }}
         run: |
+          set -euo pipefail
           kubectl create secret generic ranger-secrets \
-            --from-literal=queue-url="${RANGER_QUEUE_URL}" \
             --from-literal=queue-api-token="${RANGER_QUEUE_API_TOKEN}" \
             --namespace=forestrie-arbor \
             --dry-run=client -o yaml | kubectl apply -f -

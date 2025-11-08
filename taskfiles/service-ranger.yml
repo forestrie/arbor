@@ -90,4 +90,4 @@ tasks:
   #
   # For emergency manual deployment, use:
   #   kubectl apply -k ./services/ranger/k8s
-  #   kubectl create secret generic ranger-secrets --from-literal=queue-url="..." --from-literal=queue-api-token="..." -n forestrie-arbor
+  #   kubectl create secret generic ranger-secrets --from-literal=queue-api-token="..." -n forestrie-arbor
