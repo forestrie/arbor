@@ -63,6 +63,11 @@ spec:
             configMapKeyRef:
               name: ranger-config
               key: queue-url
+        - name: RANGER_QUEUE_BATCH_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: ranger-config
+              key: queue-batch-size
         - name: RANGER_QUEUE_API_TOKEN
           valueFrom:
             secretKeyRef:

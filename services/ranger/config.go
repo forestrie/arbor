@@ -21,6 +21,7 @@ type Config struct {
 	// Cloudflare Queue configuration
 	QueueURL          string
 	QueueAPIToken     string
+	QueueBatchSize    int
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 
@@ -46,6 +47,15 @@ func LoadConfig() Config {
 		if val := os.Getenv(key); val != "" {
 			if d, err := time.ParseDuration(val); err == nil {
 				return d
+			}
+		}
+		return defaultVal
+	}
+
+	getInt := func(key string, defaultVal int) int {
+		if val := os.Getenv(key); val != "" {
+			if parsed, err := strconv.Atoi(val); err == nil {
+				return parsed
 			}
 		}
 		return defaultVal
@@ -79,6 +89,7 @@ func LoadConfig() Config {
 		ShutdownTimeout:   getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
 		QueueURL:          os.Getenv("RANGER_QUEUE_URL"),
 		QueueAPIToken:     os.Getenv("RANGER_QUEUE_API_TOKEN"),
+		QueueBatchSize:    getInt("RANGER_QUEUE_BATCH_SIZE", 1),
 		PollInterval:      getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout: getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		R2BucketName:      os.Getenv("R2_BUCKET_NAME"),
@@ -89,6 +100,9 @@ func LoadConfig() Config {
 
 	logConfigValue("RANGER_QUEUE_URL", cfg.QueueURL)
 	logSecretDigest("RANGER_QUEUE_API_TOKEN", cfg.QueueAPIToken)
+	logConfigInt("RANGER_QUEUE_BATCH_SIZE", cfg.QueueBatchSize)
+	logConfigDuration("POLL_INTERVAL", cfg.PollInterval)
+	logConfigDuration("VISIBILITY_TIMEOUT", cfg.VisibilityTimeout)
 
 	return cfg
 }
@@ -101,6 +115,12 @@ func (c Config) Validate() error {
 	if c.QueueAPIToken == "" {
 		return fmt.Errorf("RANGER_QUEUE_API_TOKEN is required")
 	}
+	if c.QueueBatchSize <= 0 {
+		return fmt.Errorf("RANGER_QUEUE_BATCH_SIZE must be greater than zero")
+	}
+	if c.QueueBatchSize > 32 {
+		return fmt.Errorf("RANGER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
+	}
 	return nil
 }
 
@@ -110,6 +130,14 @@ func logConfigValue(name, value string) {
 		return
 	}
 	slog.Info("config value", "name", name, "value", value, "empty", false)
+}
+
+func logConfigInt(name string, value int) {
+	slog.Info("config value", "name", name, "value", value)
+}
+
+func logConfigDuration(name string, value time.Duration) {
+	slog.Info("config value", "name", name, "value", value.String())
 }
 
 func logSecretDigest(name, value string) {

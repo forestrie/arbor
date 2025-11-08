@@ -54,6 +54,26 @@ kubectl create secret generic ranger-secrets \
 
 **Note**: Secrets are not managed by GitOps for security. Future enhancement: Use SOPS or Sealed Secrets.
 
+#### Cloudflare API Token Requirements
+
+- Token must be scoped to the Cloudflare account that owns the ranger queue.
+- Permissions required: **Account → Cloudflare Queues → Edit** (provides both `queues_read` and `queues_write` scopes needed for pull + ack).
+- Recommended name: `ranger-queue-consumer`.
+- Keep the token secret – store it in the `ranger-secrets` Secret only.
+
+##### Create Token Steps
+
+1. Log in to the [Cloudflare dashboard](https://dash.cloudflare.com).
+2. Go to **My Profile → API Tokens → Create Token → Create Custom Token**.
+3. Set:
+   - **Name**: `ranger-queue-consumer` (or similar).
+   - **Permissions**: `Account → Cloudflare Queues → Edit`.
+   - **Account resources**: the forestrie account (all accounts also works if needed).
+4. Create the token and copy it immediately (Cloudflare shows it once).
+5. Update the `ranger-secrets` secret: `queue-api-token=<token>`.
+
+If ranger logs show `Authentication error` on pull, verify the token still has edit permission and has not been revoked.
+
 ### ConfigMap (Managed by Kustomize)
 
 Non-secret configuration (including the Cloudflare queue URL) is committed to the repository and rendered via the `configMapGenerator` in `kustomization.yaml`. The generated ConfigMap (`ranger-config`) provides:
@@ -63,6 +83,7 @@ Non-secret configuration (including the Cloudflare queue URL) is committed to th
 - `visibility-timeout`: Message visibility timeout (default: 30s)
 - `shutdown-timeout`: Graceful shutdown timeout (default: 30s)
 - `queue-url`: `https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/737f83759cf84ef2abfe3fe56b816449`
+- `queue-batch-size`: Number of messages ranger pulls per request (default: 1)
 
 Flux reconciles the ConfigMap directly from Git, keeping the desired state in version control.
 

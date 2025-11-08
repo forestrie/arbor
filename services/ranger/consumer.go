@@ -1,6 +1,7 @@
 package ranger
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -81,13 +82,24 @@ func ConsumeQueue(ctx context.Context, cfg Config, httpClient *HTTPClient, logge
 
 // PullAndProcessMessages pulls messages from the queue and processes them
 func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPClient, logger *slog.Logger) error {
-	// Build pull request URL with visibility timeout
-	pullURL := fmt.Sprintf("%s/pull?visibility_timeout_ms=%d",
-		cfg.QueueURL,
-		int(cfg.VisibilityTimeout.Milliseconds()),
-	)
+	baseQueueURL := strings.TrimSuffix(cfg.QueueURL, "/")
+	// Build pull request URL
+	pullURL := fmt.Sprintf("%s/messages/pull", baseQueueURL)
 
-	req, err := http.NewRequest("POST", pullURL, nil)
+	payload := struct {
+		BatchSize           int `json:"batch_size"`
+		VisibilityTimeoutMs int `json:"visibility_timeout_ms,omitempty"`
+	}{
+		BatchSize:           cfg.QueueBatchSize,
+		VisibilityTimeoutMs: int(cfg.VisibilityTimeout.Milliseconds()),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal pull payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", pullURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -106,7 +118,11 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("pull request failed: status=%d, body=%s", resp.StatusCode, string(body))
+		logger.Warn("queue pull failed",
+			"status", resp.StatusCode,
+			"body", string(body),
+		)
+		return fmt.Errorf("pull request failed: status=%d", resp.StatusCode)
 	}
 
 	var queueResp CloudflareQueueResponse
@@ -291,14 +307,27 @@ func verifyObjectHash(ctx context.Context, cfg Config, parsed *ParsedNotificatio
 
 // AcknowledgeMessage acknowledges a message to remove it from the queue
 func AcknowledgeMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, messageID string) error {
-	ackURL := fmt.Sprintf("%s/ack/%s", cfg.QueueURL, messageID)
+	baseQueueURL := strings.TrimSuffix(cfg.QueueURL, "/")
+	ackURL := fmt.Sprintf("%s/messages/ack", baseQueueURL)
 
-	req, err := http.NewRequest("POST", ackURL, nil)
+	payload := struct {
+		AckIDs []string `json:"ack_ids"`
+	}{
+		AckIDs: []string{messageID},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal ack payload: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", ackURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create ack request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+cfg.QueueAPIToken)
+	req.Header.Set("Content-Type", "application/json")
 
 	// Use HTTPClient.Do which handles connection pooling and errors
 	// Note: resp.Body.Close() returns the connection to the pool for reuse (if keep-alive)
