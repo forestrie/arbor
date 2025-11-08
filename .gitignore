@@ -18,5 +18,4 @@ vendor/
 .DS_Store
 Thumbs.db
 *.exe
-ranger
 .env.bootstrap

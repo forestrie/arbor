@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: forestrie-arbor
+
+resources:
+  - deployment.yaml
+  - service.yaml
+
+commonLabels:
+  app: ranger
+  component: queue-consumer
+
+images:
+  - name: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
+    newTag: 09d68533e552f1cfd1901c6c565c02d596a39927 # {"$imagepolicy": "flux-system:ranger"}
+
+configMapGenerator:
+  - name: ranger-config
+    literals:
+      - log-level=info
+      - poll-interval=5s
+      - visibility-timeout=30s
+      - shutdown-timeout=30s
