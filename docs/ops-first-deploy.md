@@ -30,12 +30,13 @@ gh secret set RANGER_QUEUE_API_TOKEN --body "your-api-token-here"
 
 ## Automated Deployment
 
-With secrets in place, deployments are fully automated via GitHub Actions and Flux:
+With GitHub Actions secrets configured, deployments are fully automated:
 
 1. Push changes to `main` that impact `services/**` or `.github/workflows/build-deploy.yml`
 2. GitHub Actions builds `ranger` and tags the image as `main-<short-sha>-<run>`
-3. Flux ImageRepository detects the new tag, ImagePolicy selects it, and ImageUpdateAutomation commits the tag to `services/ranger/k8s/kustomization.yaml`
-4. Flux Kustomization reconciles the updated manifest into the cluster
+3. GitHub Actions creates/updates the `ranger-secrets` Kubernetes secret from GitHub Actions secrets
+4. Flux ImageRepository detects the new tag, ImagePolicy selects it, and ImageUpdateAutomation commits the tag to `services/ranger/k8s/kustomization.yaml`
+5. Flux Kustomization reconciles the updated manifest into the cluster
 
 ## Verification
 
@@ -65,7 +66,11 @@ curl http://localhost:9090/version
 
 ## Kubernetes Secrets
 
-Flux does not manage sensitive data; create the `ranger-secrets` secret once:
+The `ranger-secrets` secret is **automatically created/updated** by the GitHub Actions workflow on every ranger deployment.
+
+**Manual creation only needed for**:
+- Initial setup before first workflow run
+- Local testing outside of CI/CD
 
 ```bash
 kubectl create secret generic ranger-secrets \
@@ -74,7 +79,7 @@ kubectl create secret generic ranger-secrets \
   --namespace=forestrie-arbor
 ```
 
-Update the secret manually if credentials change.
+To update credentials: Update the GitHub Actions secrets, then push a change to trigger the workflow.
 
 ## Troubleshooting
 
