@@ -47,7 +47,7 @@ We will implement Flux GitOps deployment for Arbor services with the following c
 
 ### Neutral
 
-- **Image tagging strategy**: Uses `main-{sha}-{timestamp}` format for sortable, traceable tags
+- **Image tagging strategy**: Uses `main-{short-sha}-{run}` format for sortable, traceable tags
 - **Manual secrets**: Secrets still managed manually via kubectl (future: SOPS/Sealed Secrets)
 - **Service code coupling**: Deployment manifests tied to service repository (intentional design choice)
 
@@ -62,20 +62,20 @@ We will implement Flux GitOps deployment for Arbor services with the following c
 
 ### Image Tagging
 
-Images are tagged with format: `main-{short-sha}-{timestamp}`
+Images are tagged with format: `main-{short-sha}-{run}`
 
-- Sortable: Timestamp ensures chronological ordering
-- Traceable: SHA links to commit
-- Unique: Timestamp prevents collisions
-- Compatible with ImageUpdateAutomation alphabetical policy
+- Sortable: GitHub run number increases monotonically for each workflow execution
+- Traceable: Short SHA links tags back to the exact commit
+- Unique: Combination of SHA and run number prevents collisions within a branch
+- Compatible: Flux ImagePolicy extracts the numeric run and orders versions using a numerical policy
 
 ### Workflow
 
 1. Developer pushes code to arbor `main` branch
-2. GitHub Actions builds Docker image with tag `main-{sha}-{timestamp}`
+2. GitHub Actions builds Docker image with tag `main-{short-sha}-{run}`
 3. Image pushed to Artifact Registry
 4. Flux ImageRepository detects new image
-5. Flux ImagePolicy selects latest image (alphabetical sort)
+5. Flux ImagePolicy selects latest image (numerical sort on run number)
 6. Flux ImageUpdateAutomation updates `kustomization.yaml` in arbor repo
 7. Flux Kustomization reconciles deployment with new image tag
 8. Deployment rolls out automatically
