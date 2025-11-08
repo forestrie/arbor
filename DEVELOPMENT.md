@@ -129,6 +129,7 @@ Arbor services use **Flux GitOps** for automated deployment, managed by the fore
 - Uses Workload Identity Federation for GCP authentication (no static keys)
 - Builds images with build metadata (version, commit, build date)
 - Tags images with format: `main-{short-sha}-{timestamp}` for traceability
+- Skips runs for Flux ImageUpdateAutomation commits (actor `fluxcdbot`, message `Update from image update automation`) to avoid build loops
 
 **Required GitHub Variables**:
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`: Workload Identity provider (set by forest-1 bootstrap)
