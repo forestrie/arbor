@@ -37,7 +37,14 @@ tasks:
     dir: "{{.ROOT_DIR}}"
     vars:
       IMAGE_TAG:
-        sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
+        sh: |
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            echo "${IMAGE_TAG}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TS=$(date -u +%s)
+            echo "main-${SHORT_SHA}-${TS}"
+          fi
       VERSION:
         sh: echo "${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --abbrev-ref HEAD)}"
       COMMIT:
@@ -63,7 +70,14 @@ tasks:
     dir: "{{.ROOT_DIR}}"
     vars:
       IMAGE_TAG:
-        sh: echo "${IMAGE_TAG:-$(git rev-parse HEAD)}"
+        sh: |
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            echo "${IMAGE_TAG}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TS=$(date -u +%s)
+            echo "main-${SHORT_SHA}-${TS}"
+          fi
     cmds:
       - |
         echo "Pushing ranger:{{.IMAGE_TAG}}"
