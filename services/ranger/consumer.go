@@ -371,9 +371,7 @@ func AcknowledgeMessage(ctx context.Context, cfg Config, httpClient *HTTPClient,
 		},
 		Retries: []struct {
 			LeaseID string `json:"lease_id"`
-		}{
-			{},
-		},
+		}{},
 	}
 
 	body, err := json.Marshal(payload)
