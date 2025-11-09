@@ -34,8 +34,49 @@ type Config struct {
 	TrustCanopy bool // If true, verify hash by reading object. If false, trust path hash.
 }
 
-// LoadConfig loads configuration from environment variables with sensible defaults
-func LoadConfig() Config {
+var levelAliases = map[string]slog.Level{
+	"debug":   slog.LevelDebug,
+	"info":    slog.LevelInfo,
+	"warn":    slog.LevelWarn,
+	"warning": slog.LevelWarn,
+	"error":   slog.LevelError,
+}
+
+// ParseLogLevel converts a string level to an slog.Level. Returns the parsed level and
+// whether the input matched a named level (non-numeric).
+func ParseLogLevel(raw string) (slog.Level, bool) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return slog.LevelInfo, true
+	}
+
+	if lvl, ok := levelAliases[trimmed]; ok {
+		return lvl, true
+	}
+
+	if numeric, err := strconv.Atoi(trimmed); err == nil {
+		return slog.Level(numeric), true
+	}
+
+	return slog.LevelInfo, false
+}
+
+// NewLogger builds a JSON slog.Logger configured with the provided level via slog.LevelVar.
+func NewLogger(level slog.Level) (*slog.Logger, *slog.LevelVar) {
+	var levelVar slog.LevelVar
+	levelVar.Set(level)
+
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: &levelVar,
+	})
+
+	return slog.New(handler), &levelVar
+}
+
+// LoadConfig loads configuration from environment variables with sensible defaults.
+// It also returns a configured slog.Logger and the underlying slog.LevelVar so callers
+// can adjust log levels at runtime if needed.
+func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 	getEnvOrDefault := func(key, defaultVal string) string {
 		if val := os.Getenv(key); val != "" {
 			return val
@@ -98,13 +139,22 @@ func LoadConfig() Config {
 		TrustCanopy:       trustCanopy,
 	}
 
-	logConfigValue("RANGER_QUEUE_URL", cfg.QueueURL)
-	logSecretDigest("RANGER_QUEUE_API_TOKEN", cfg.QueueAPIToken)
-	logConfigInt("RANGER_QUEUE_BATCH_SIZE", cfg.QueueBatchSize)
-	logConfigDuration("POLL_INTERVAL", cfg.PollInterval)
-	logConfigDuration("VISIBILITY_TIMEOUT", cfg.VisibilityTimeout)
+	level, recognized := ParseLogLevel(cfg.LogLevel)
+	logger, levelVar := NewLogger(level)
 
-	return cfg
+	if !recognized {
+		logger.Warn("unrecognized log level value; defaulting to derived level", "input", cfg.LogLevel, "level", level.String())
+	}
+
+	logger.Debug("resolved log level", "input", cfg.LogLevel, "level", level.String())
+
+	logConfigValue(logger, "RANGER_QUEUE_URL", cfg.QueueURL)
+	logSecretDigest(logger, "RANGER_QUEUE_API_TOKEN", cfg.QueueAPIToken)
+	logConfigValue(logger, "RANGER_QUEUE_BATCH_SIZE", cfg.QueueBatchSize)
+	logConfigValue(logger, "POLL_INTERVAL", cfg.PollInterval)
+	logConfigValue(logger, "VISIBILITY_TIMEOUT", cfg.VisibilityTimeout)
+
+	return cfg, logger, levelVar
 }
 
 // Validate checks that all required configuration is present
@@ -124,31 +174,37 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func logConfigValue(name, value string) {
+func logSecretDigest(logger *slog.Logger, name, value string) {
+	var digest string
 	if value == "" {
-		slog.Info("config value", "name", name, "value", "", "empty", true)
-		return
+		digest = ""
+	} else {
+		sum := sha256.Sum256([]byte(value))
+		digest = hex.EncodeToString(sum[:])
 	}
-	slog.Info("config value", "name", name, "value", value, "empty", false)
+	logConfigValue(logger, name, digest)
 }
 
-func logConfigInt(name string, value int) {
-	slog.Info("config value", "name", name, "value", value)
-}
+func logConfigValue[T any](logger *slog.Logger, name string, value T) {
+	var v any = value
+	empty := false
 
-func logConfigDuration(name string, value time.Duration) {
-	slog.Info("config value", "name", name, "value", value.String())
-}
-
-func logSecretDigest(name, value string) {
-	if value == "" {
-		slog.Info("config secret empty", "name", name, "empty", true)
-		return
+	switch val := any(value).(type) {
+	case string:
+		empty = val == ""
+		if empty {
+			v = ""
+		}
+	case int:
+		empty = false // cannot be "empty"
+	case time.Duration:
+		// Duration zero is not "empty" here
+		v = val.String()
+		empty = false
+	default:
+		// fallback: use fmt.Sprintf("%v")
+		v = fmt.Sprintf("%v", val)
 	}
-	sum := sha256.Sum256([]byte(value))
-	slog.Info("config secret sha256",
-		"name", name,
-		"sha256", hex.EncodeToString(sum[:]),
-		"empty", false,
-	)
+
+	logger.Debug("config value", "name", name, "value", v, "empty", empty)
 }

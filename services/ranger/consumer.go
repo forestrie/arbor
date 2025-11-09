@@ -62,7 +62,7 @@ func ConsumeQueue(ctx context.Context, cfg Config, httpClient *HTTPClient, logge
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 
-	logger.Info("starting queue consumer",
+	logger.Debug("starting queue consumer",
 		"queueURL", cfg.QueueURL,
 		"pollInterval", cfg.PollInterval,
 	)
@@ -70,7 +70,7 @@ func ConsumeQueue(ctx context.Context, cfg Config, httpClient *HTTPClient, logge
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("queue consumer stopping")
+			logger.Debug("queue consumer stopping")
 			return
 		case <-ticker.C:
 			if err := PullAndProcessMessages(ctx, cfg, httpClient, logger); err != nil {
@@ -130,14 +130,14 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	logger.Debug("pulled messages", "count", len(queueResp.Messages))
+	logger.Info("pulled messages", "count", len(queueResp.Messages))
 
 	// Process each message
 	for _, msg := range queueResp.Messages {
 		// Process message - only ack if no error returned
 		// Non-nil error means message couldn't be consumed
 		if err := ProcessMessage(ctx, cfg, httpClient, msg, logger); err != nil {
-			logger.Info("failed to process message - not acknowledging",
+			logger.Warn("failed to process message - not acknowledging",
 				"messageID", msg.ID,
 				"error", err,
 			)
@@ -147,7 +147,7 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 
 		// Message processed successfully - acknowledge to consume from queue
 		if err := AcknowledgeMessage(ctx, cfg, httpClient, msg.ID); err != nil {
-			logger.Info("failed to acknowledge message",
+			logger.Warn("failed to acknowledge message",
 				"messageID", msg.ID,
 				"error", err,
 			)
@@ -165,7 +165,7 @@ func ProcessMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, msg
 	// If this fails, we don't understand the message format - don't consume it
 	var r2Notification R2Notification
 	if err := json.Unmarshal(msg.Body, &r2Notification); err != nil {
-		logger.Info("failed to parse R2 notification - message not consumed",
+		logger.Warn("failed to parse R2 notification - message not consumed",
 			"messageID", msg.ID,
 			"error", err,
 		)
@@ -182,7 +182,7 @@ func ProcessMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, msg
 	// If this fails, we can't process the message - don't consume it
 	parsed, err := parseObjectPath(r2Notification.Object.Key)
 	if err != nil {
-		logger.Info("failed to parse object path - message not consumed",
+		logger.Warn("failed to parse object path - message not consumed",
 			"messageID", msg.ID,
 			"path", r2Notification.Object.Key,
 			"error", err,
@@ -200,7 +200,7 @@ func ProcessMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, msg
 	// TrustCanopy is true - verify hash by reading object
 	// Verification failure is logged but message is still consumed (return nil)
 	if err := verifyObjectHash(ctx, cfg, parsed, httpClient, logger); err != nil {
-		logger.Info("hash verification failed - message consumed anyway",
+		logger.Warn("hash verification failed - message consumed anyway",
 			"fenceIndex", parsed.FenceIndex,
 			"pathHash", parsed.Hash,
 			"error", err,

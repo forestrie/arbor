@@ -24,25 +24,10 @@ var (
 
 func main() {
 	// Load configuration from environment
-	cfg := ranger.LoadConfig()
+	cfg, logger, _ := ranger.LoadConfig()
 
-	// Setup structured logging
-	logLevel := slog.LevelInfo
-	switch cfg.LogLevel {
-	case "debug":
-		logLevel = slog.LevelDebug
-	case "warn":
-		logLevel = slog.LevelWarn
-	case "error":
-		logLevel = slog.LevelError
-	}
-
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: logLevel,
-	}))
 	slog.SetDefault(logger)
-
-	slog.Info("starting ranger service",
+	slog.Warn("starting ranger service",
 		"version", version,
 		"commit", commit,
 		"buildDate", buildDate,
@@ -75,7 +60,7 @@ func main() {
 	}
 
 	go func() {
-		slog.Info("starting health check server", "port", cfg.Port)
+		slog.Warn("starting health check server", "port", cfg.Port)
 		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("health server failed", "error", err)
 		}
@@ -96,8 +81,7 @@ func main() {
 	if err := healthServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("health server shutdown failed", "error", err)
 	}
-
-	slog.Info("service stopped")
+	slog.Warn("service stopped")
 }
 
 func setupHealthChecks(mux *http.ServeMux) {

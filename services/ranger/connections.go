@@ -94,7 +94,7 @@ func (c *HTTPClient) Do(ctx context.Context, req *http.Request) (*http.Response,
 		// Connection error - close idle connections to force reconnection
 		// This is safe to call concurrently (Transport is thread-safe)
 		c.transport.CloseIdleConnections()
-		c.logger.Info("HTTP connection error - closed idle connections",
+		c.logger.Warn("HTTP connection error - closed idle connections",
 			"error", err,
 		)
 		return nil, err
