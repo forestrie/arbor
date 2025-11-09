@@ -151,6 +151,7 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 	)
 
 	// Process each message
+	var acknowledged int
 	for _, msg := range queueResp.Result.Messages {
 		// Process message - only ack if no error returned
 		// Non-nil error means message couldn't be consumed
@@ -164,13 +165,18 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 		}
 
 		// Message processed successfully - acknowledge to consume from queue
-		if err := AcknowledgeMessage(ctx, cfg, httpClient, msg.ID); err != nil {
+		if err := AcknowledgeMessage(ctx, cfg, httpClient, msg); err != nil {
 			logger.Warn("failed to acknowledge message",
 				"messageID", msg.ID,
 				"error", err,
 			)
+			continue
 		}
-		logger.Info("acknowledged message", "messageID", msg.ID)
+		acknowledged++
+	}
+	if acknowledged != len(queueResp.Result.Messages) {
+		// It would be very odd if it was negative, but we don't want sillies to suppress the warning
+		logger.Info("acknowledged messages", "count", len(queueResp.Result.Messages)-acknowledged)
 	}
 
 	return nil
@@ -342,14 +348,24 @@ func samplePrefix(value string, max int) string {
 }
 
 // AcknowledgeMessage acknowledges a message to remove it from the queue
-func AcknowledgeMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, messageID string) error {
+func AcknowledgeMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, message CloudflareQueueMessage) error {
 	baseQueueURL := strings.TrimSuffix(cfg.QueueURL, "/")
 	ackURL := fmt.Sprintf("%s/messages/ack", baseQueueURL)
 
+	if message.LeaseID == "" {
+		return fmt.Errorf("missing lease_id for message %s", message.ID)
+	}
+
 	payload := struct {
-		AckIDs []string `json:"ack_ids"`
+		Acks []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"acks"`
 	}{
-		AckIDs: []string{messageID},
+		Acks: []struct {
+			LeaseID string `json:"lease_id"`
+		}{
+			{LeaseID: message.LeaseID},
+		},
 	}
 
 	body, err := json.Marshal(payload)
