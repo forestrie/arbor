@@ -2,11 +2,11 @@ package ranger
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -29,8 +29,12 @@ func TestProcessMessageDecodesBase64Body(t *testing.T) {
 		t.Fatalf("marshal notification: %v", err)
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(body)
-	raw := json.RawMessage(`"` + encoded + `"`)
+	bodyStringJSON, err := json.Marshal(string(body))
+	if err != nil {
+		t.Fatalf("wrap notification: %v", err)
+	}
+
+	raw := json.RawMessage(bodyStringJSON)
 
 	msg := CloudflareQueueMessage{
 		ID:   "message-id",
@@ -61,8 +65,8 @@ func TestCloudflareQueuePullResponseUnmarshal(t *testing.T) {
 		t.Fatalf("marshal notification: %v", err)
 	}
 
-	encoded := base64.StdEncoding.EncodeToString(rawNotification)
-	payload := fmt.Sprintf(`{"success":true,"errors":[],"messages":[],"result":{"message_backlog_count":1,"messages":[{"id":"msg-1","timestamp_ms":1762709980263,"body":"%s","attempts":2}]}}`, encoded)
+	bodyLiteral := strconv.Quote(string(rawNotification))
+	payload := fmt.Sprintf(`{"success":true,"errors":[],"messages":[],"result":{"message_backlog_count":1,"messages":[{"id":"msg-1","timestamp_ms":1762709980263,"body":%s,"attempts":2}]}}`, bodyLiteral)
 
 	var resp CloudflareQueuePullResponse
 	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
@@ -84,18 +88,13 @@ func TestCloudflareQueuePullResponseUnmarshal(t *testing.T) {
 		t.Fatalf("expected attempts 2, got %d", msg.Attempts)
 	}
 
-	var encodedBody string
-	if err := json.Unmarshal(msg.Body, &encodedBody); err != nil {
+	var bodyString string
+	if err := json.Unmarshal(msg.Body, &bodyString); err != nil {
 		t.Fatalf("unmarshal body: %v", err)
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(encodedBody)
-	if err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-
 	var parsed R2Notification
-	if err := json.Unmarshal(decoded, &parsed); err != nil {
+	if err := json.Unmarshal([]byte(bodyString), &parsed); err != nil {
 		t.Fatalf("parse notification: %v", err)
 	}
 

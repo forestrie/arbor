@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -181,10 +180,9 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 // Returns non-nil error if message could not be consumed (should not be acknowledged)
 // Returns nil if message was processed successfully (should be acknowledged)
 func ProcessMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, msg CloudflareQueueMessage, logger *slog.Logger) error {
-	// Cloudflare HTTP pull delivers the body as a base64-encoded string.
-	// First, decode the JSON string, then unmarshal the underlying notification.
-	var encodedBody string
-	if err := json.Unmarshal(msg.Body, &encodedBody); err != nil {
+	// Cloudflare HTTP pull delivers the body as a JSON-encoded string.
+	var bodyJSON string
+	if err := json.Unmarshal(msg.Body, &bodyJSON); err != nil {
 		logger.Warn("failed to parse queue message body - message not consumed",
 			"messageID", msg.ID,
 			"error", err,
@@ -192,22 +190,12 @@ func ProcessMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, msg
 		return fmt.Errorf("failed to parse queue message body: %w", err)
 	}
 
-	decodedBody, err := base64.StdEncoding.DecodeString(encodedBody)
-	if err != nil {
-		logger.Warn("failed to decode queue message body - message not consumed",
-			"messageID", msg.ID,
-			"error", err,
-			"bodySample", samplePrefix(encodedBody, 64),
-		)
-		return fmt.Errorf("failed to decode queue message body: %w", err)
-	}
-
-	// Parse R2 notification from decoded message body
 	var r2Notification R2Notification
-	if err := json.Unmarshal(decodedBody, &r2Notification); err != nil {
+	if err := json.Unmarshal([]byte(bodyJSON), &r2Notification); err != nil {
 		logger.Warn("failed to parse R2 notification - message not consumed",
 			"messageID", msg.ID,
 			"error", err,
+			"bodySample", samplePrefix(bodyJSON, 128),
 		)
 		return fmt.Errorf("failed to parse R2 notification: %w", err)
 	}
