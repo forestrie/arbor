@@ -360,6 +360,9 @@ func AcknowledgeMessage(ctx context.Context, cfg Config, httpClient *HTTPClient,
 		Acks []struct {
 			LeaseID string `json:"lease_id"`
 		} `json:"acks"`
+		Retries []struct {
+			LeaseID string `json:"lease_id"`
+		} `json:"retries"`
 	}{
 		Acks: []struct {
 			LeaseID string `json:"lease_id"`
