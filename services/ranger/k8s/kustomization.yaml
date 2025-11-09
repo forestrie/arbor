@@ -9,13 +9,13 @@ commonLabels:
   component: queue-consumer
 images:
   - name: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/ranger
-    newTag: main-5a9df2c-225 # {"$imagepolicy": "flux-system:ranger:tag"}
+    newTag: main-7d506e1-236 # {"$imagepolicy": "flux-system:ranger:tag"}
 configMapGenerator:
   - name: ranger-config
     literals:
       - log-level=info
       - poll-interval=5s
-      - visibility-timeout=30s
+      - visibility-timeout=10s
       - shutdown-timeout=30s
       - queue-url=https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/5b0ba7f4ce3e4c688d4094d448e48edc
       - queue-batch-size=1

@@ -65,6 +65,46 @@ tasks:
           ./services/ranger
         echo "Build complete: {{.IMAGE_URL}}/ranger:{{.IMAGE_TAG}}"
 
+  pause:
+    desc: "pause the services"
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - flux suspend kustomization ranger --namespace flux-system
+      - kubectl scale deployment/ranger -n forestrie-arbor --replicas=0
+
+  resume:
+    desc: "resume the services"
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - kubectl scale deployment/ranger -n forestrie-arbor --replicas=1
+      - flux resume kustomization ranger --namespace flux-system
+
+  peek:msg:
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - |
+        source .secret.env.ranger
+        # https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/5b0ba7f4ce3e4c688d4094d448e48edc
+        echo curl -v -X POST \
+          "$QUEUE_URL/messages/peek" \
+            -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d "{\"batch_size\":1}"
+        curl -v -X POST \
+          "$QUEUE_URL/messages/peek" \
+            -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d '{"batch_size":1}'
+
+  pull:msg:
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - |
+        source .secret.env.ranger
+        # https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/5b0ba7f4ce3e4c688d4094d448e48edc
+        echo curl -v -X POST \
+          "$QUEUE_URL/messages/pull" \
+            -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d "{\"batch_size\":1}"
+        curl -v -X POST \
+          "$QUEUE_URL/messages/pull" \
+        -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d '{"batch_size":1, "visibility_timeout_ms": 1000}'
+
   push:
     desc: Push ranger Docker image
     dir: "{{.ROOT_DIR}}"

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,15 +19,26 @@ import (
 
 // CloudflareQueueMessage represents a message from Cloudflare Queue
 type CloudflareQueueMessage struct {
-	ID        string          `json:"id"`
-	Timestamp string          `json:"timestamp"`
-	Body      json.RawMessage `json:"body"`
-	Attempts  int             `json:"attempts"`
+	ID          string            `json:"id"`
+	TimestampMs int64             `json:"timestamp_ms"`
+	Body        json.RawMessage   `json:"body"`
+	Attempts    int               `json:"attempts"`
+	Metadata    map[string]string `json:"metadata,omitempty"`
+	LeaseID     string            `json:"lease_id,omitempty"`
 }
 
 // CloudflareQueueResponse represents the pull response
-type CloudflareQueueResponse struct {
-	Messages []CloudflareQueueMessage `json:"messages"`
+type CloudflareQueuePullResponse struct {
+	Success  bool                      `json:"success"`
+	Errors   []json.RawMessage         `json:"errors"`
+	Messages []json.RawMessage         `json:"messages"`
+	Result   CloudflareQueuePullResult `json:"result"`
+}
+
+// CloudflareQueuePullResult contains the actual messages and metadata for a pull
+type CloudflareQueuePullResult struct {
+	MessageBacklogCount int                      `json:"message_backlog_count"`
+	Messages            []CloudflareQueueMessage `json:"messages"`
 }
 
 // R2Notification represents the message format from R2 event notifications
@@ -125,15 +137,22 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 		return fmt.Errorf("pull request failed: status=%d", resp.StatusCode)
 	}
 
-	var queueResp CloudflareQueueResponse
+	var queueResp CloudflareQueuePullResponse
 	if err := json.NewDecoder(resp.Body).Decode(&queueResp); err != nil {
+		logger.Warn("failed to decode response", "error", err)
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	logger.Info("pulled messages", "count", len(queueResp.Messages))
+	logger.Info("pulled messages",
+		"count", len(queueResp.Result.Messages),
+		"backlog", queueResp.Result.MessageBacklogCount,
+		"pullURL", pullURL,
+		"batchSz", cfg.QueueBatchSize,
+		"visto", cfg.VisibilityTimeout.Microseconds(),
+	)
 
 	// Process each message
-	for _, msg := range queueResp.Messages {
+	for _, msg := range queueResp.Result.Messages {
 		// Process message - only ack if no error returned
 		// Non-nil error means message couldn't be consumed
 		if err := ProcessMessage(ctx, cfg, httpClient, msg, logger); err != nil {
@@ -152,6 +171,7 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 				"error", err,
 			)
 		}
+		logger.Info("acknowledged message", "messageID", msg.ID)
 	}
 
 	return nil
@@ -161,10 +181,30 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 // Returns non-nil error if message could not be consumed (should not be acknowledged)
 // Returns nil if message was processed successfully (should be acknowledged)
 func ProcessMessage(ctx context.Context, cfg Config, httpClient *HTTPClient, msg CloudflareQueueMessage, logger *slog.Logger) error {
-	// Parse R2 notification from message body
-	// If this fails, we don't understand the message format - don't consume it
+	// Cloudflare HTTP pull delivers the body as a base64-encoded string.
+	// First, decode the JSON string, then unmarshal the underlying notification.
+	var encodedBody string
+	if err := json.Unmarshal(msg.Body, &encodedBody); err != nil {
+		logger.Warn("failed to parse queue message body - message not consumed",
+			"messageID", msg.ID,
+			"error", err,
+		)
+		return fmt.Errorf("failed to parse queue message body: %w", err)
+	}
+
+	decodedBody, err := base64.StdEncoding.DecodeString(encodedBody)
+	if err != nil {
+		logger.Warn("failed to decode queue message body - message not consumed",
+			"messageID", msg.ID,
+			"error", err,
+			"bodySample", samplePrefix(encodedBody, 64),
+		)
+		return fmt.Errorf("failed to decode queue message body: %w", err)
+	}
+
+	// Parse R2 notification from decoded message body
 	var r2Notification R2Notification
-	if err := json.Unmarshal(msg.Body, &r2Notification); err != nil {
+	if err := json.Unmarshal(decodedBody, &r2Notification); err != nil {
 		logger.Warn("failed to parse R2 notification - message not consumed",
 			"messageID", msg.ID,
 			"error", err,
@@ -303,6 +343,14 @@ func verifyObjectHash(ctx context.Context, cfg Config, parsed *ParsedNotificatio
 	}
 
 	return nil
+}
+
+// samplePrefix returns up to max characters from the provided string so logs remain concise.
+func samplePrefix(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return value[:max] + "…"
 }
 
 // AcknowledgeMessage acknowledges a message to remove it from the queue
