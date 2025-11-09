@@ -176,7 +176,7 @@ func PullAndProcessMessages(ctx context.Context, cfg Config, httpClient *HTTPCli
 	}
 	if acknowledged != len(queueResp.Result.Messages) {
 		// It would be very odd if it was negative, but we don't want sillies to suppress the warning
-		logger.Info("acknowledged messages", "count", len(queueResp.Result.Messages)-acknowledged)
+		logger.Info("failed to acknowledge messages", "count", len(queueResp.Result.Messages)-acknowledged)
 	}
 
 	return nil
@@ -368,6 +368,11 @@ func AcknowledgeMessage(ctx context.Context, cfg Config, httpClient *HTTPClient,
 			LeaseID string `json:"lease_id"`
 		}{
 			{LeaseID: message.LeaseID},
+		},
+		Retries: []struct {
+			LeaseID string `json:"lease_id"`
+		}{
+			{},
 		},
 	}
 
