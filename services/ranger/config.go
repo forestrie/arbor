@@ -146,7 +146,7 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		logger.Warn("unrecognized log level value; defaulting to derived level", "input", cfg.LogLevel, "level", level.String())
 	}
 
-	logger.Debug("resolved log level", "input", cfg.LogLevel, "level", level.String())
+	logger.Warn("resolved log level", "input", cfg.LogLevel, "level", level.String())
 
 	logConfigValue(logger, "RANGER_QUEUE_URL", cfg.QueueURL)
 	logSecretDigest(logger, "RANGER_QUEUE_API_TOKEN", cfg.QueueAPIToken)
@@ -206,5 +206,5 @@ func logConfigValue[T any](logger *slog.Logger, name string, value T) {
 		v = fmt.Sprintf("%v", val)
 	}
 
-	logger.Debug("config value", "name", name, "value", v, "empty", empty)
+	logger.Warn("config value", "name", name, "value", v, "empty", empty)
 }

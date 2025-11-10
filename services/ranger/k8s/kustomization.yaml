@@ -13,7 +13,7 @@ images:
 configMapGenerator:
   - name: ranger-config
     literals:
-      - log-level=info
+      - log-level=warn
       - poll-interval=5s
       - visibility-timeout=10s
       - shutdown-timeout=30s
