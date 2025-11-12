@@ -26,9 +26,11 @@ type Config struct {
 	VisibilityTimeout time.Duration
 
 	// R2 Access Configuration
-	R2BucketName string
-	R2AccountID  string
-	R2PublicURL  string
+	R2BucketName  string
+	R2AccountID   string
+	R2PublicURL   string
+	R2WriteURL    string
+	R2WriterToken string
 
 	// Deployment configuration (not from messages)
 	TrustCanopy bool // If true, verify hash by reading object. If false, trust path hash.
@@ -114,14 +116,13 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		}
 	}
 
-	// Build R2 public URL if components are provided
+	accountID := os.Getenv("R2_ACCOUNT_ID")
+	bucketName := os.Getenv("R2_BUCKET_NAME")
+
+	// Build R2 public URL if not explicitly provided
 	r2PublicURL := os.Getenv("R2_PUBLIC_URL")
-	if r2PublicURL == "" {
-		accountID := os.Getenv("R2_ACCOUNT_ID")
-		bucketName := os.Getenv("R2_BUCKET_NAME")
-		if accountID != "" && bucketName != "" {
-			r2PublicURL = fmt.Sprintf("https://%s.r2.cloudflarestorage.com/%s", accountID, bucketName)
-		}
+	if r2PublicURL == "" && accountID != "" && bucketName != "" {
+		r2PublicURL = fmt.Sprintf("https://%s.r2.cloudflarestorage.com/%s", accountID, bucketName)
 	}
 
 	cfg := Config{
@@ -134,8 +135,10 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		PollInterval:      getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout: getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		R2BucketName:      os.Getenv("R2_BUCKET_NAME"),
-		R2AccountID:       os.Getenv("R2_ACCOUNT_ID"),
+		R2AccountID:       accountID,
 		R2PublicURL:       r2PublicURL,
+		R2WriteURL:        os.Getenv("R2_WRITE_URL"),
+		R2WriterToken:     os.Getenv("R2_WRITER_TOKEN"),
 		TrustCanopy:       trustCanopy,
 	}
 
@@ -153,6 +156,9 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 	logConfigValue(logger, "RANGER_QUEUE_BATCH_SIZE", cfg.QueueBatchSize)
 	logConfigValue(logger, "POLL_INTERVAL", cfg.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", cfg.VisibilityTimeout)
+	logConfigValue(logger, "R2_PUBLIC_URL", cfg.R2PublicURL)
+	logConfigValue(logger, "R2_WRITE_URL", cfg.R2WriteURL)
+	logSecretDigest(logger, "R2_WRITER_TOKEN", cfg.R2WriterToken)
 
 	return cfg, logger, levelVar
 }
