@@ -68,6 +68,21 @@ spec:
             configMapKeyRef:
               name: ranger-config
               key: queue-batch-size
+        - name: R2_PUBLIC_URL
+          valueFrom:
+            configMapKeyRef:
+              name: ranger-r2
+              key: R2_PUBLIC_URL
+        - name: R2_WRITE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: ranger-r2
+              key: R2_WRITE_URL
+        - name: R2_WRITER_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: ranger-r2
+              key: R2_WRITER_TOKEN
         - name: RANGER_QUEUE_API_TOKEN
           valueFrom:
             secretKeyRef:
