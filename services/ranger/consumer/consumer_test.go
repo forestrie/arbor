@@ -1,4 +1,4 @@
-package ranger
+package consumer
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/forestrie/arbor/services/ranger"
 )
 
 func TestProcessMessageDecodesBase64Body(t *testing.T) {
@@ -36,19 +38,20 @@ func TestProcessMessageDecodesBase64Body(t *testing.T) {
 
 	raw := json.RawMessage(bodyStringJSON)
 
-	msg := CloudflareQueueMessage{
+	msg := QueueMessage{
 		ID:   "message-id",
 		Body: raw,
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
+	consumer := NewQueueConsumer(ranger.Config{TrustCanopy: false}, nil, logger)
 
-	if err := ProcessMessage(context.Background(), Config{TrustCanopy: false}, nil, msg, logger); err != nil {
+	if err := consumer.ProcessMessage(context.Background(), msg); err != nil {
 		t.Fatalf("ProcessMessage returned error: %v", err)
 	}
 }
 
-func TestCloudflareQueuePullResponseUnmarshal(t *testing.T) {
+func TestQueuePullResponseUnmarshal(t *testing.T) {
 	r2 := R2Notification{
 		Account:   "account",
 		Action:    "PutObject",
@@ -68,7 +71,7 @@ func TestCloudflareQueuePullResponseUnmarshal(t *testing.T) {
 	bodyLiteral := strconv.Quote(string(rawNotification))
 	payload := fmt.Sprintf(`{"success":true,"errors":[],"messages":[],"result":{"message_backlog_count":1,"messages":[{"id":"msg-1","timestamp_ms":1762709980263,"body":%s,"attempts":2}]}}`, bodyLiteral)
 
-	var resp CloudflareQueuePullResponse
+	var resp QueuePullResponse
 	if err := json.Unmarshal([]byte(payload), &resp); err != nil {
 		t.Fatalf("unmarshal pull response: %v", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/forestrie/arbor/services/ranger"
+	"github.com/forestrie/arbor/services/ranger/consumer"
 )
 
 // Note: the ci does the right thing with go-releaser automatically, as
@@ -67,7 +68,8 @@ func main() {
 	}()
 
 	// Start queue consumer
-	go ranger.ConsumeQueue(ctx, cfg, httpClient, logger)
+	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger)
+	go queueConsumer.ConsumeQueue(ctx)
 
 	// Wait for termination signal
 	<-ctx.Done()
