@@ -1,24 +1,27 @@
-package controlers
-
 package controllers
 
 import (
-  "context"
-  corev1 "k8s.io/api/core/v1"
-  "k8s.io/apimachinery/pkg/types"
-  ctrl "sigs.k8s.io/controller-runtime"
-  "sigs.k8s.io/controller-runtime/pkg/client"
-  "sigs.k8s.io/controller-runtime/pkg/builder"
-  "sigs.k8s.io/controller-runtime/pkg/predicate"
-  apiv1 "github.com/forestrie/arboreal/services/sharder/api/v1alpha1"
+	"context"
+	"sort"
+
+	apiv1 "github.com/forestrie/arbor/services/sharder/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 const ShardAnn = "shard.gav.dev/id"
+const Finalizer = "shard.gav.dev/finalizer"
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;patch;update
 // +kubebuilder:rbac:groups=yourgroup.io,resources=shardassignments;shardassignments/status,verbs=get;list;watch;update;patch
 
-type PodShardReconciler struct{ client client.Client }
+type PodShardReconciler struct{ Client client.Client }
 
 func (r *PodShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
   return ctrl.NewControllerManagedBy(mgr).
@@ -32,25 +35,28 @@ func (r *PodShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *PodShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
   var pod corev1.Pod
-  if err := r.client.Get(ctx, req.NamespacedName, &pod); err != nil { return ctrl.Result{}, client.IgnoreNotFound(err) }
-  if pod.DeletionTimestamp != nil { return r.releaseByUID(ctx, string(pod.UID)) }
+  if err := r.Client.Get(ctx, req.NamespacedName, &pod); err != nil { return ctrl.Result{}, client.IgnoreNotFound(err) }
+  if pod.DeletionTimestamp != nil {
+    if err := r.releaseByUID(ctx, string(pod.UID)); err != nil {
+      return ctrl.Result{}, err
+    }
+    return ctrl.Result{}, nil
+  }
 
   if pod.Annotations[ShardAnn] != "" { return ctrl.Result{}, nil }
   name, ok, err := r.claimOne(ctx, &pod)
   if err != nil || !ok { return ctrl.Result{}, err }
   patch := client.MergeFrom(pod.DeepCopy()); if pod.Annotations == nil { pod.Annotations = map[string]string{} }
   pod.Annotations[ShardAnn] = name
-  return ctrl.Result{}, r.client.Patch(ctx, &pod, patch)
+  return ctrl.Result{}, r.Client.Patch(ctx, &pod, patch)
 }
 
-// claimOne + releaseByUID omitted for brevity (same as earlier sketch)
-//
 // claimOne tries to atomically claim a free ShardAssignment for the given pod.
-// Returns (true, shardName, nil) on success; (false, "", nil) if none available.
-func (r *PodShardReconciler) claimOne(ctx context.Context, pod *corev1.Pod) (bool, string, error) {
+// Returns (shardName, true, nil) on success; ("", false, nil) if none available.
+func (r *PodShardReconciler) claimOne(ctx context.Context, pod *corev1.Pod) (string, bool, error) {
 	var list apiv1.ShardAssignmentList
-	if err := r.client.List(ctx, &list); err != nil {
-		return false, "", err
+	if err := r.Client.List(ctx, &list); err != nil {
+		return "", false, err
 	}
 
 	// Deterministic order: smallest name first
@@ -95,25 +101,25 @@ func (r *PodShardReconciler) claimOne(ctx context.Context, pod *corev1.Pod) (boo
 			s.Finalizers = append(s.Finalizers, Finalizer)
 		}
 
-		if err := r.client.Patch(ctx, s, client.MergeFrom(orig)); err != nil {
+		if err := r.Client.Patch(ctx, s, client.MergeFrom(orig)); err != nil {
 			// If someone else won the race, try next shard
 			if apierrors.IsConflict(err) {
 				continue
 			}
-			return false, "", err
+			return "", false, err
 		}
-		return true, s.Name, nil
+		return s.Name, true, nil
 	}
 
 	// None available
-	return false, "", nil
+	return "", false, nil
 }
 
 // releaseByUID releases any ShardAssignment held by the given Pod UID.
 // Best-effort: ignores conflicts and continues.
 func (r *PodShardReconciler) releaseByUID(ctx context.Context, podUID string) error {
 	var list apiv1.ShardAssignmentList
-	if err := r.client.List(ctx, &list); err != nil {
+	if err := r.Client.List(ctx, &list); err != nil {
 		return err
 	}
 
@@ -137,7 +143,7 @@ func (r *PodShardReconciler) releaseByUID(ctx context.Context, podUID string) er
 		}
 		s.Finalizers = out
 
-		if err := r.client.Patch(ctx, s, client.MergeFrom(orig)); err != nil && !apierrors.IsConflict(err) {
+		if err := r.Client.Patch(ctx, s, client.MergeFrom(orig)); err != nil && !apierrors.IsConflict(err) {
 			return err
 		}
 	}

@@ -12,9 +12,8 @@ includes:
     # optional because the ../taskfiles dir is cloned via bootstrap below
     optional: true
     dir: .
-  azurite:
-    taskfile: ../taskfiles/azurite.yml
-    # optional because the ../taskfiles dir is cloned via bootstrap below
+  minio:
+    taskfile: ../taskfiles/Taskfile_minio.yml
     optional: true
     dir: .
   ranger:
@@ -58,6 +57,5 @@ tasks:
 
   test:integration:
     cmds:
-      - task: azurite:preflight
+      - task: minio:start
       - task: gotest:integration
-      - task: azurite:stop

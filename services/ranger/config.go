@@ -177,6 +177,12 @@ func (c Config) Validate() error {
 	if c.QueueBatchSize > 32 {
 		return fmt.Errorf("RANGER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
+	if c.R2WriteURL == "" {
+		return fmt.Errorf("R2_WRITE_URL is required")
+	}
+	if c.R2WriterToken == "" {
+		return fmt.Errorf("R2_WRITER_TOKEN is required")
+	}
 	return nil
 }
 
