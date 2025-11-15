@@ -34,6 +34,10 @@ type Config struct {
 
 	// Deployment configuration (not from messages)
 	TrustCanopy bool // If true, verify hash by reading object. If false, trust path hash.
+
+	// Merklelog configuration
+	MassifHeight    uint8  // Massif height (default 14)
+	CommitmentEpoch uint32 // Commitment epoch (default 1)
 }
 
 var levelAliases = map[string]slog.Level{
@@ -104,6 +108,24 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		return defaultVal
 	}
 
+	getUint8 := func(key string, defaultVal uint8) uint8 {
+		if val := os.Getenv(key); val != "" {
+			if parsed, err := strconv.ParseUint(val, 10, 8); err == nil {
+				return uint8(parsed)
+			}
+		}
+		return defaultVal
+	}
+
+	getUint32 := func(key string, defaultVal uint32) uint32 {
+		if val := os.Getenv(key); val != "" {
+			if parsed, err := strconv.ParseUint(val, 10, 32); err == nil {
+				return uint32(parsed)
+			}
+		}
+		return defaultVal
+	}
+
 	// Parse TRUST_CANOPY: true if "true", "on", or non-zero integer
 	trustCanopy := false
 	trustEnv := strings.ToLower(strings.TrimSpace(os.Getenv("TRUST_CANOPY")))
@@ -140,6 +162,8 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		R2WriteURL:        os.Getenv("R2_WRITE_URL"),
 		R2WriterToken:     os.Getenv("R2_WRITER_TOKEN"),
 		TrustCanopy:       trustCanopy,
+		MassifHeight:      getUint8("MASSIF_HEIGHT", 14),
+		CommitmentEpoch:   getUint32("COMMITMENT_EPOCH", 1),
 	}
 
 	level, recognized := ParseLogLevel(cfg.LogLevel)
@@ -159,6 +183,8 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 	logConfigValue(logger, "R2_PUBLIC_URL", cfg.R2PublicURL)
 	logConfigValue(logger, "R2_WRITE_URL", cfg.R2WriteURL)
 	logSecretDigest(logger, "R2_WRITER_TOKEN", cfg.R2WriterToken)
+	logConfigValue(logger, "MASSIF_HEIGHT", cfg.MassifHeight)
+	logConfigValue(logger, "COMMITMENT_EPOCH", cfg.CommitmentEpoch)
 
 	return cfg, logger, levelVar
 }

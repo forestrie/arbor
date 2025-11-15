@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/forestrie/arbor/services/ranger"
+	"github.com/forestrie/arbor/services/ranger/committer"
 	"github.com/forestrie/arbor/services/ranger/consumer"
 )
 
@@ -51,6 +52,19 @@ func main() {
 	// Create HTTP client with persistent connections for queue operations
 	httpClient := ranger.NewHTTPClient(logger)
 
+	// Create committer if TrustCanopy is enabled
+	var massifCommitter consumer.MassifCommitter
+	comm, err := committer.NewCommitter(cfg, httpClient, logger)
+	if err != nil {
+		slog.Error("failed to create committer", "error", err)
+		os.Exit(1)
+	}
+	massifCommitter = comm
+	slog.Info("merklelog committer initialized",
+		"massifHeight", cfg.MassifHeight,
+		"commitmentEpoch", cfg.CommitmentEpoch,
+	)
+
 	// Start health check server
 	healthMux := http.NewServeMux()
 	setupHealthChecks(healthMux)
@@ -68,7 +82,7 @@ func main() {
 	}()
 
 	// Start queue consumer
-	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger)
+	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, massifCommitter)
 	go queueConsumer.ConsumeQueue(ctx)
 
 	// Wait for termination signal

@@ -44,7 +44,7 @@ func TestProcessMessageDecodesBase64Body(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
-	consumer := NewQueueConsumer(ranger.Config{TrustCanopy: false}, nil, logger)
+	consumer := NewQueueConsumer(ranger.Config{TrustCanopy: false}, nil, logger, nil)
 
 	if err := consumer.ProcessMessage(context.Background(), msg); err != nil {
 		t.Fatalf("ProcessMessage returned error: %v", err)

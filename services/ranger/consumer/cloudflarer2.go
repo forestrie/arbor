@@ -25,3 +25,10 @@ type ParsedNotification struct {
 	ETag       string
 	EventTime  string
 }
+
+// MessageWithNotification pairs a QueueMessage with its parsed notification.
+// This is used by the committer for batch processing.
+type MessageWithNotification struct {
+	Message QueueMessage
+	Parsed  ParsedNotification
+}
