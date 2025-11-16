@@ -4,19 +4,26 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
-	"github.com/forestrie/go-merklelog/massifs/storage"
+	"github.com/forestrie/arbor/services/ranger/r2"
+	rangerstorage "github.com/forestrie/arbor/services/ranger/storage"
+	datatrails "github.com/forestrie/go-merklelog-datatrails/datatrails"
+	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/google/uuid"
 )
 
 func makeQueueMessage1(
 	tc *TestContext,
-	logID storage.LogID,
+	logID massifstorage.LogID,
 	fenceIndex uint64,
 	content []byte,
 ) consumer.QueueMessage {
@@ -74,4 +81,138 @@ func makeQueueMessage1(
 		Body: raw,
 	}
 	return msg
+}
+
+func assertNoMessageErrors(t *testing.T, batch *consumer.QueuePullResult) {
+	t.Helper()
+	for i, msgErr := range batch.Errs {
+		require.NoErrorf(t, msgErr, "message %d in batch has error", i)
+	}
+}
+
+// massifCountForLog uses the same HTTP client stack as the committer/consumer
+// to inspect how many massif data objects exist for the given log.
+//
+// It constructs a ranger storage.Store backed by R2 and returns the number of
+// massifs as (headIndex + 1) for ObjectMassifData, or 0 if the log is empty.
+func massifCountForLog(
+	t *testing.T,
+	r2WriteURL string,
+	bearerToken string,
+	httpClient *ranger.HTTPClient,
+	logger *slog.Logger,
+	logID massifstorage.LogID,
+) uint32 {
+	t.Helper()
+
+	factory, err := rangerstorage.NewFactory(r2WriteURL, bearerToken, httpClient, logger)
+	require.NoError(t, err)
+
+	store, err := factory.NewStore(nil)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+
+	err = store.SelectLog(ctx, logID)
+	require.NoError(t, err)
+
+	head, err := store.HeadIndex(ctx, massifstorage.ObjectMassifData)
+	if errors.Is(err, massifstorage.ErrLogEmpty) {
+		return 0
+	}
+	require.NoError(t, err)
+
+	return head + 1
+}
+
+// assertMassifCount wraps massifCountForLog with an assertion, for convenient
+// reuse across tests.
+func assertMassifCount(
+	t *testing.T,
+	r2WriteURL string,
+	bearerToken string,
+	httpClient *ranger.HTTPClient,
+	logger *slog.Logger,
+	logID massifstorage.LogID,
+	expected uint32,
+) {
+	t.Helper()
+
+	actual := massifCountForLog(
+		t,
+		r2WriteURL,
+		bearerToken,
+		httpClient,
+		logger,
+		logID,
+	)
+
+	if actual != expected {
+		// Instrumentation: list massif objects directly from R2 to
+		// confirm ListObjects is returning the massif blobs we expect.
+		listMassifObjectsForLog(
+			t,
+			r2WriteURL,
+			bearerToken,
+			httpClient,
+			logger,
+			logID,
+		)
+	}
+
+	require.Equalf(t, expected, actual, "unexpected massif count for log")
+}
+
+// listMassifObjectsForLog uses the R2 client directly to list massif data
+// objects for a given log and logs their keys and derived indices.
+func listMassifObjectsForLog(
+	t *testing.T,
+	r2WriteURL string,
+	bearerToken string,
+	httpClient *ranger.HTTPClient,
+	logger *slog.Logger,
+	logID massifstorage.LogID,
+) []string {
+	t.Helper()
+
+	client, err := r2.NewClient(r2WriteURL, bearerToken, httpClient, logger)
+	require.NoError(t, err)
+
+	prefix, err := datatrails.StorageObjectPrefix(logID, massifstorage.ObjectMassifData)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	var keys []string
+	continuation := ""
+	for {
+		res, err := client.ListObjects(ctx, prefix, continuation, 1000)
+		require.NoError(t, err)
+
+		for _, obj := range res.Objects {
+			keys = append(keys, obj.Key)
+		}
+		if !res.IsTruncated || res.NextContinuationToken == "" {
+			break
+		}
+		continuation = res.NextContinuationToken
+	}
+
+	var indices []uint32
+	for _, key := range keys {
+		idx, err := massifstorage.GetObjectIndex(key, massifstorage.ObjectMassifData)
+		if err != nil {
+			t.Logf("massif object key=%q: failed to parse index: %v", key, err)
+			continue
+		}
+		indices = append(indices, idx)
+	}
+
+	t.Logf(
+		"massif objects for log (prefix=%q): keys=%v indices=%v",
+		prefix,
+		keys,
+		indices,
+	)
+
+	return keys
 }

@@ -7,11 +7,6 @@ vars:
   CLUSTER_REGION: europe-west2
 
 includes:
-  gotest:
-    taskfile: ../taskfiles/gotest.yml
-    # optional because the ../taskfiles dir is cloned via bootstrap below
-    optional: true
-    dir: .
   minio:
     taskfile: ../taskfiles/Taskfile_minio.yml
     optional: true
@@ -51,11 +46,29 @@ tasks:
       - task: test:integration
 
   test:unit:
-    desc: run the unit tests
+    desc: run unit tests
+    vars:
+      GO_TEST_TAGS: '{{.GO_TEST_TAGS | default ""}}'
+      GO_MOD_DIRS:
+        sh: find . -type f -name 'go.mod'
     cmds:
-      - task: gotest:unit
+      - for: { var: GO_MOD_DIRS, as: MODULE }
+        cmd: |
+          cd $(dirname {{.MODULE}})
+
+          go test \
+            {{.GO_TEST_TAGS}} \
+            -race \
+            -v \
+            ./...
+          exit 0
 
   test:integration:
+    desc: run the integration tests
+    vars:
+      GO_TEST_TAGS: '{{.GO_TEST_TAGS | default "-tags integration"}}'
+      # sh: find services -type f -name 'go.mod'
     cmds:
       - task: minio:start
-      - task: gotest:integration
+      - cd services/ranger/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...
+

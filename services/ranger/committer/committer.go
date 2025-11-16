@@ -18,7 +18,8 @@ import (
 
 // Committer implements MassifCommitter for batch processing messages into merklelog.
 type Committer struct {
-	store           *storage.Store
+	factory *storage.Factory
+
 	idState         *snowflakeid.IDState
 	logger          *slog.Logger
 	massifHeight    uint8
@@ -35,16 +36,10 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		logger = slog.Default()
 	}
 
-	// Create storage factory and store (without initial logID)
+	// Create storage factory; individual stores will be instantiated per-log.
 	factory, err := storage.NewFactory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage factory: %w", err)
-	}
-
-	// Create store without initial logID - we'll select logs as needed
-	store, err := factory.NewStore(nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 
 	// Initialize IDState with commitmentEpoch
@@ -66,7 +61,7 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 	}
 
 	return &Committer{
-		store:           store,
+		factory:         factory,
 		idState:         idState,
 		logger:          logger,
 		massifHeight:    massifHeight,
@@ -100,7 +95,17 @@ func (c *Committer) ProcessBatch(
 	logID := massifstorage.LogID(parsed.LogID)
 	logIDHex := fmt.Sprintf("%x", parsed.LogID)
 
-	if err := c.store.SelectLog(ctx, logID); err != nil {
+	// Each ProcessBatch call uses its own Store instance bound to this log ID.
+	store, err := c.factory.NewStore(logID)
+	if err != nil {
+		rangeErr := fmt.Errorf("failed to create store for log %s: %w", logIDHex, err)
+		for i := start; i < end; i++ {
+			batch.Errs[batch.ByLogID[i]] = rangeErr
+		}
+		return rangeErr
+	}
+
+	if err := store.SelectLog(ctx, logID); err != nil {
 		rangeErr := fmt.Errorf("failed to select log %s: %w", logIDHex, err)
 		for i := start; i < end; i++ {
 			batch.Errs[batch.ByLogID[i]] = rangeErr
@@ -108,7 +113,7 @@ func (c *Committer) ProcessBatch(
 		return rangeErr
 	}
 
-	mc, err := massifs.GetAppendContext(ctx, c.store, uint32(c.commitmentEpoch), c.massifHeight)
+	mc, err := massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 	if err != nil {
 		rangeErr := fmt.Errorf("failed to get append context: %w", err)
 		for i := start; i < end; i++ {
@@ -121,7 +126,7 @@ func (c *Committer) ProcessBatch(
 
 	commitRange := func(afterRollover bool) error {
 		if len(committed) > 0 {
-			if err := massifs.CommitContext(ctx, c.store, &mc); err != nil {
+			if err := massifs.CommitContext(ctx, store, &mc); err != nil {
 				commitErr := fmt.Errorf("failed to commit context: %w", err)
 				for _, idx := range committed {
 					batch.Errs[idx] = commitErr
@@ -138,7 +143,7 @@ func (c *Committer) ProcessBatch(
 
 		if afterRollover {
 			var getErr error
-			mc, getErr = massifs.GetAppendContext(ctx, c.store, uint32(c.commitmentEpoch), c.massifHeight)
+			mc, getErr = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 			if getErr != nil {
 				return fmt.Errorf("failed to get append context after rollover: %w", getErr)
 			}
