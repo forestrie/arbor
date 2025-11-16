@@ -18,17 +18,10 @@ type R2Object struct {
 
 // ParsedNotification contains extracted data from R2 notification.
 type ParsedNotification struct {
-	LogID      string
+	LogID      []byte
 	FenceIndex int
-	Hash       string
+	Hash       []byte
 	Path       string
 	ETag       string
 	EventTime  string
-}
-
-// MessageWithNotification pairs a QueueMessage with its parsed notification.
-// This is used by the committer for batch processing.
-type MessageWithNotification struct {
-	Message QueueMessage
-	Parsed  ParsedNotification
 }

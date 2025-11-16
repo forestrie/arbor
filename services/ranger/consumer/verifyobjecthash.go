@@ -1,6 +1,7 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -48,9 +49,9 @@ func VerifyObjectHash(ctx context.Context, cfg ranger.Config, parsed *ParsedNoti
 		return fmt.Errorf("failed to compute hash: %w", err)
 	}
 
-	computedHash := hex.EncodeToString(hasher.Sum(nil))
-	if computedHash != parsed.Hash {
-		return fmt.Errorf("hash mismatch: path has %q, computed %q", parsed.Hash, computedHash)
+	computedHash := hasher.Sum(nil)
+	if !bytes.Equal(computedHash, parsed.Hash) {
+		return fmt.Errorf("hash mismatch: path has %q, computed %q", hex.EncodeToString(parsed.Hash), hex.EncodeToString(computedHash))
 	}
 
 	return nil

@@ -59,16 +59,10 @@ func ensureMinioAvailable(t *testing.T, cfg minioConfig) {
 	}
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Skipf("Skipping MinIO-backed tests: unable to reach %s (%v). Start MinIO with 'task -f Taskfile_minio.yml minio:start'.", healthURL, err)
-		return
-	}
+	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		t.Skipf("Skipping MinIO-backed tests: health check returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
 type httpDoer struct {

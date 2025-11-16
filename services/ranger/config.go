@@ -33,7 +33,8 @@ type Config struct {
 	R2WriterToken string
 
 	// Deployment configuration (not from messages)
-	TrustCanopy bool // If true, verify hash by reading object. If false, trust path hash.
+	TrustCanopy         bool // If true, verify hash by reading object. If false, trust path hash.
+	SuppressAcknowledge bool // If true, skip acknowledging messages (primarily for tests).
 
 	// Merklelog configuration
 	MassifHeight    uint8  // Massif height (default 14)

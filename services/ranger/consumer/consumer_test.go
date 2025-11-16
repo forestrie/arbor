@@ -20,7 +20,7 @@ func TestProcessMessageDecodesBase64Body(t *testing.T) {
 		Bucket:    "canopy-dev-1-leaves",
 		EventTime: "2025-11-09T14:14:52.423Z",
 		Object: R2Object{
-			Key:  "logs/log-id/leaves/0/" + strings.Repeat("a", 64),
+			Key:  "logs/de305d54-75b4-431b-adb2-eb6b9e546014/leaves/0/" + strings.Repeat("a", 64),
 			Size: 53,
 			ETag: "etag",
 		},
@@ -58,7 +58,7 @@ func TestQueuePullResponseUnmarshal(t *testing.T) {
 		Bucket:    "bucket",
 		EventTime: "2025-11-09T17:39:43Z",
 		Object: R2Object{
-			Key:  "logs/log-id/leaves/0/" + strings.Repeat("b", 64),
+			Key:  "logs/de305d54-75b4-431b-adb2-eb6b9e546014/leaves/0/" + strings.Repeat("b", 64),
 			Size: 99,
 			ETag: "etag",
 		},
