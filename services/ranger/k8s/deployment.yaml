@@ -88,6 +88,15 @@ spec:
             secretKeyRef:
               name: ranger-secrets
               key: queue-api-token
+        - name: WORKER_CIDR
+          valueFrom:
+            configMapKeyRef:
+              name: ranger-config
+              key: worker-cidr
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         resources:
           requests:
             memory: "64Mi"

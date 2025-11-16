@@ -43,12 +43,10 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 	}
 
 	// Initialize IDState with commitmentEpoch
-	// Use reasonable defaults for WorkerCIDR and PodIP
-	// These can be made configurable later if needed
 	idState, err := snowflakeid.NewIDState(snowflakeid.Config{
 		CommitmentEpoch: uint8(cfg.CommitmentEpoch),
-		WorkerCIDR:      "0.0.0.0/16", // Default CIDR
-		PodIP:           "10.0.0.1",   // Default pod IP
+		WorkerCIDR:      cfg.WorkerCIDR,
+		PodIP:           cfg.PodIP,
 		AllowSpins:      snowflakeid.MaxSpins,
 	})
 	if err != nil {

@@ -19,3 +19,4 @@ configMapGenerator:
       - shutdown-timeout=30s
       - queue-url=https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/5b0ba7f4ce3e4c688d4094d448e48edc
       - queue-batch-size=1
+      - worker-cidr=0.0.0.0/16

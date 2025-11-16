@@ -33,8 +33,10 @@ type Config struct {
 	R2WriterToken string
 
 	// Deployment configuration (not from messages)
-	TrustCanopy         bool // If true, verify hash by reading object. If false, trust path hash.
-	SuppressAcknowledge bool // If true, skip acknowledging messages (primarily for tests).
+	TrustCanopy         bool   // If true, verify hash by reading object. If false, trust path hash.
+	SuppressAcknowledge bool   // If true, skip acknowledging messages (primarily for tests).
+	WorkerCIDR          string // Snowflake worker CIDR, required.
+	PodIP               string // Pod IP address, required.
 
 	// Merklelog configuration
 	MassifHeight    uint8  // Massif height (default 14)
@@ -165,6 +167,8 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		TrustCanopy:       trustCanopy,
 		MassifHeight:      getUint8("MASSIF_HEIGHT", 14),
 		CommitmentEpoch:   getUint32("COMMITMENT_EPOCH", 1),
+		WorkerCIDR:        os.Getenv("WORKER_CIDR"),
+		PodIP:             os.Getenv("POD_IP"),
 	}
 
 	level, recognized := ParseLogLevel(cfg.LogLevel)
@@ -186,6 +190,8 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 	logSecretDigest(logger, "R2_WRITER_TOKEN", cfg.R2WriterToken)
 	logConfigValue(logger, "MASSIF_HEIGHT", cfg.MassifHeight)
 	logConfigValue(logger, "COMMITMENT_EPOCH", cfg.CommitmentEpoch)
+	logConfigValue(logger, "WORKER_CIDR", cfg.WorkerCIDR)
+	logConfigValue(logger, "POD_IP", cfg.PodIP)
 
 	return cfg, logger, levelVar
 }
@@ -209,6 +215,12 @@ func (c Config) Validate() error {
 	}
 	if c.R2WriterToken == "" {
 		return fmt.Errorf("R2_WRITER_TOKEN is required")
+	}
+	if c.WorkerCIDR == "" {
+		return fmt.Errorf("WORKER_CIDR is required")
+	}
+	if c.PodIP == "" {
+		return fmt.Errorf("POD_IP is required")
 	}
 	return nil
 }

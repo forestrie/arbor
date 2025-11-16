@@ -18,15 +18,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compute image tag
-        id: vars
-        run: echo "image_tag=main-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-
       - name: Install go-task
         uses: arduino/setup-task@v2
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Unit Tests
+        run: |
+          task test:unit
+
+      - name: Integration Tests
+        run: |
+          task test:integration
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -55,6 +58,10 @@ jobs:
             --from-literal=queue-api-token="${RANGER_QUEUE_API_TOKEN}" \
             --namespace=forestrie-arbor \
             --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Compute image tag
+        id: vars
+        run: echo "image_tag=main-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
       - name: Build Docker image
         env:

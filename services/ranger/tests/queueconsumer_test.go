@@ -45,6 +45,8 @@ func Test_QueueConsumer_singleMessage(t *testing.T) {
 		MassifHeight:    14,
 		CommitmentEpoch: 1,
 		TrustCanopy:     false,
+		WorkerCIDR:      "0.0.0.0/16",
+		PodIP:           "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -91,6 +93,8 @@ func Test_QueueConsumer_multiLogBatches(t *testing.T) {
 		MassifHeight:    massifHeight,
 		CommitmentEpoch: 1,
 		TrustCanopy:     false,
+		WorkerCIDR:      "0.0.0.0/16",
+		PodIP:           "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -236,6 +240,8 @@ func Test_QueueConsumer_batchSizes(t *testing.T) {
 		MassifHeight:    14,
 		CommitmentEpoch: 1,
 		TrustCanopy:     false,
+		WorkerCIDR:      "0.0.0.0/16",
+		PodIP:           "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -309,6 +315,8 @@ func Test_QueueConsumer_multiLogBatches_massifBoundaries(t *testing.T) {
 		MassifHeight:    massifHeight,
 		CommitmentEpoch: 1,
 		TrustCanopy:     false,
+		WorkerCIDR:      "0.0.0.0/16",
+		PodIP:           "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -463,6 +471,8 @@ func Test_QueueConsumer_massifBoundaries(t *testing.T) {
 				MassifHeight:    3,
 				CommitmentEpoch: 1,
 				TrustCanopy:     false,
+				WorkerCIDR:      "0.0.0.0/16",
+				PodIP:           "10.0.0.1",
 			}, httpClient, log)
 			require.NoError(t, err)
 
