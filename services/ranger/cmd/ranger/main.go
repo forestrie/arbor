@@ -53,13 +53,11 @@ func main() {
 	httpClient := ranger.NewHTTPClient(logger)
 
 	// Create committer if TrustCanopy is enabled
-	var massifCommitter consumer.MassifCommitter
-	comm, err := committer.NewCommitter(cfg, httpClient, logger)
+	massifCommitter, err := committer.NewCommitter(cfg, httpClient, logger)
 	if err != nil {
 		slog.Error("failed to create committer", "error", err)
 		os.Exit(1)
 	}
-	massifCommitter = comm
 	slog.Info("merklelog committer initialized",
 		"massifHeight", cfg.MassifHeight,
 		"commitmentEpoch", cfg.CommitmentEpoch,

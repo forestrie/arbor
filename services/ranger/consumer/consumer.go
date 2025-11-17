@@ -30,7 +30,13 @@ type MessageAcker func(ctx context.Context, msg QueueMessage) error
 type MassifCommitter interface {
 	// ProcessBatch processes messages contained in qbatch.ByLogID[start:end].
 	// The caller guarantees the range contains exactly one log's messages.
-	ProcessBatch(ctx context.Context, batch *QueuePullResult, start, end int) error
+	// The implementation guarantees to return the index of the last successfully
+	// committed batch item.
+	// The implementation guarantes that all items after the returned index have
+	// not been processed and so should not be acknowleged
+	// The implementation may decide to consume errors it considers non transient
+	// by  continuing processing (it must record the err in Errs)
+	ProcessBatch(ctx context.Context, batch *QueuePullResult, start, end int) (int, error)
 }
 
 // QueueConsumer coordinates Cloudflare Queue message consumption.
@@ -131,92 +137,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 		"batchSz", q.cfg.QueueBatchSize,
 		"visto", q.cfg.VisibilityTimeout.Microseconds(),
 	)
-
-	// If committer is available, use batch processing
-	if q.committer != nil {
-		return q.ProcessBatchWithCommitter(ctx, &queueResp.Result)
-	}
-	q.logger.Warn("committer not configured, logging and cosuming all")
-
-	// Otherwise, fall back to per-message processing
-	var acknowledged int
-	for _, msg := range queueResp.Result.Messages {
-		if err := q.ProcessMessage(ctx, msg); err != nil {
-			q.logger.Warn("failed to process message - not acknowledging",
-				"messageID", msg.ID,
-				"error", err,
-			)
-			continue
-		}
-
-		if err := q.AcknowledgeMessage(ctx, msg); err != nil {
-			q.logger.Warn("failed to acknowledge message",
-				"messageID", msg.ID,
-				"error", err,
-			)
-			continue
-		}
-		acknowledged++
-	}
-
-	if acknowledged != len(queueResp.Result.Messages) {
-		q.logger.Info("failed to acknowledge messages", "count", len(queueResp.Result.Messages)-acknowledged)
-	}
-
-	return nil
-}
-
-// ProcessMessage handles the business logic for a single message.
-func (q *QueueConsumer) ProcessMessage(ctx context.Context, msg QueueMessage) error {
-	var bodyJSON string
-	if err := json.Unmarshal(msg.Body, &bodyJSON); err != nil {
-		q.logger.Warn("failed to parse queue message body - message not consumed",
-			"messageID", msg.ID,
-			"error", err,
-		)
-		return fmt.Errorf("failed to parse queue message body: %w", err)
-	}
-
-	var r2Notification R2Notification
-	if err := json.Unmarshal([]byte(bodyJSON), &r2Notification); err != nil {
-		q.logger.Warn("failed to parse R2 notification - message not consumed",
-			"messageID", msg.ID,
-			"error", err,
-			"bodySample", samplePrefix(bodyJSON, 128),
-		)
-		return fmt.Errorf("failed to parse R2 notification: %w", err)
-	}
-
-	if r2Notification.Action != "PutObject" {
-		return nil
-	}
-
-	var parsed ParsedNotification
-	if err := parseObjectPath(&parsed, r2Notification.Object.Key); err != nil {
-		q.logger.Warn("failed to parse object path - message not consumed",
-			"messageID", msg.ID,
-			"path", r2Notification.Object.Key,
-			"error", err,
-		)
-		return fmt.Errorf("failed to parse object path %q: %w", r2Notification.Object.Key, err)
-	}
-	parsed.ETag = r2Notification.Object.ETag
-	parsed.EventTime = r2Notification.EventTime
-
-	if !q.cfg.TrustCanopy {
-		return nil
-	}
-
-	if err := VerifyObjectHash(ctx, q.cfg, &parsed, q.httpClient, q.logger); err != nil {
-		q.logger.Warn("hash verification failed - message consumed anyway",
-			"fenceIndex", parsed.FenceIndex,
-			"pathHash", hex.EncodeToString(parsed.Hash),
-			"error", err,
-		)
-		return nil
-	}
-
-	return nil
+	return q.ProcessBatchWithCommitter(ctx, &queueResp.Result)
 }
 
 // AcknowledgeMessage acknowledges a message to remove it from the queue.
@@ -382,19 +303,25 @@ func (q *QueueConsumer) ProcessBatchWithCommitter(ctx context.Context, qbatch *Q
 		processedAtLeastOne = true
 		go func(start, end int) {
 			defer wg.Done()
-			if err := q.committer.ProcessBatch(ctx, qbatch, start, end); err != nil {
+			lastCommit, err := q.committer.ProcessBatch(ctx, qbatch, start, end)
+			if err != nil {
 				logID := hex.EncodeToString(qbatch.Decoded[qbatch.ByLogID[start]].LogID)
 				q.logger.Error("failed to process log batch",
 					"logID", logID,
 					"start", start,
 					"end", end,
+					"lastCommit", lastCommit,
 					"error", err,
 				)
+				if lastCommit > start {
+					q.ackBatch(ctx, qbatch, start, lastCommit)
+				}
 				return
 			}
-			// After successful ProcessBatch, acknowledge all messages in range where Ack is set to true
-			// The committer sets Ack[idx] = true for successfully committed messages
-			q.ackBatch(ctx, qbatch, start, end)
+			// After ProcessBatch, acknowledge all messages in the consumed range
+			// [start,lastCommit). Items at or after lastCommit are left unacked to
+			// become available again once their visibility timeout expires.
+			q.ackBatch(ctx, qbatch, start, lastCommit)
 		}(start, end)
 
 		start = end
@@ -420,18 +347,17 @@ func (q *QueueConsumer) ProcessBatchWithCommitter(ctx context.Context, qbatch *Q
 func (q *QueueConsumer) ackBatch(ctx context.Context, qbatch *QueuePullResult, start, end int) {
 	var wg sync.WaitGroup
 
+	// end marks the end of a sub batch for a single log id, or marks the last
+	// consumed message in that batch. consumed means committed to the log or
+	// determinted to be not re-tryable
+	//
 	for i := start; i < end; i++ {
-		if i < 0 || i >= len(qbatch.ByLogID) {
-			continue
-		}
+
 		msgIdx := qbatch.ByLogID[i]
-		// Only acknowledge messages where Ack is explicitly set to true
-		// This includes:
-		// - Messages with decode/parse errors (set during initial processing)
-		// - Messages successfully committed by ProcessBatch (set by committer)
-		if !qbatch.Ack[msgIdx] {
-			continue
-		}
+
+		// NOTICE: If ProcessBatch stopped part way through a batch due to an
+		// error, messages from that point will not be acknowledged here because
+		// ack will be false.
 
 		wg.Add(1)
 		go func(msgIdx int) {
@@ -441,8 +367,6 @@ func (q *QueueConsumer) ackBatch(ctx context.Context, qbatch *QueuePullResult, s
 					"messageID", qbatch.Messages[msgIdx].ID,
 					"error", err,
 				)
-				qbatch.Errs[msgIdx] = err
-				qbatch.Ack[msgIdx] = false
 			}
 		}(msgIdx)
 	}

@@ -1,55 +1,12 @@
 package consumer
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/forestrie/arbor/services/ranger"
 )
-
-func TestProcessMessageDecodesBase64Body(t *testing.T) {
-	notification := R2Notification{
-		Account:   "account",
-		Action:    "PutObject",
-		Bucket:    "canopy-dev-1-leaves",
-		EventTime: "2025-11-09T14:14:52.423Z",
-		Object: R2Object{
-			Key:  "logs/de305d54-75b4-431b-adb2-eb6b9e546014/leaves/0/" + strings.Repeat("a", 64),
-			Size: 53,
-			ETag: "etag",
-		},
-	}
-
-	body, err := json.Marshal(notification)
-	if err != nil {
-		t.Fatalf("marshal notification: %v", err)
-	}
-
-	bodyStringJSON, err := json.Marshal(string(body))
-	if err != nil {
-		t.Fatalf("wrap notification: %v", err)
-	}
-
-	raw := json.RawMessage(bodyStringJSON)
-
-	msg := QueueMessage{
-		ID:   "message-id",
-		Body: raw,
-	}
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
-	consumer := NewQueueConsumer(ranger.Config{TrustCanopy: false}, nil, logger, nil)
-
-	if err := consumer.ProcessMessage(context.Background(), msg); err != nil {
-		t.Fatalf("ProcessMessage returned error: %v", err)
-	}
-}
 
 func TestQueuePullResponseUnmarshal(t *testing.T) {
 	r2 := R2Notification{

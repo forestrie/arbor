@@ -73,13 +73,13 @@ func (c *Committer) ProcessBatch(
 	ctx context.Context,
 	batch *consumer.QueuePullResult,
 	start, end int,
-) error {
+) (int, error) {
 	if start >= end {
-		return nil
+		return start, nil
 	}
 
 	if start < 0 || end > len(batch.Messages) {
-		return fmt.Errorf("invalid batch range start=%d end=%d size=%d", start, end, len(batch.ByLogID))
+		return start, fmt.Errorf("invalid batch range start=%d end=%d size=%d", start, end, len(batch.ByLogID))
 	}
 
 	firstIdx := batch.ByLogID[start]
@@ -87,7 +87,7 @@ func (c *Committer) ProcessBatch(
 	if len(parsed.LogID) == 0 {
 		err := fmt.Errorf("missing logID for message index %d", firstIdx)
 		batch.Errs[firstIdx] = err
-		return err
+		return start, err
 	}
 
 	logID := massifstorage.LogID(parsed.LogID)
@@ -96,59 +96,21 @@ func (c *Committer) ProcessBatch(
 	// Each ProcessBatch call uses its own Store instance bound to this log ID.
 	store, err := c.factory.NewStore(logID)
 	if err != nil {
-		rangeErr := fmt.Errorf("failed to create store for log %s: %w", logIDHex, err)
-		for i := start; i < end; i++ {
-			batch.Errs[batch.ByLogID[i]] = rangeErr
-		}
-		return rangeErr
+		return start, fmt.Errorf("failed to create store for log %s: %w", logIDHex, err)
 	}
 
 	if err := store.SelectLog(ctx, logID); err != nil {
-		rangeErr := fmt.Errorf("failed to select log %s: %w", logIDHex, err)
-		for i := start; i < end; i++ {
-			batch.Errs[batch.ByLogID[i]] = rangeErr
-		}
-		return rangeErr
+		return start, fmt.Errorf("failed to select log %s: %w", logIDHex, err)
 	}
 
 	mc, err := massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 	if err != nil {
-		rangeErr := fmt.Errorf("failed to get append context: %w", err)
-		for i := start; i < end; i++ {
-			batch.Errs[batch.ByLogID[i]] = rangeErr
-		}
-		return rangeErr
+		return start, fmt.Errorf("failed to get append context: %w", err)
 	}
 
-	committed := make([]int, 0, end-start)
-
-	commitRange := func(afterRollover bool) error {
-		if len(committed) > 0 {
-			if err := massifs.CommitContext(ctx, store, &mc); err != nil {
-				commitErr := fmt.Errorf("failed to commit context: %w", err)
-				for _, idx := range committed {
-					batch.Errs[idx] = commitErr
-				}
-				return commitErr
-			}
-
-			for _, idx := range committed {
-				batch.Ack[idx] = true
-				batch.Errs[idx] = nil
-			}
-			committed = committed[:0]
-		}
-
-		if afterRollover {
-			var getErr error
-			mc, getErr = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
-			if getErr != nil {
-				return fmt.Errorf("failed to get append context after rollover: %w", getErr)
-			}
-		}
-
-		return nil
-	}
+	// lastCommit is a ByLogID index and is treated as an exclusive upper bound
+	// for messages that have been fully processed and committed.
+	lastCommit := start
 
 	for i := start; i < end; i++ {
 		msgIdx := batch.ByLogID[i]
@@ -160,13 +122,6 @@ func (c *Committer) ProcessBatch(
 		if len(parsed.Hash) != sha256.Size {
 			err := fmt.Errorf("invalid hash length %d", len(parsed.Hash))
 			batch.Errs[msgIdx] = err
-			// Non-retryable validation error - consume the message
-			batch.Ack[msgIdx] = true
-			c.logger.Warn("invalid hash length",
-				"logID", logIDHex,
-				"fenceIndex", parsed.FenceIndex,
-				"length", len(parsed.Hash),
-			)
 			continue
 		}
 
@@ -174,11 +129,6 @@ func (c *Committer) ProcessBatch(
 		if err != nil {
 			err = fmt.Errorf("failed to generate id timestamp: %w", err)
 			batch.Errs[msgIdx] = err
-			c.logger.Warn("failed to generate id timestamp",
-				"logID", logIDHex,
-				"fenceIndex", parsed.FenceIndex,
-				"error", err,
-			)
 			continue
 		}
 
@@ -194,16 +144,30 @@ func (c *Committer) ProcessBatch(
 			err := fmt.Errorf("invalid leaf hash length %d", len(leafHash))
 			batch.Errs[msgIdx] = err
 			// Non-retryable validation error - consume the message
-			batch.Ack[msgIdx] = true
-			c.logger.Warn("invalid leaf hash length",
-				"logID", logIDHex,
-				"fenceIndex", parsed.FenceIndex,
-				"length", len(leafHash),
-			)
 			continue
 		}
 
-		for {
+		_, err = mc.AddHashedLeaf(
+			sha256.New(),
+			idTimestamp,
+			idTimestampBytes,
+			parsed.LogID,
+			parsed.Hash,
+			leafHash,
+		)
+		if errors.Is(err, massifs.ErrMassifFull) {
+			// Commit the current massif; all items up to and including i are now
+			// durably recorded. lastCommit tracks the ByLogID index of the first
+			// uncommitted item.
+			if err = massifs.CommitContext(ctx, store, &mc); err != nil {
+				batch.Errs[msgIdx] = err
+				return lastCommit, err
+			}
+			lastCommit = i + 1
+			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
+			if err != nil {
+				return lastCommit, fmt.Errorf("failed to get append context after rollover: %w", err)
+			}
 			_, err = mc.AddHashedLeaf(
 				sha256.New(),
 				idTimestamp,
@@ -212,31 +176,21 @@ func (c *Committer) ProcessBatch(
 				parsed.Hash,
 				leafHash,
 			)
-			if errors.Is(err, massifs.ErrMassifFull) {
-				if commitErr := commitRange(true); commitErr != nil {
-					batch.Errs[msgIdx] = commitErr
-					return commitErr
-				}
-				continue
-			}
-			if err != nil {
-				leafErr := fmt.Errorf("failed to add leaf: %w", err)
-				batch.Errs[msgIdx] = leafErr
-				c.logger.Warn("failed to add leaf",
-					"logID", logIDHex,
-					"fenceIndex", parsed.FenceIndex,
-					"error", err,
-				)
-			} else {
-				committed = append(committed, msgIdx)
-			}
-			break
+			// fall through to handle err below
+		}
+		if err != nil {
+			leafErr := fmt.Errorf("failed to add leaf: %w", err)
+			batch.Errs[msgIdx] = leafErr
+			// all transient errors have been considered above, so consume the
+			// message
+			continue
 		}
 	}
 
-	if err := commitRange(false); err != nil {
-		return err
+	// Final commit of any remaining uncommitted items in this range.
+	if err := massifs.CommitContext(ctx, store, &mc); err != nil {
+		return lastCommit, err
 	}
 
-	return nil
+	return end, nil
 }
