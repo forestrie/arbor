@@ -36,7 +36,6 @@ tasks:
     desc: bootstrap the development environment
     cmds:
       - |
-        echo "hello"
         GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
         sh -c "$GIT_BOOTSTRAP_SH" - clone .
         ls -lad ..
