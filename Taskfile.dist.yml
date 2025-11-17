@@ -38,6 +38,8 @@ tasks:
       - |
         GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
         sh -c "$GIT_BOOTSTRAP_SH" - clone .
+        ls -lad ..
+        pwd
 
   test:
     desc: run all the tests
@@ -71,4 +73,3 @@ tasks:
     cmds:
       - task: minio:start
       - cd services/ranger/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...
-
