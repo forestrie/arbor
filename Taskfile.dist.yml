@@ -42,8 +42,11 @@ tasks:
         echo "-- $(pwd)"
         tree -d
         echo "-- parent dir"
-        $(cd .. && tree -d)
-        $(cd .. && ls -lad *)
+        pushd ..
+        tree -d
+        ls -lad *
+        pwd
+        popd
         pwd
 
         if [ -f ../go.work ]; then
