@@ -36,14 +36,14 @@ tasks:
     desc: bootstrap the development environment
     cmds:
       - |
-        GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
+        export GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
         sh -c "$GIT_BOOTSTRAP_SH" - clone .
         sh -c "$GIT_BOOTSTRAP_SH" - checkout .
         echo "-- $(pwd)"
         tree -d
         echo "-- parent dir"
-        tree -d
-        ls -lad ../*
+        $(cd .. && tree -d)
+        $(cd .. && ls -lad *)
         pwd
 
         if [ -f ../go.work ]; then
