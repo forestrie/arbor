@@ -46,16 +46,16 @@ tasks:
         cat <<EOF > ../go.work
         go 1.24.4
         use (
-        	./arbor/services/ranger
-	        ./arbor/services/sharder
-        	./go-datatrails-common
-        	./go-merklelog-datatrails
-        	./go-merklelog/massifs
-        	./go-merklelog/mmr
-        	./go-datatrails-serialization/eventsv1
-        	./go-merklelog-azure
-        	./go-merklelog-fs
-        	./go-merklelog-provider-testing
+          ./arbor/services/ranger
+          ./arbor/services/sharder
+          ./go-datatrails-common
+          ./go-merklelog-datatrails
+          ./go-merklelog/massifs
+          ./go-merklelog/mmr
+          ./go-datatrails-serialization/eventsv1
+          ./go-merklelog-azure
+          ./go-merklelog-fs
+          ./go-merklelog-provider-testing
         )
         EOF
         fi
