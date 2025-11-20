@@ -8,7 +8,7 @@ vars:
 
 includes:
   minio:
-    taskfile: ../taskfiles/Taskfile_minio.yml
+    taskfile: services/ranger/taskfiles/Taskfile_minio.yml
     optional: true
     dir: .
   ranger:
@@ -37,25 +37,23 @@ tasks:
     cmds:
       - |
         export GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
-        sh -c "$GIT_BOOTSTRAP_SH" - dirs .
-        sh -c "$GIT_BOOTSTRAP_SH" - clone .
-        sh -c "$GIT_BOOTSTRAP_SH" - checkout .
-        if [ -f ../go.work ]; then
-          echo "go.work exists, you may need to update it"
+        (cd services/ranger && sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
+        if [ -f services/ranger/go.work ]; then
+          echo "services/ranger/go.work exists, you may need to update it"
         else
-        cat <<EOF > ../go.work
+        cat <<EOF > services/ranger/go.work
         go 1.24.4
         use (
-          ./arbor/services/ranger
-          ./arbor/services/sharder
+          ./src
           ./go-datatrails-common
-          ./go-merklelog-datatrails
-          ./go-merklelog/massifs
-          ./go-merklelog/mmr
           ./go-datatrails-serialization/eventsv1
+          ./go-datatrails-simplehash
           ./go-merklelog-azure
+          ./go-merklelog-datatrails
           ./go-merklelog-fs
           ./go-merklelog-provider-testing
+          ./go-merklelog/massifs
+          ./go-merklelog/mmr
         )
         EOF
         fi
@@ -71,11 +69,17 @@ tasks:
     vars:
       GO_TEST_TAGS: '{{.GO_TEST_TAGS | default ""}}'
       GO_MOD_DIRS:
-        sh: find . -type f -name 'go.mod'
+        sh: find services -type f -name 'go.mod' ! -path 'services/ranger/go-*/*'
     cmds:
       - for: { var: GO_MOD_DIRS, as: MODULE }
         cmd: |
-          cd $(dirname {{.MODULE}})
+          MOD_DIR=$(dirname {{.MODULE}})
+          if [ "$MOD_DIR" = "services/ranger/src" ]; then
+            export GOWORK="$(pwd)/services/ranger/go.work"
+          else
+            unset GOWORK
+          fi
+          cd "$MOD_DIR"
 
           go test \
             {{.GO_TEST_TAGS}} \
@@ -91,4 +95,6 @@ tasks:
       # sh: find services -type f -name 'go.mod'
     cmds:
       - task: minio:start
-      - cd services/ranger/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...
+      - |
+        export GOWORK="$(pwd)/services/ranger/go.work"
+        cd services/ranger/src/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...

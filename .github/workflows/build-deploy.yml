@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - ".env.bootstrap"
+      - "services/ranger/.env.bootstrap"
       - "Taskfile.dist.yml"
       - "taskfiles/**"
       - "services/**"

@@ -1,1 +1,12 @@
+/go.work
+/go.work.sum
 /ranger
+/taskfiles
+/go-datatrails-common
+/go-merklelog
+/go-merklelog-datatrails
+/go-datatrails-simplehash
+/go-datatrails-serialization
+/go-merklelog-azure
+/go-merklelog-fs
+/go-merklelog-provider-testing
