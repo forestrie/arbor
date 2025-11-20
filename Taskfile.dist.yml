@@ -4,7 +4,7 @@ version: "3"
 vars:
   IMAGE_URL: europe-west2-docker.pkg.dev/forest-dev-1/forestrie
   CLUSTER_NAME: forest-dev-1
-  CLUSTER_REGION: europe-west2
+  CLUSTER_ZONE: europe-west2-a
 
 includes:
   minio:
@@ -24,7 +24,7 @@ tasks:
   cluster-auth:
     desc: Authenticate to GKE cluster
     cmds:
-      - gcloud container clusters get-credentials {{.CLUSTER_NAME}} --region={{.CLUSTER_REGION}}
+      - gcloud container clusters get-credentials {{.CLUSTER_NAME}} --zone={{.CLUSTER_ZONE}}
 
   gcp-auth:
     desc: Authenticate to GCP (both Artifact Registry and GKE)

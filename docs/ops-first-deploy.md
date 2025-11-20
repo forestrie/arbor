@@ -44,7 +44,7 @@ After workflow completes:
 
 ```bash
 # Get cluster credentials
-gcloud container clusters get-credentials forest-dev-1 --region=europe-west2
+gcloud container clusters get-credentials forest-dev-1 --zone=europe-west2-a
 
 # Verify deployment
 kubectl get deployment ranger -n forestrie-arbor
@@ -60,6 +60,7 @@ curl http://localhost:9090/version
 
 - **Project**: forest-dev-1
 - **Region**: europe-west2
+- **Zone**: europe-west2-a
 - **Cluster**: forest-dev-1
 - **Artifact Registry**: europe-west2-docker.pkg.dev/forest-dev-1/forestrie
 - **Namespace**: forestrie-arbor
