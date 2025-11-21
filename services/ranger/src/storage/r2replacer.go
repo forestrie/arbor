@@ -4,9 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
-
 	"log/slog"
+	"net/http"
 
 	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
@@ -81,6 +80,7 @@ func (r *Replacer) Put(
 
 		return fmt.Errorf("failed to write object %s: %w", objectPath, err)
 	}
+	r.logger.Info("put", "path", objectPath)
 
 	return nil
 }
