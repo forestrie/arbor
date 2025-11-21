@@ -74,6 +74,10 @@ func (c *Committer) ProcessBatch(
 	batch *consumer.QueuePullResult,
 	start, end int,
 ) (int, error) {
+	var mmrIndex uint64
+	var leafHash []byte
+	var parsed consumer.ParsedNotification
+
 	if start >= end {
 		return start, nil
 	}
@@ -83,7 +87,7 @@ func (c *Committer) ProcessBatch(
 	}
 
 	firstIdx := batch.ByLogID[start]
-	parsed := batch.Decoded[firstIdx]
+	parsed = batch.Decoded[firstIdx]
 	if len(parsed.LogID) == 0 {
 		err := fmt.Errorf("missing logID for message index %d", firstIdx)
 		batch.Errs[firstIdx] = err
@@ -118,7 +122,7 @@ func (c *Committer) ProcessBatch(
 			continue
 		}
 
-		parsed := batch.Decoded[msgIdx]
+		parsed = batch.Decoded[msgIdx]
 		if len(parsed.Hash) != sha256.Size {
 			err := fmt.Errorf("invalid hash length %d", len(parsed.Hash))
 			batch.Errs[msgIdx] = err
@@ -138,7 +142,7 @@ func (c *Committer) ProcessBatch(
 		hasher := sha256.New()
 		hasher.Write(idTimestampBytes)
 		hasher.Write(parsed.Hash)
-		leafHash := hasher.Sum(nil)
+		leafHash = hasher.Sum(nil)
 
 		if len(leafHash) != massifs.ValueBytes {
 			err := fmt.Errorf("invalid leaf hash length %d", len(leafHash))
@@ -147,7 +151,7 @@ func (c *Committer) ProcessBatch(
 			continue
 		}
 
-		_, err = mc.AddHashedLeaf(
+		mmrIndex, err = mc.AddHashedLeaf(
 			sha256.New(),
 			idTimestamp,
 			idTimestampBytes,
@@ -163,6 +167,12 @@ func (c *Committer) ProcessBatch(
 				batch.Errs[msgIdx] = err
 				return lastCommit, err
 			}
+			c.logger.Info(
+				"committed",
+				"index", mmrIndex,
+				"content", fmt.Sprintf("%x", parsed.Hash),
+				"leaf", fmt.Sprintf("%x", leafHash))
+
 			lastCommit = i + 1
 			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 			if err != nil {
@@ -191,6 +201,11 @@ func (c *Committer) ProcessBatch(
 	if err := massifs.CommitContext(ctx, store, &mc); err != nil {
 		return lastCommit, err
 	}
+	c.logger.Info(
+		"committed",
+		"index", mmrIndex,
+		"content", fmt.Sprintf("%x", parsed.Hash),
+		"leaf", fmt.Sprintf("%x", leafHash))
 
 	return end, nil
 }
