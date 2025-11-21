@@ -368,6 +368,9 @@ func (q *QueueConsumer) ackBatch(ctx context.Context, qbatch *QueuePullResult, s
 					"error", err,
 				)
 			}
+			if qbatch.Errs[msgIdx] != nil {
+				q.logger.Warn("message processing", "err", qbatch.Errs[msgIdx])
+			}
 		}(msgIdx)
 	}
 
