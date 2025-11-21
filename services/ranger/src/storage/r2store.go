@@ -4,9 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
-
 	"log/slog"
+	"net/http"
 
 	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
@@ -294,6 +293,8 @@ func translateListError(err error) error {
 		case http.StatusForbidden, http.StatusUnauthorized,
 			http.StatusTooManyRequests, http.StatusServiceUnavailable:
 			return massifstorage.ErrNotAvailable
+		case http.StatusNotFound:
+			return massifstorage.ErrDoesNotExist
 		default:
 			return massifstorage.ErrNotAvailable
 		}

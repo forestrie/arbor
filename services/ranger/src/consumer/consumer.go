@@ -375,6 +375,8 @@ func (q *QueueConsumer) ackBatch(ctx context.Context, qbatch *QueuePullResult, s
 	}
 
 	wg.Wait()
+
+	q.logger.Info("ackBatch", "acked", end-start)
 }
 
 // parseObjectPath extracts logId, fenceIndex, and hash from R2 object path.
