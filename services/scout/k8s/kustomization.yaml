@@ -9,7 +9,7 @@ commonLabels:
   component: api
 images:
   - name: europe-west2-docker.pkg.dev/forest-dev-1/forestrie/scout
-    newTag: main-bacdd81-294 # {"$imagepolicy": "flux-system:scout:tag"}
+    newTag: main-01003d8-298 # {"$imagepolicy": "flux-system:scout:tag"}
 configMapGenerator:
   - name: scout-config
     literals:
