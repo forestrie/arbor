@@ -126,7 +126,6 @@ func TestClientPutObjectError(t *testing.T) {
 }
 
 func TestClientListObjects(t *testing.T) {
-	t.Skip("skipping test")
 	var received struct {
 		prefix            string
 		cursor            string

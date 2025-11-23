@@ -238,10 +238,11 @@ func (c *Client) ListObjects(
 		req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
 	}
 
-	if c.token != "" {
-		return ListResult{}, fmt.Errorf("list request failed: no token provided")
+	if c.token == "" {
+		c.logger.Warn("ListObjects: no token provided")
+	} else {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.doer.Do(ctx, req)
 	if err != nil {
