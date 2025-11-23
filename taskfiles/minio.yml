@@ -37,6 +37,8 @@ tasks:
       directory is created automatically. After the container is up the MinIO
       client (mc) is used to create the integration-test bucket and mark it
       public so the tests can use unsigned requests.
+    status:
+      - docker ps --filter "name={{.MINIO_CONTAINER_NAME}}" --filter "status=running" -q | grep -q . && curl -fsS http://localhost:{{.MINIO_API_PORT}}/minio/health/live >/dev/null 2>&1
     cmds:
       - |
         MINIO_DATA_DIR=$(mkdir -p {{.MINIO_DATA_DIR}} && cd {{.MINIO_DATA_DIR}} && pwd)
@@ -79,6 +81,8 @@ tasks:
 
   stop:
     desc: Stop and remove the MinIO container
+    status:
+      - docker ps --filter "name={{.MINIO_CONTAINER_NAME}}" --filter "status=running" -q | grep -q . && exit 1 || exit 0
     cmds:
       - docker rm -f {{.MINIO_CONTAINER_NAME}} || true
 
