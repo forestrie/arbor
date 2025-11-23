@@ -70,13 +70,24 @@ jobs:
         id: vars
         run: echo "image_tag=main-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Docker image
+      - name: Build Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
         run: task ranger:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
-      - name: Push Docker image
+      - name: Build Scout Image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: task scout:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+
+      - name: Push Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
         run: task ranger:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Push Scout image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: task scout:push IMAGE_TAG=${IMAGE_TAG}
