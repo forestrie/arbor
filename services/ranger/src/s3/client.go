@@ -28,10 +28,11 @@ type HTTPDoer interface {
 // NOTE: we intentionally keep this thin; consider introducing retries and
 // richer telemetry if we observe transient failures at scale.
 type Client struct {
-	baseURL *url.URL
-	token   string
-	doer    HTTPDoer
-	logger  *slog.Logger
+	baseURL              *url.URL
+	token                string
+	doer                 HTTPDoer
+	logger               *slog.Logger
+	includeContentSHA256 bool // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
 }
 
 // PutOptions controls conditional write behaviour for PUT requests.
@@ -71,8 +72,25 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("s3 api error: status=%d body=%q", e.StatusCode, e.Body)
 }
 
+// emptyBodySHA256 is the SHA256 hash of an empty string, used for x-amz-content-sha256
+// header on requests with no body (GET, DELETE, etc.)
+const emptyBodySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+// ClientOption configures a Client.
+type ClientOption func(*Client)
+
+// WithContentSHA256 enables the x-amz-content-sha256 header (required for Cloudflare R2).
+// This is enabled by default.
+func WithContentSHA256(enabled bool) ClientOption {
+	return func(c *Client) {
+		c.includeContentSHA256 = enabled
+	}
+}
+
 // NewClient constructs a Client using the provided baseURL and bearer token.
-func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger) (*Client, error) {
+// By default, x-amz-content-sha256 header is included (required for Cloudflare R2).
+// Use WithContentSHA256(false) to disable it for S3-compatible backends that don't require it.
+func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger, opts ...ClientOption) (*Client, error) {
 	if doer == nil {
 		return nil, fmt.Errorf("http doer is required")
 	}
@@ -90,12 +108,19 @@ func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger) 
 		u.Path = strings.TrimSuffix(u.Path, "/") + "/"
 	}
 
-	return &Client{
-		baseURL: u,
-		token:   bearerToken,
-		doer:    doer,
-		logger:  logger,
-	}, nil
+	client := &Client{
+		baseURL:              u,
+		token:                bearerToken,
+		doer:                 doer,
+		logger:               logger,
+		includeContentSHA256: true, // Default: enabled for Cloudflare R2 compatibility
+	}
+
+	for _, opt := range opts {
+		opt(client)
+	}
+
+	return client, nil
 }
 
 // PutObject uploads data at the provided object key.
@@ -185,6 +210,12 @@ func (c *Client) ListObjects(
 		return ListResult{}, fmt.Errorf("failed to build list request: %w", err)
 	}
 	req = req.WithContext(ctx)
+	
+	// Set headers for S3-compatible API
+	if c.includeContentSHA256 {
+		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
+	}
+	
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
@@ -282,6 +313,11 @@ func (c *Client) GetObject(ctx context.Context, key string, opts GetOptions) (Ge
 	}
 	req = req.WithContext(ctx)
 
+	// Set headers for S3-compatible API
+	if c.includeContentSHA256 {
+		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
+	}
+
 	if opts.RangeLength >= 0 {
 		end := opts.RangeStart + opts.RangeLength - 1
 		if opts.RangeLength == 0 {
@@ -337,6 +373,11 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 		return fmt.Errorf("failed to create delete request: %w", err)
 	}
 	req = req.WithContext(ctx)
+
+	// Set headers for S3-compatible API
+	if c.includeContentSHA256 {
+		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
+	}
 
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)

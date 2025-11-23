@@ -20,17 +20,20 @@ type Factory struct {
 
 // NewFactory initialises a Factory using the shared S3-compatible REST
 // client. It is a convenience alias for NewS3Factory used primarily by tests.
-func NewFactory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger) (*Factory, error) {
-	return NewS3Factory(baseURL, token, doer, logger)
+// For MinIO compatibility, use s3.WithContentSHA256(false) option.
+func NewFactory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger, opts ...s3.ClientOption) (*Factory, error) {
+	return NewS3Factory(baseURL, token, doer, logger, opts...)
 }
 
 // NewS3Factory initialises a Factory backed by an S3-compatible client.
-func NewS3Factory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger) (*Factory, error) {
+// By default, x-amz-content-sha256 header is included (required for Cloudflare R2).
+// Use s3.WithContentSHA256(false) option to disable it for S3-compatible backends that don't require it.
+func NewS3Factory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger, opts ...s3.ClientOption) (*Factory, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	s3Client, err := s3.NewClient(baseURL, token, doer, logger)
+	s3Client, err := s3.NewClient(baseURL, token, doer, logger, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build s3 client: %w", err)
 	}

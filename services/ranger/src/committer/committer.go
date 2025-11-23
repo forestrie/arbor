@@ -29,8 +29,9 @@ type Committer struct {
 }
 
 // NewCommitter creates a new Committer instance backed by the S3-compatible
-// storage backend. This is primarily used in integration tests where MinIO
-// provides an S3 API.
+// storage backend. This is used for both production (Cloudflare R2) and
+// integration tests (MinIO). The S3 factory includes x-amz-content-sha256
+// header by default for Cloudflare R2 compatibility.
 func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger) (*Committer, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is required")
@@ -39,6 +40,7 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		logger = slog.Default()
 	}
 
+	// Use S3 factory with x-amz-content-sha256 enabled by default (required for Cloudflare R2)
 	factory, err := storage.NewS3Factory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage factory: %w", err)

@@ -105,7 +105,8 @@ func massifCountForLog(
 ) uint32 {
 	t.Helper()
 
-	factory, err := rangerstorage.NewS3Factory(r2WriteURL, bearerToken, httpClient, logger)
+	// Disable x-amz-content-sha256 header for MinIO compatibility
+	factory, err := rangerstorage.NewS3Factory(r2WriteURL, bearerToken, httpClient, logger, s3.WithContentSHA256(false))
 	require.NoError(t, err)
 
 	store, err := factory.NewStore(nil)

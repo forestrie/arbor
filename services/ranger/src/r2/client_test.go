@@ -127,10 +127,12 @@ func TestClientPutObjectError(t *testing.T) {
 
 func TestClientListObjects(t *testing.T) {
 	var received struct {
-		prefix string
-		cursor string
-		limit  string
-		auth   string
+		prefix              string
+		cursor              string
+		limit               string
+		auth                string
+		accept              string
+		xAmzContentSha256  string
 	}
 
 	page := ListResult{
@@ -148,6 +150,8 @@ func TestClientListObjects(t *testing.T) {
 		received.cursor = q.Get("cursor")
 		received.limit = q.Get("limit")
 		received.auth = r.Header.Get("Authorization")
+		received.accept = r.Header.Get("Accept")
+		received.xAmzContentSha256 = r.Header.Get("x-amz-content-sha256")
 		_ = json.NewEncoder(w).Encode(page)
 	}))
 	defer server.Close()
@@ -164,6 +168,12 @@ func TestClientListObjects(t *testing.T) {
 
 	if received.auth != "Bearer token" {
 		t.Fatalf("unexpected auth %s", received.auth)
+	}
+	if received.accept != "application/json" {
+		t.Fatalf("expected Accept: application/json, got %q", received.accept)
+	}
+	if received.xAmzContentSha256 != emptyBodySHA256 {
+		t.Fatalf("expected x-amz-content-sha256 %q, got %q", emptyBodySHA256, received.xAmzContentSha256)
 	}
 	if received.prefix != "prefix/" {
 		t.Fatalf("unexpected prefix %s", received.prefix)
@@ -228,12 +238,16 @@ func TestClientListObjectsError(t *testing.T) {
 
 func TestClientGetObjectRange(t *testing.T) {
 	var received struct {
-		rangeHeader string
-		auth        string
+		rangeHeader        string
+		auth               string
+		accept             string
+		xAmzContentSha256  string
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received.rangeHeader = r.Header.Get("Range")
 		received.auth = r.Header.Get("Authorization")
+		received.accept = r.Header.Get("Accept")
+		received.xAmzContentSha256 = r.Header.Get("x-amz-content-sha256")
 		w.Header().Set("ETag", `"etag"`)
 		w.WriteHeader(http.StatusPartialContent)
 		fmt.Fprint(w, "hello")
@@ -255,6 +269,12 @@ func TestClientGetObjectRange(t *testing.T) {
 
 	if received.auth != "Bearer token" {
 		t.Fatalf("unexpected auth %s", received.auth)
+	}
+	if received.accept != "application/json" {
+		t.Fatalf("expected Accept: application/json, got %q", received.accept)
+	}
+	if received.xAmzContentSha256 != emptyBodySHA256 {
+		t.Fatalf("expected x-amz-content-sha256 %q, got %q", emptyBodySHA256, received.xAmzContentSha256)
 	}
 	if received.rangeHeader != "bytes=0-4" {
 		t.Fatalf("unexpected range %s", received.rangeHeader)
@@ -732,15 +752,19 @@ func TestClientListObjectsZeroMaxKeys(t *testing.T) {
 
 func TestClientDeleteObjectSuccess(t *testing.T) {
 	var received struct {
-		method string
-		path   string
-		auth   string
+		method             string
+		path               string
+		auth               string
+		accept             string
+		xAmzContentSha256  string
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received.method = r.Method
 		received.path = r.URL.Path
 		received.auth = r.Header.Get("Authorization")
+		received.accept = r.Header.Get("Accept")
+		received.xAmzContentSha256 = r.Header.Get("x-amz-content-sha256")
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
@@ -768,6 +792,12 @@ func TestClientDeleteObjectSuccess(t *testing.T) {
 	}
 	if received.auth != "Bearer token-123" {
 		t.Fatalf("unexpected auth header %s", received.auth)
+	}
+	if received.accept != "application/json" {
+		t.Fatalf("expected Accept: application/json, got %q", received.accept)
+	}
+	if received.xAmzContentSha256 != emptyBodySHA256 {
+		t.Fatalf("expected x-amz-content-sha256 %q, got %q", emptyBodySHA256, received.xAmzContentSha256)
 	}
 }
 

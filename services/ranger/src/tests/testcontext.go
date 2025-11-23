@@ -134,13 +134,15 @@ func NewTestContext(t *testing.T, opts ...massifs.Option) *TestContext {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	doer := &httpDoer{client: &http.Client{Timeout: 30 * time.Second}}
 
-	client, err := s3.NewClient(baseURL, minioCfg.BearerToken, doer, logger)
+	// Disable x-amz-content-sha256 header for MinIO compatibility
+	client, err := s3.NewClient(baseURL, minioCfg.BearerToken, doer, logger, s3.WithContentSHA256(false))
 	require.NoError(t, err)
 
 	emulator := &MinioEmulator{client: client}
 	base := mmrtesting.NewTestContext(t, emulator, cfg)
 
-	factory, err := rangerstorage.NewS3Factory(baseURL, minioCfg.BearerToken, doer, logger)
+	// Disable x-amz-content-sha256 header for MinIO compatibility
+	factory, err := rangerstorage.NewS3Factory(baseURL, minioCfg.BearerToken, doer, logger, s3.WithContentSHA256(false))
 	require.NoError(t, err)
 
 	return &TestContext{
