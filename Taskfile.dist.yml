@@ -96,7 +96,7 @@ tasks:
       GO_TEST_TAGS: '{{.GO_TEST_TAGS | default "-tags integration"}}'
       # sh: find services -type f -name 'go.mod'
     cmds:
-      - task: minio:cleanup
+      - task: minio:start
       - |
         export GOWORK="$(pwd)/services/ranger/go.work"
         cd services/ranger/src/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...
