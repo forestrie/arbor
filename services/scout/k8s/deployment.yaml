@@ -63,7 +63,8 @@ spec:
           periodSeconds: 30
           timeoutSeconds: 3
           failureThreshold: 3
-        readinessPro        readinessProt:
+        readinessProbe:
+          httpGet:
             path: /readyz
             port: http
           initialDelaySeconds: 5

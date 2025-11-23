@@ -227,20 +227,21 @@ func (c *Client) ListObjects(
 		return ListResult{}, fmt.Errorf("failed to build list request: %w", err)
 	}
 	req = req.WithContext(ctx)
-	
+
 	// Set headers for S3-compatible API
-	if c.includeContentSHA256 {
-		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
-	}
-	
+	// if c.includeContentSHA256 {
+	// 	req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
+	// }
+
 	// Set Cloudflare-specific headers when cloudflareCompat is enabled
 	if c.cloudflareCompat {
 		req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
 	}
-	
+
 	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+		return ListResult{}, fmt.Errorf("list request failed: no token provided")
 	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.doer.Do(ctx, req)
 	if err != nil {
