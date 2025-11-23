@@ -8,7 +8,7 @@ vars:
 
 includes:
   minio:
-    taskfile: services/ranger/taskfiles/Taskfile_minio.yml
+    taskfile: taskfiles/minio.yml
     optional: true
     dir: .
   ranger:
@@ -76,8 +76,8 @@ tasks:
       - for: { var: GO_MOD_DIRS, as: MODULE }
         cmd: |
           MOD_DIR=$(dirname {{.MODULE}})
-          if [ "$MOD_DIR" = "services/ranger/src" ]; then
-            export GOWORK="$(pwd)/services/ranger/go.work"
+          if [ -f "$(pwd)/$MOD_DIR/../go.work" ]; then
+            export GOWORK="$(pwd)/$MOD_DIR/../go.work"
           else
             unset GOWORK
           fi
@@ -96,7 +96,7 @@ tasks:
       GO_TEST_TAGS: '{{.GO_TEST_TAGS | default "-tags integration"}}'
       # sh: find services -type f -name 'go.mod'
     cmds:
-      - task: minio:start
+      - task: minio:cleanup
       - |
         export GOWORK="$(pwd)/services/ranger/go.work"
         cd services/ranger/src/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...

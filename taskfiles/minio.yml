@@ -1,0 +1,103 @@
+---
+version: "3"
+
+# Taskfile for managing a local MinIO instance used by integration tests.
+#
+# The instance runs in Docker and stores data on the host so that repeated
+# executions can reuse the same state when desired. Credentials and ports are
+# configurable via environment variables.
+
+vars:
+  MINIO_DATA_DIR: '{{.MINIO_DATA_DIR | default "$HOME/.local/state/minio"}}'
+  MINIO_CONTAINER_NAME: '{{.MINIO_CONTAINER_NAME | default "forestrie-minio"}}'
+  MINIO_IMAGE: '{{.MINIO_IMAGE | default "quay.io/minio/minio:latest"}}'
+  MINIO_API_PORT: '{{.MINIO_API_PORT | default "9000"}}'
+  MINIO_CONSOLE_PORT: '{{.MINIO_CONSOLE_PORT | default "9001"}}'
+  MINIO_ROOT_USER: '{{.MINIO_ROOT_USER | default "minioadmin"}}'
+  MINIO_ROOT_PASSWORD: '{{.MINIO_ROOT_PASSWORD | default "minioadmin"}}'
+  MINIO_BUCKET: '{{.MINIO_BUCKET | default "ranger-r2-tests"}}'
+
+tasks:
+  show-conf:
+    desc: "Show the resolved configuration for the MinIO instance"
+    cmds:
+      - |
+        echo "DATA DIR: {{.MINIO_DATA_DIR}}"
+        echo "CONTAINER: {{.MINIO_CONTAINER_NAME}}"
+        echo "IMAGE: {{.MINIO_IMAGE}}"
+        echo "API PORT: {{.MINIO_API_PORT}}"
+        echo "CONSOLE PORT: {{.MINIO_CONSOLE_PORT}}"
+        echo "BUCKET: {{.MINIO_BUCKET}}"
+
+  start:
+    desc: Start MinIO in Docker and ensure the test bucket exists with public access
+    summary: |
+      Starts the MinIO server exposing the S3-compatible API on MINIO_API_PORT
+      and the management console on MINIO_CONSOLE_PORT. A persistent data
+      directory is created automatically. After the container is up the MinIO
+      client (mc) is used to create the integration-test bucket and mark it
+      public so the tests can use unsigned requests.
+    cmds:
+      - |
+        MINIO_DATA_DIR=$(mkdir -p {{.MINIO_DATA_DIR}} && cd {{.MINIO_DATA_DIR}} && pwd)
+        echo "MINIO_DATA_DIR: ${MINIO_DATA_DIR}"
+        docker run \
+          --name {{.MINIO_CONTAINER_NAME}} \
+          -p {{.MINIO_API_PORT}}:9000 \
+          -p {{.MINIO_CONSOLE_PORT}}:9001 \
+          -dt \
+          -u $(id -u):$(id -g) \
+          --mount type=bind,src=${MINIO_DATA_DIR},dst=/data \
+          -e MINIO_ROOT_USER={{.MINIO_ROOT_USER}} \
+          -e MINIO_ROOT_PASSWORD={{.MINIO_ROOT_PASSWORD}} \
+          {{.MINIO_IMAGE}} \
+            server /data --console-address ":9001"
+      - |
+        echo "Waiting for MinIO to become ready..."
+        for i in {1..30}; do
+          if curl -fsS http://localhost:{{.MINIO_API_PORT}}/minio/health/live >/dev/null 2>&1; then
+            echo "MinIO is ready"
+            break
+          fi
+          sleep 1
+        done
+        if ! curl -fsS http://localhost:{{.MINIO_API_PORT}}/minio/health/live >/dev/null 2>&1; then
+          echo "MinIO did not become ready in time" >&2
+          exit 1
+        fi
+      - |
+        echo "Configuring bucket {{.MINIO_BUCKET}}"
+        docker run --rm --network container:{{.MINIO_CONTAINER_NAME}} \
+          -e MC_HOST_minio=http://{{.MINIO_ROOT_USER}}:{{.MINIO_ROOT_PASSWORD}}@localhost:9000 \
+          quay.io/minio/mc:latest \
+            mb --ignore-existing minio/{{.MINIO_BUCKET}}
+      - |
+        docker run --rm --network container:{{.MINIO_CONTAINER_NAME}} \
+          -e MC_HOST_minio=http://{{.MINIO_ROOT_USER}}:{{.MINIO_ROOT_PASSWORD}}@localhost:9000 \
+          quay.io/minio/mc:latest \
+            anonymous set public minio/{{.MINIO_BUCKET}}
+
+  stop:
+    desc: Stop and remove the MinIO container
+    cmds:
+      - docker rm -f {{.MINIO_CONTAINER_NAME}} || true
+
+  cleanup:
+    desc: Remove the MinIO container and delete the persisted data directory
+    deps: [stop]
+    cmds:
+      - |
+        if [ -d "{{.MINIO_DATA_DIR}}" ]; then
+          echo "Deleting data at {{.MINIO_DATA_DIR}}"
+          rm -rf "{{.MINIO_DATA_DIR}}"
+        fi
+
+  logs:
+    desc: Show the MinIO container logs once
+    cmds:
+      - docker logs {{.MINIO_CONTAINER_NAME}}
+
+  follow-logs:
+    desc: Follow the MinIO container logs
+    cmds:
+      - docker logs -f {{.MINIO_CONTAINER_NAME}}
