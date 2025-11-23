@@ -207,7 +207,11 @@ func (c *Client) ListObjects(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 
-		c.logger.Info("ListObjects", "err", err, "status", resp.Status, "code", resp.StatusCode)
+		c.logger.Info("ListObject", "scheme", req.URL.Scheme, "host", req.URL.Scheme, "path", req.URL.Path)
+		c.logger.Info("ListObject", "raw_query", req.URL.RawQuery)
+		c.logger.Info("ListObjects", "status", resp.Status, "code", resp.StatusCode)
+		c.logger.Info("ListObjects", "body", body)
+
 		return ListResult{}, &Error{
 			StatusCode: resp.StatusCode,
 			Body:       string(body),

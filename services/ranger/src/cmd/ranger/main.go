@@ -26,7 +26,13 @@ var (
 
 func main() {
 	// Load configuration from environment and initialize logger
-	cfg, logger, _ := ranger.LoadConfig()
+	cfg := ranger.LoadConfig()
+	level, recognized := ranger.ParseLogLevel(cfg.LogLevel)
+	logger, _ := ranger.NewLogger(level)
+
+	if !recognized {
+		logger.Warn("unrecognized log level value; defaulting to derived level", "input", cfg.LogLevel, "level", level.String())
+	}
 
 	// Set the global default logger so packages using slog directly share config
 	slog.SetDefault(logger)
@@ -35,6 +41,7 @@ func main() {
 		"commit", commit,
 		"buildDate", buildDate,
 	)
+	logger.Warn("resolved log level", "input", cfg.LogLevel, "level", level.String())
 	cfg.LogConfig(logger)
 
 	// Validate configuration

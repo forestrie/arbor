@@ -85,7 +85,7 @@ func NewLogger(level slog.Level) (*slog.Logger, *slog.LevelVar) {
 // LoadConfig loads configuration from environment variables with sensible defaults.
 // It also returns a configured slog.Logger and the underlying slog.LevelVar so callers
 // can adjust log levels at runtime if needed.
-func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
+func LoadConfig() Config {
 	getEnvOrDefault := func(key, defaultVal string) string {
 		if val := os.Getenv(key); val != "" {
 			return val
@@ -171,16 +171,7 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 		PodIP:             os.Getenv("POD_IP"),
 	}
 
-	level, recognized := ParseLogLevel(cfg.LogLevel)
-	logger, levelVar := NewLogger(level)
-
-	if !recognized {
-		logger.Warn("unrecognized log level value; defaulting to derived level", "input", cfg.LogLevel, "level", level.String())
-	}
-
-	logger.Warn("resolved log level", "input", cfg.LogLevel, "level", level.String())
-
-	return cfg, logger, levelVar
+	return cfg
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {

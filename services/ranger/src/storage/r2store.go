@@ -295,8 +295,11 @@ func translateListError(err error) error {
 			return massifstorage.ErrNotAvailable
 		case http.StatusNotFound:
 			return massifstorage.ErrDoesNotExist
+		// case http.StatusPreconditionFailed:
+		// 	return massifstorage.ErrContentOC
 		default:
-			return massifstorage.ErrNotAvailable
+			// Only translate errors we specifically understand
+			return err
 		}
 	}
 	return err
