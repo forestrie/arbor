@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forestrie/arbor/services/ranger/r2"
+	"github.com/forestrie/arbor/services/ranger/s3"
 	rangerstorage "github.com/forestrie/arbor/services/ranger/storage"
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	"github.com/forestrie/go-merklelog-provider-testing/mmrtesting"
@@ -74,7 +74,7 @@ func (d *httpDoer) Do(ctx context.Context, req *http.Request) (*http.Response, e
 }
 
 type MinioEmulator struct {
-	client *r2.Client
+	client *s3.Client
 }
 
 func (m *MinioEmulator) DeleteLog(logID massifstorage.LogID) {
@@ -134,13 +134,13 @@ func NewTestContext(t *testing.T, opts ...massifs.Option) *TestContext {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	doer := &httpDoer{client: &http.Client{Timeout: 30 * time.Second}}
 
-	client, err := r2.NewClient(baseURL, minioCfg.BearerToken, doer, logger)
+	client, err := s3.NewClient(baseURL, minioCfg.BearerToken, doer, logger)
 	require.NoError(t, err)
 
 	emulator := &MinioEmulator{client: client}
 	base := mmrtesting.NewTestContext(t, emulator, cfg)
 
-	factory, err := rangerstorage.NewFactory(baseURL, minioCfg.BearerToken, doer, logger)
+	factory, err := rangerstorage.NewS3Factory(baseURL, minioCfg.BearerToken, doer, logger)
 	require.NoError(t, err)
 
 	return &TestContext{

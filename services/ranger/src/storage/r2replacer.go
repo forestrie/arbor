@@ -2,27 +2,25 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 
-	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 )
 
-// Replacer implements the massifs.ObjectWriter interface using Cloudflare R2.
+// Replacer implements the massifs.ObjectWriter interface using a generic
+// ObjectClient backend (S3, R2, etc.).
 type Replacer struct {
-	client *r2.Client
+	client ObjectClient
 	logID  massifstorage.LogID
 	logger *slog.Logger
 }
 
 // NewReplacer builds a Replacer for the provided log ID.
-func NewReplacer(client *r2.Client, logID massifstorage.LogID, logger *slog.Logger) (*Replacer, error) {
+func NewReplacer(client ObjectClient, logID massifstorage.LogID, logger *slog.Logger) (*Replacer, error) {
 	if client == nil {
-		return nil, fmt.Errorf("r2 client is required")
+		return nil, fmt.Errorf("object client is required")
 	}
 	if len(logID) == 0 {
 		return nil, fmt.Errorf("logID is required")
@@ -56,30 +54,18 @@ func (r *Replacer) Put(
 		return fmt.Errorf("failed to derive object path: %w", err)
 	}
 
-	opts := r2.PutOptions{}
+	opts := PutOptions{}
 	if failIfExists {
 		opts.IfNoneMatch = "*"
+		opts.FailIfExists = true
 	}
 
-	_, err = r.client.PutObject(ctx, objectPath, data, opts)
-	if err != nil {
-		var apiErr *r2.Error
-		if errors.As(err, &apiErr) {
-			switch apiErr.StatusCode {
-			case http.StatusPreconditionFailed, http.StatusNotModified, http.StatusConflict:
-				if failIfExists {
-					return massifstorage.ErrExistsOC
-				}
-				return massifstorage.ErrContentOC
-			case http.StatusForbidden, http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusServiceUnavailable:
-				return massifstorage.ErrNotAvailable
-			default:
-				// Leave as formatted error below
-			}
-		}
-
+	if _, err = r.client.PutObject(ctx, objectPath, data, opts); err != nil {
+		// Backend (S3/R2) is responsible for mapping HTTP/S3 errors into
+		// massifstorage errors; we simply wrap with context.
 		return fmt.Errorf("failed to write object %s: %w", objectPath, err)
 	}
+
 	r.logger.Info("put", "path", objectPath)
 
 	return nil

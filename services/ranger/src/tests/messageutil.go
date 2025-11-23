@@ -14,7 +14,7 @@ import (
 
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
-	"github.com/forestrie/arbor/services/ranger/r2"
+	"github.com/forestrie/arbor/services/ranger/s3"
 	rangerstorage "github.com/forestrie/arbor/services/ranger/storage"
 	datatrails "github.com/forestrie/go-merklelog-datatrails/datatrails"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
@@ -105,7 +105,7 @@ func massifCountForLog(
 ) uint32 {
 	t.Helper()
 
-	factory, err := rangerstorage.NewFactory(r2WriteURL, bearerToken, httpClient, logger)
+	factory, err := rangerstorage.NewS3Factory(r2WriteURL, bearerToken, httpClient, logger)
 	require.NoError(t, err)
 
 	store, err := factory.NewStore(nil)
@@ -175,7 +175,7 @@ func listMassifObjectsForLog(
 ) []string {
 	t.Helper()
 
-	client, err := r2.NewClient(r2WriteURL, bearerToken, httpClient, logger)
+	client, err := s3.NewClient(r2WriteURL, bearerToken, httpClient, logger)
 	require.NoError(t, err)
 
 	prefix, err := datatrails.StorageObjectPrefix(logID, massifstorage.ObjectMassifData)

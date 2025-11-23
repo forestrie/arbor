@@ -1,9 +1,9 @@
-package r2
+package s3
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,15 +15,15 @@ import (
 	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
 )
 
-// HTTPDoer abstracts the subset of http.Client used by the R2 client.
+// HTTPDoer abstracts the subset of http.Client used by the S3 client.
 // ranger.HTTPClient satisfies this interface.
 type HTTPDoer interface {
 	Do(ctx context.Context, req *http.Request) (*http.Response, error)
 }
 
-// Client provides minimal helpers for interacting with Cloudflare R2 using the
-// native HTTP/JSON API. Connection pooling is managed by the provided HTTPDoer
-// implementation.
+// Client provides minimal helpers for interacting with an S3-compatible
+// endpoint using the REST API. Connection pooling is managed by the provided
+// HTTPDoer implementation.
 //
 // NOTE: we intentionally keep this thin; consider introducing retries and
 // richer telemetry if we observe transient failures at scale.
@@ -61,17 +61,17 @@ type GetOptions = storageobjects.GetOptions
 // It is an alias of storageobjects.GetResult.
 type GetResult = storageobjects.GetResult
 
-// Error represents an HTTP error returned by the R2 API.
+// Error represents an HTTP error returned by the S3-compatible API.
 type Error struct {
 	StatusCode int
 	Body       string
 }
 
 func (e *Error) Error() string {
-	return fmt.Sprintf("r2 api error: status=%d body=%q", e.StatusCode, e.Body)
+	return fmt.Sprintf("s3 api error: status=%d body=%q", e.StatusCode, e.Body)
 }
 
-// NewClient constructs a Client using the provided baseURL (typically R2_WRITE_URL) and bearer token.
+// NewClient constructs a Client using the provided baseURL and bearer token.
 func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger) (*Client, error) {
 	if doer == nil {
 		return nil, fmt.Errorf("http doer is required")
@@ -79,10 +79,10 @@ func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger) 
 
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid R2 base URL: %w", err)
+		return nil, fmt.Errorf("invalid S3 base URL: %w", err)
 	}
 	if !u.IsAbs() || u.Scheme == "" {
-		return nil, fmt.Errorf("R2 base URL must be absolute")
+		return nil, fmt.Errorf("S3 base URL must be absolute")
 	}
 
 	// Ensure the path ends with a slash so JoinPath behaves as expected.
@@ -98,7 +98,7 @@ func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger) 
 	}, nil
 }
 
-// PutObject uploads data to R2 at the provided object key.
+// PutObject uploads data at the provided object key.
 func (c *Client) PutObject(
 	ctx context.Context,
 	key string,
@@ -137,13 +137,11 @@ func (c *Client) PutObject(
 
 	resp, err := c.doer.Do(ctx, req)
 	if err != nil {
-		// No retries here; consider exponential backoff if transient errors become frequent.
 		return PutResult{}, fmt.Errorf("put object request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Drain a small portion of the body for debugging.
 		const maxBody = int64(8 << 10) // 8KB
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 		apiErr := &Error{
@@ -161,8 +159,7 @@ func (c *Client) PutObject(
 	}, nil
 }
 
-// ListObjects performs a Cloudflare R2 HTTP/JSON list request with the
-// provided prefix. It decodes directly into the shared ListResult type.
+// ListObjects performs an S3 ListObjectsV2 request with the provided prefix.
 func (c *Client) ListObjects(
 	ctx context.Context,
 	prefix string,
@@ -171,14 +168,15 @@ func (c *Client) ListObjects(
 ) (ListResult, error) {
 	u := *c.baseURL
 	values := url.Values{}
+	values.Set("list-type", "2")
 	if prefix != "" {
 		values.Set("prefix", prefix)
 	}
 	if continuationToken != "" {
-		values.Set("cursor", continuationToken)
+		values.Set("continuation-token", continuationToken)
 	}
 	if maxKeys > 0 {
-		values.Set("limit", strconv.Itoa(maxKeys))
+		values.Set("max-keys", strconv.Itoa(maxKeys))
 	}
 	u.RawQuery = values.Encode()
 
@@ -200,8 +198,10 @@ func (c *Client) ListObjects(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 
-		c.logger.Info("R2ListObjects", "url", req.URL.String(), "status", resp.Status, "code", resp.StatusCode)
-		c.logger.Info("R2ListObjects", "body", string(body))
+		c.logger.Info("ListObject", "scheme", req.URL.Scheme, "host", req.URL.Scheme, "path", req.URL.Path)
+		c.logger.Info("ListObject", "raw_query", req.URL.RawQuery)
+		c.logger.Info("ListObjects", "status", resp.Status, "code", resp.StatusCode)
+		c.logger.Info("ListObjects", "body", body)
 
 		apiErr := &Error{
 			StatusCode: resp.StatusCode,
@@ -213,12 +213,60 @@ func (c *Client) ListObjects(
 		return ListResult{}, apiErr
 	}
 
-	var page ListResult
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		return ListResult{}, fmt.Errorf("failed to decode R2 list response: %w", err)
+	dec := xml.NewDecoder(resp.Body)
+	dec.Strict = false
+
+	result := ListResult{}
+
+	type rawObject struct {
+		Key          string `xml:"Key"`
+		LastModified string `xml:"LastModified"`
+		ETag         string `xml:"ETag"`
+		Size         int64  `xml:"Size"`
 	}
 
-	return page, nil
+	for {
+		token, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return ListResult{}, fmt.Errorf("failed to parse list response: %w", err)
+		}
+
+		start, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+
+		switch start.Name.Local {
+		case "IsTruncated":
+			var truncated string
+			if err := dec.DecodeElement(&truncated, &start); err != nil {
+				return ListResult{}, fmt.Errorf("failed to decode truncation flag: %w", err)
+			}
+			result.IsTruncated = strings.EqualFold(strings.TrimSpace(truncated), "true")
+		case "NextContinuationToken":
+			var token string
+			if err := dec.DecodeElement(&token, &start); err != nil {
+				return ListResult{}, fmt.Errorf("failed to decode continuation token: %w", err)
+			}
+			result.NextContinuationToken = strings.TrimSpace(token)
+		case "Contents":
+			var raw rawObject
+			if err := dec.DecodeElement(&raw, &start); err != nil {
+				return ListResult{}, fmt.Errorf("failed to decode object summary: %w", err)
+			}
+			result.Objects = append(result.Objects, ObjectSummary{
+				Key:          strings.TrimSpace(raw.Key),
+				LastModified: strings.TrimSpace(raw.LastModified),
+				ETag:         strings.TrimSpace(raw.ETag),
+				Size:         raw.Size,
+			})
+		}
+	}
+
+	return result, nil
 }
 
 // GetObject retrieves an object payload optionally using range requests.

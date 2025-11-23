@@ -61,8 +61,8 @@ func main() {
 	// Create HTTP client with persistent connections for queue operations
 	httpClient := ranger.NewHTTPClient(logger)
 
-	// Create committer if TrustCanopy is enabled
-	massifCommitter, err := committer.NewCommitter(cfg, httpClient, logger)
+	// Create committer wired to the native R2 HTTP/JSON backend
+	massifCommitter, err := committer.NewR2Committer(cfg, httpClient, logger)
 	if err != nil {
 		slog.Error("failed to create committer", "error", err)
 		os.Exit(1)

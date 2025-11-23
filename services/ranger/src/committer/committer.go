@@ -28,7 +28,9 @@ type Committer struct {
 	trustCanopy     bool
 }
 
-// NewCommitter creates a new Committer instance.
+// NewCommitter creates a new Committer instance backed by the S3-compatible
+// storage backend. This is primarily used in integration tests where MinIO
+// provides an S3 API.
 func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger) (*Committer, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is required")
@@ -37,13 +39,51 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		logger = slog.Default()
 	}
 
-	// Create storage factory; individual stores will be instantiated per-log.
-	factory, err := storage.NewFactory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
+	factory, err := storage.NewS3Factory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage factory: %w", err)
 	}
 
-	// Initialize IDState with commitmentEpoch
+	idState, err := snowflakeid.NewIDState(snowflakeid.Config{
+		CommitmentEpoch: uint8(cfg.CommitmentEpoch),
+		WorkerCIDR:      cfg.WorkerCIDR,
+		PodIP:           cfg.PodIP,
+		AllowSpins:      snowflakeid.MaxSpins,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize ID state: %w", err)
+	}
+
+	massifHeight := cfg.MassifHeight
+	if massifHeight == 0 {
+		massifHeight = 14 // Default
+	}
+
+	return &Committer{
+		factory:         factory,
+		idState:         idState,
+		logger:          logger,
+		massifHeight:    massifHeight,
+		commitmentEpoch: cfg.CommitmentEpoch,
+		trustCanopy:     cfg.TrustCanopy,
+	}, nil
+}
+
+// NewR2Committer creates a new Committer instance backed by the native R2
+// HTTP/JSON backend. This is used by the ranger service in production.
+func NewR2Committer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger) (*Committer, error) {
+	if httpClient == nil {
+		return nil, fmt.Errorf("http client is required")
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	factory, err := storage.NewR2Factory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create storage factory: %w", err)
+	}
+
 	idState, err := snowflakeid.NewIDState(snowflakeid.Config{
 		CommitmentEpoch: uint8(cfg.CommitmentEpoch),
 		WorkerCIDR:      cfg.WorkerCIDR,

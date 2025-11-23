@@ -2,19 +2,16 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 
-	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 )
 
-// Store provides R2-backed implementations of massifs.ObjectReader and ObjectWriter.
+// Store provides backend-agnostic implementations of massifs.ObjectReader and ObjectWriter.
 type Store struct {
-	client *r2.Client
+	client ObjectClient
 	logger *slog.Logger
 
 	logCaches map[string]*logCache
@@ -29,9 +26,9 @@ type logCache struct {
 }
 
 // NewStore constructs a reader/writer for the given logID.
-func NewStore(client *r2.Client, logID massifstorage.LogID, logger *slog.Logger) (*Store, error) {
+func NewStore(client ObjectClient, logID massifstorage.LogID, logger *slog.Logger) (*Store, error) {
 	if client == nil {
-		return nil, fmt.Errorf("r2 client is required")
+		return nil, fmt.Errorf("object client is required")
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -95,7 +92,7 @@ func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (
 	for {
 		listResult, err := s.client.ListObjects(ctx, prefix, continuation, 1000)
 		if err != nil {
-			return 0, translateListError(err)
+			return 0, err
 		}
 
 		if len(listResult.Objects) > 0 {
@@ -174,7 +171,7 @@ func (s *Store) MassifReadN(ctx context.Context, massifIndex uint32, n int) ([]b
 		return nil, err
 	}
 
-	opts := r2.GetOptions{}
+	opts := GetOptions{}
 	if n >= 0 {
 		opts.RangeStart = 0
 		opts.RangeLength = int64(n)
@@ -187,7 +184,7 @@ func (s *Store) MassifReadN(ctx context.Context, massifIndex uint32, n int) ([]b
 
 	result, err := s.client.GetObject(ctx, path, opts)
 	if err != nil {
-		return nil, translateGetError(err)
+		return nil, err
 	}
 
 	cache.massifs[massifIndex] = result.Data
@@ -206,9 +203,9 @@ func (s *Store) CheckpointRead(ctx context.Context, massifIndex uint32) ([]byte,
 		return nil, err
 	}
 
-	result, err := s.client.GetObject(ctx, path, r2.GetOptions{RangeLength: -1})
+	result, err := s.client.GetObject(ctx, path, GetOptions{RangeLength: -1})
 	if err != nil {
-		return nil, translateGetError(err)
+		return nil, err
 	}
 
 	cache.checkpoints[massifIndex] = result.Data
@@ -270,37 +267,6 @@ func (s *Store) ensureLog(logID massifstorage.LogID) (*logCache, error) {
 	return cache, nil
 }
 
-func translateGetError(err error) error {
-	var apiErr *r2.Error
-	if errors.As(err, &apiErr) {
-		switch apiErr.StatusCode {
-		case http.StatusNotFound:
-			return massifstorage.ErrDoesNotExist
-		case http.StatusForbidden, http.StatusUnauthorized,
-			http.StatusTooManyRequests, http.StatusServiceUnavailable:
-			return massifstorage.ErrNotAvailable
-		default:
-			return massifstorage.ErrNotAvailable
-		}
-	}
-	return err
-}
-
-func translateListError(err error) error {
-	var apiErr *r2.Error
-	if errors.As(err, &apiErr) {
-		switch apiErr.StatusCode {
-		case http.StatusForbidden, http.StatusUnauthorized,
-			http.StatusTooManyRequests, http.StatusServiceUnavailable:
-			return massifstorage.ErrNotAvailable
-		case http.StatusNotFound:
-			return massifstorage.ErrDoesNotExist
-		// case http.StatusPreconditionFailed:
-		// 	return massifstorage.ErrContentOC
-		default:
-			// Only translate errors we specifically understand
-			return err
-		}
-	}
-	return err
-}
+// Errors returned from the underlying ObjectClient are expected to already
+// be mapped into massifstorage errors by the backend implementations (S3, R2,
+// etc.), so Store does not perform any additional HTTP-specific translation.
