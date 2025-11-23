@@ -20,14 +20,14 @@ type Factory struct {
 
 // NewFactory initialises a Factory using the shared S3-compatible REST
 // client. It is a convenience alias for NewS3Factory used primarily by tests.
-// For MinIO compatibility, use s3.WithContentSHA256(false) option.
+// For MinIO compatibility, use s3.WithContentSHA256(false) and s3.WithCloudflareCompat(false) options.
 func NewFactory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger, opts ...s3.ClientOption) (*Factory, error) {
 	return NewS3Factory(baseURL, token, doer, logger, opts...)
 }
 
 // NewS3Factory initialises a Factory backed by an S3-compatible client.
-// By default, x-amz-content-sha256 header is included (required for Cloudflare R2).
-// Use s3.WithContentSHA256(false) option to disable it for S3-compatible backends that don't require it.
+// By default, x-amz-content-sha256 header and cloudflareCompat mode are enabled (required for Cloudflare R2).
+// Use s3.WithContentSHA256(false) and s3.WithCloudflareCompat(false) options to disable them for S3-compatible backends that don't require them.
 func NewS3Factory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger, opts ...s3.ClientOption) (*Factory, error) {
 	if logger == nil {
 		logger = slog.Default()

@@ -152,6 +152,7 @@ func TestClientListObjects(t *testing.T) {
 	var received struct {
 		query url.Values
 		auth  string
+		amzDate string
 	}
 
 	xmlBody := `<?xml version="1.0" encoding="UTF-8"?>
@@ -174,6 +175,7 @@ func TestClientListObjects(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received.query = r.URL.Query()
 		received.auth = r.Header.Get("Authorization")
+		received.amzDate = r.Header.Get("x-amz-date")
 		w.Header().Set("Content-Type", "application/xml")
 		fmt.Fprint(w, xmlBody)
 	}))
@@ -191,6 +193,14 @@ func TestClientListObjects(t *testing.T) {
 
 	if received.auth != "Bearer token" {
 		t.Fatalf("unexpected auth %s", received.auth)
+	}
+	// Verify x-amz-date header is set when cloudflareCompat is enabled (default)
+	if received.amzDate == "" {
+		t.Fatalf("expected x-amz-date header to be set")
+	}
+	// Verify x-amz-date format (YYYYMMDDTHHMMSSZ)
+	if len(received.amzDate) != 16 {
+		t.Fatalf("unexpected x-amz-date format length: got %d, expected 16 (format: YYYYMMDDTHHMMSSZ)", len(received.amzDate))
 	}
 	if received.query.Get("list-type") != "2" {
 		t.Fatalf("expected list-type=2, got %v", received.query)
@@ -242,6 +252,39 @@ func TestClientListObjectsError(t *testing.T) {
 	}
 	if apiErr.StatusCode != http.StatusBadRequest {
 		t.Fatalf("unexpected status %d", apiErr.StatusCode)
+	}
+}
+
+func TestClientListObjectsCloudflareCompatDisabled(t *testing.T) {
+	var received struct {
+		amzDate string
+	}
+
+	xmlBody := `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>false</IsTruncated>
+</ListBucketResult>`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.amzDate = r.Header.Get("x-amz-date")
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, xmlBody)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token", &testDoer{client: server.Client()}, newTestLogger(), WithCloudflareCompat(false))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = client.ListObjects(context.Background(), "prefix/", "", 500)
+	if err != nil {
+		t.Fatalf("ListObjects: %v", err)
+	}
+
+	// Verify x-amz-date header is NOT set when cloudflareCompat is disabled
+	if received.amzDate != "" {
+		t.Fatalf("expected x-amz-date header to be empty when cloudflareCompat is disabled, got %q", received.amzDate)
 	}
 }
 

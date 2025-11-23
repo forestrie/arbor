@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
 )
@@ -33,6 +34,7 @@ type Client struct {
 	doer                 HTTPDoer
 	logger               *slog.Logger
 	includeContentSHA256 bool // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
+	cloudflareCompat     bool // If true, include Cloudflare-specific headers (e.g., x-amz-date)
 }
 
 // PutOptions controls conditional write behaviour for PUT requests.
@@ -76,6 +78,12 @@ func (e *Error) Error() string {
 // header on requests with no body (GET, DELETE, etc.)
 const emptyBodySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
+// formatAmzDate formats a time.Time as an AWS S3 x-amz-date header value.
+// Format: YYYYMMDDTHHMMSSZ (e.g., 20231201T120000Z)
+func formatAmzDate(t time.Time) string {
+	return t.UTC().Format("20060102T150405Z")
+}
+
 // ClientOption configures a Client.
 type ClientOption func(*Client)
 
@@ -84,6 +92,14 @@ type ClientOption func(*Client)
 func WithContentSHA256(enabled bool) ClientOption {
 	return func(c *Client) {
 		c.includeContentSHA256 = enabled
+	}
+}
+
+// WithCloudflareCompat enables Cloudflare-specific headers (e.g., x-amz-date) for S3-compatible API requests.
+// This is enabled by default.
+func WithCloudflareCompat(enabled bool) ClientOption {
+	return func(c *Client) {
+		c.cloudflareCompat = enabled
 	}
 }
 
@@ -114,6 +130,7 @@ func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger, 
 		doer:                 doer,
 		logger:               logger,
 		includeContentSHA256: true, // Default: enabled for Cloudflare R2 compatibility
+		cloudflareCompat:     true, // Default: enabled for Cloudflare R2 compatibility
 	}
 
 	for _, opt := range opts {
@@ -214,6 +231,11 @@ func (c *Client) ListObjects(
 	// Set headers for S3-compatible API
 	if c.includeContentSHA256 {
 		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
+	}
+	
+	// Set Cloudflare-specific headers when cloudflareCompat is enabled
+	if c.cloudflareCompat {
+		req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
 	}
 	
 	if c.token != "" {
