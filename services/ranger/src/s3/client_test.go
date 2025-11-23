@@ -26,6 +26,30 @@ func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 }
 
+func TestNewClientValidURLAndToken(t *testing.T) {
+	doer := &testDoer{client: http.DefaultClient}
+	client, err := NewClient("https://example.com/bucket", "token-123", doer, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+
+	if client.baseURL.Scheme != "https" {
+		t.Fatalf("unexpected scheme %q", client.baseURL.Scheme)
+	}
+	if client.baseURL.Host != "example.com" {
+		t.Fatalf("unexpected host %q", client.baseURL.Host)
+	}
+	if client.baseURL.Path != "/bucket/" {
+		t.Fatalf("expected trailing slash in path, got %q", client.baseURL.Path)
+	}
+	if client.token != "token-123" {
+		t.Fatalf("unexpected token %q", client.token)
+	}
+	if client.doer != doer {
+		t.Fatalf("expected doer to be stored on client")
+	}
+}
+
 func TestClientPutObject(t *testing.T) {
 	var received struct {
 		method      string
@@ -259,6 +283,42 @@ func TestClientGetObjectRange(t *testing.T) {
 		t.Fatalf("unexpected body %q", result.Data)
 	}
 	if result.ETag != `"etag"` {
+		t.Fatalf("unexpected etag %s", result.ETag)
+	}
+}
+
+func TestClientGetObjectFullWhenNegativeRangeLength(t *testing.T) {
+	var received struct {
+		rangeHeader string
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.rangeHeader = r.Header.Get("Range")
+		w.Header().Set("ETag", `"etag-full"`)
+		fmt.Fprint(w, "full-body")
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token", &testDoer{client: server.Client()}, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	result, err := client.GetObject(context.Background(), "path/object", GetOptions{
+		RangeStart:  0,
+		RangeLength: -1,
+	})
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+
+	if received.rangeHeader != "" {
+		t.Fatalf("expected no Range header, got %q", received.rangeHeader)
+	}
+	if string(result.Data) != "full-body" {
+		t.Fatalf("unexpected body %q", result.Data)
+	}
+	if result.ETag != `"etag-full"` {
 		t.Fatalf("unexpected etag %s", result.ETag)
 	}
 }
