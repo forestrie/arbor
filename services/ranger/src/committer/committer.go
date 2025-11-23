@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
@@ -66,6 +67,28 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		commitmentEpoch: cfg.CommitmentEpoch,
 		trustCanopy:     cfg.TrustCanopy,
 	}, nil
+}
+
+// nextIDTimestampWithRetry wraps the underlying snowflake ID generator so that
+// if the generator is temporarily overloaded, we sleep for a minimal interval
+// and retry once. If the second attempt fails, that error is returned.
+func (c *Committer) nextIDTimestampWithRetry(ctx context.Context) (uint64, error) {
+	idTimestamp, err := c.idState.NextID()
+	if err == nil {
+		return idTimestamp, nil
+	}
+
+	if !errors.Is(err, snowflakeid.ErrOverloaded) {
+		return 0, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-time.After(time.Millisecond):
+	}
+
+	return c.idState.NextID()
 }
 
 // ProcessBatch processes messages belonging to a single logID span.
@@ -129,7 +152,7 @@ func (c *Committer) ProcessBatch(
 			continue
 		}
 
-		idTimestamp, err := c.idState.NextID()
+		idTimestamp, err := c.nextIDTimestampWithRetry(ctx)
 		if err != nil {
 			err = fmt.Errorf("failed to generate id timestamp: %w", err)
 			batch.Errs[msgIdx] = err

@@ -180,20 +180,22 @@ func LoadConfig() (Config, *slog.Logger, *slog.LevelVar) {
 
 	logger.Warn("resolved log level", "input", cfg.LogLevel, "level", level.String())
 
-	logConfigValue(logger, "RANGER_QUEUE_URL", cfg.QueueURL)
-	logSecretDigest(logger, "RANGER_QUEUE_API_TOKEN", cfg.QueueAPIToken)
-	logConfigValue(logger, "RANGER_QUEUE_BATCH_SIZE", cfg.QueueBatchSize)
-	logConfigValue(logger, "POLL_INTERVAL", cfg.PollInterval)
-	logConfigValue(logger, "VISIBILITY_TIMEOUT", cfg.VisibilityTimeout)
-	logConfigValue(logger, "R2_PUBLIC_URL", cfg.R2PublicURL)
-	logConfigValue(logger, "R2_WRITE_URL", cfg.R2WriteURL)
-	logSecretDigest(logger, "R2_WRITER_TOKEN", cfg.R2WriterToken)
-	logConfigValue(logger, "MASSIF_HEIGHT", cfg.MassifHeight)
-	logConfigValue(logger, "COMMITMENT_EPOCH", cfg.CommitmentEpoch)
-	logConfigValue(logger, "WORKER_CIDR", cfg.WorkerCIDR)
-	logConfigValue(logger, "POD_IP", cfg.PodIP)
-
 	return cfg, logger, levelVar
+}
+
+func (c Config) LogConfig(logger *slog.Logger) {
+	logConfigValue(logger, "RANGER_QUEUE_URL", c.QueueURL)
+	logSecretDigest(logger, "RANGER_QUEUE_API_TOKEN", c.QueueAPIToken)
+	logConfigValue(logger, "RANGER_QUEUE_BATCH_SIZE", c.QueueBatchSize)
+	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
+	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
+	logConfigValue(logger, "R2_PUBLIC_URL", c.R2PublicURL)
+	logConfigValue(logger, "R2_WRITE_URL", c.R2WriteURL)
+	logSecretDigest(logger, "R2_WRITER_TOKEN", c.R2WriterToken)
+	logConfigValue(logger, "MASSIF_HEIGHT", c.MassifHeight)
+	logConfigValue(logger, "COMMITMENT_EPOCH", c.CommitmentEpoch)
+	logConfigValue(logger, "WORKER_CIDR", c.WorkerCIDR)
+	logConfigValue(logger, "POD_IP", c.PodIP)
 }
 
 // Validate checks that all required configuration is present

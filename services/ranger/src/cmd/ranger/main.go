@@ -25,15 +25,17 @@ var (
 )
 
 func main() {
-	// Load configuration from environment
+	// Load configuration from environment and initialize logger
 	cfg, logger, _ := ranger.LoadConfig()
 
+	// Set the global default logger so packages using slog directly share config
 	slog.SetDefault(logger)
 	slog.Warn("starting ranger service",
 		"version", version,
 		"commit", commit,
 		"buildDate", buildDate,
 	)
+	cfg.LogConfig(logger)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {

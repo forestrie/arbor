@@ -50,7 +50,7 @@ tasks:
       COMMIT:
         sh: echo "${COMMIT:-$(git rev-parse HEAD)}"
       BUILD_DATE:
-        sh: date -u +'%Y-%m-%dT%H:%M:%SZ'
+        sh: echo "${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
     cmds:
       - |
         echo "Building ranger:{{.IMAGE_TAG}}"
