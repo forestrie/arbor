@@ -199,12 +199,15 @@ func (c *Client) ListObjects(
 
 	resp, err := c.doer.Do(ctx, req)
 	if err != nil {
+		c.logger.Info("ListObjects", "err", err, "status", resp.Status, "code", resp.StatusCode)
 		return ListResult{}, fmt.Errorf("list request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+
+		c.logger.Info("ListObjects", "err", err, "status", resp.Status, "code", resp.StatusCode)
 		return ListResult{}, &Error{
 			StatusCode: resp.StatusCode,
 			Body:       string(body),
