@@ -22,9 +22,12 @@ import (
 )
 
 type minioConfig struct {
-	Endpoint    string
-	Bucket      string
-	BearerToken string
+	Endpoint        string
+	Bucket          string
+	BearerToken     string // Kept for backward compatibility
+	AccessKeyID     string
+	SecretAccessKey string
+	Region          string
 }
 
 func loadMinioConfig() minioConfig {
@@ -36,10 +39,28 @@ func loadMinioConfig() minioConfig {
 	if bucket == "" {
 		bucket = "ranger-r2-tests"
 	}
+
+	// Use MinIO defaults, allow environment variable overrides
+	accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
+	if accessKeyID == "" {
+		accessKeyID = "minioadmin"
+	}
+	secretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	if secretAccessKey == "" {
+		secretAccessKey = "minioadmin"
+	}
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = "us-east-1"
+	}
+
 	return minioConfig{
-		Endpoint:    endpoint,
-		Bucket:      bucket,
-		BearerToken: os.Getenv("R2_MINIO_BEARER_TOKEN"),
+		Endpoint:        endpoint,
+		Bucket:          bucket,
+		BearerToken:     os.Getenv("R2_MINIO_BEARER_TOKEN"),
+		AccessKeyID:     accessKeyID,
+		SecretAccessKey: secretAccessKey,
+		Region:          region,
 	}
 }
 
@@ -134,15 +155,33 @@ func NewTestContext(t *testing.T, opts ...massifs.Option) *TestContext {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	doer := &httpDoer{client: &http.Client{Timeout: 30 * time.Second}}
 
-	// Disable x-amz-content-sha256 header for MinIO compatibility
-	client, err := s3.NewClient(baseURL, minioCfg.BearerToken, doer, logger, s3.WithContentSHA256(false))
+	// Use SigV4 signing with MinIO credentials (matches production)
+	client, err := s3.NewClientWithCredentials(
+		baseURL,
+		minioCfg.BearerToken, // Fallback if no credentials
+		minioCfg.AccessKeyID,
+		minioCfg.SecretAccessKey,
+		minioCfg.Region,
+		doer,
+		logger,
+		s3.WithContentSHA256(true), // SigV4 requires this
+	)
 	require.NoError(t, err)
 
 	emulator := &MinioEmulator{client: client}
 	base := mmrtesting.NewTestContext(t, emulator, cfg)
 
-	// Disable x-amz-content-sha256 header for MinIO compatibility
-	factory, err := rangerstorage.NewS3Factory(baseURL, minioCfg.BearerToken, doer, logger, s3.WithContentSHA256(false))
+	// Use SigV4 signing with MinIO credentials (matches production)
+	factory, err := rangerstorage.NewS3FactoryWithCredentials(
+		baseURL,
+		minioCfg.BearerToken, // Fallback if no credentials
+		minioCfg.AccessKeyID,
+		minioCfg.SecretAccessKey,
+		minioCfg.Region,
+		doer,
+		logger,
+		s3.WithContentSHA256(true), // SigV4 requires this
+	)
 	require.NoError(t, err)
 
 	return &TestContext{

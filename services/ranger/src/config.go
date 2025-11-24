@@ -155,28 +155,38 @@ func LoadConfig() Config {
 		r2PublicURL = fmt.Sprintf("https://%s.r2.cloudflarestorage.com/%s", accountID, bucketName)
 	}
 
+	r2WriterToken := os.Getenv("R2_WRITER_TOKEN")
+	awsAccessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
+	awsSecretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+
+	// Automatically derive AWS_SECRET_ACCESS_KEY from R2_WRITER_TOKEN if not explicitly set
+	if awsSecretAccessKey == "" && r2WriterToken != "" {
+		sum := sha256.Sum256([]byte(r2WriterToken))
+		awsSecretAccessKey = hex.EncodeToString(sum[:])
+	}
+
 	cfg := Config{
-		Port:              getEnvOrDefault("PORT", "9090"),
-		LogLevel:          getEnvOrDefault("LOG_LEVEL", "info"),
-		ShutdownTimeout:   getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:          os.Getenv("RANGER_QUEUE_URL"),
-		QueueAPIToken:     os.Getenv("RANGER_QUEUE_API_TOKEN"),
-		QueueBatchSize:    getInt("RANGER_QUEUE_BATCH_SIZE", 1),
-		PollInterval:      getDuration("POLL_INTERVAL", 5*time.Second),
-		VisibilityTimeout: getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
-		R2BucketName:      os.Getenv("R2_BUCKET_NAME"),
-		R2AccountID:       accountID,
-		R2PublicURL:       r2PublicURL,
-		R2WriteURL:        os.Getenv("R2_WRITE_URL"),
-		R2WriterToken:     os.Getenv("R2_WRITER_TOKEN"),
-		AWSAccessKeyID:    os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		Port:               getEnvOrDefault("PORT", "9090"),
+		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
+		ShutdownTimeout:    getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		QueueURL:           os.Getenv("RANGER_QUEUE_URL"),
+		QueueAPIToken:      os.Getenv("RANGER_QUEUE_API_TOKEN"),
+		QueueBatchSize:     getInt("RANGER_QUEUE_BATCH_SIZE", 1),
+		PollInterval:       getDuration("POLL_INTERVAL", 5*time.Second),
+		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
+		R2BucketName:       os.Getenv("R2_BUCKET_NAME"),
+		R2AccountID:        accountID,
+		R2PublicURL:        r2PublicURL,
+		R2WriteURL:         os.Getenv("R2_WRITE_URL"),
+		R2WriterToken:      r2WriterToken,
+		AWSAccessKeyID:     awsAccessKeyID,
+		AWSSecretAccessKey: awsSecretAccessKey,
 		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
-		TrustCanopy:       trustCanopy,
-		MassifHeight:      getUint8("MASSIF_HEIGHT", 14),
-		CommitmentEpoch:   getUint32("COMMITMENT_EPOCH", 1),
-		WorkerCIDR:        os.Getenv("WORKER_CIDR"),
-		PodIP:             os.Getenv("POD_IP"),
+		TrustCanopy:        trustCanopy,
+		MassifHeight:       getUint8("MASSIF_HEIGHT", 14),
+		CommitmentEpoch:    getUint32("COMMITMENT_EPOCH", 1),
+		WorkerCIDR:         os.Getenv("WORKER_CIDR"),
+		PodIP:              os.Getenv("POD_IP"),
 	}
 
 	return cfg

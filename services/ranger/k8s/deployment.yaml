@@ -83,6 +83,11 @@ spec:
             secretKeyRef:
               name: ranger-r2
               key: R2_WRITER_TOKEN
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: ranger-r2
+              key: AWS_ACCESS_KEY_ID
         - name: RANGER_QUEUE_API_TOKEN
           valueFrom:
             secretKeyRef:

@@ -40,13 +40,16 @@ func Test_QueueConsumer_singleMessage(t *testing.T) {
 
 	// Committer writes leaves into the MinIO-backed merklelog store
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:      r2WriteURL,
-		R2WriterToken:   tc.cfg.BearerToken,
-		MassifHeight:    14,
-		CommitmentEpoch: 1,
-		TrustCanopy:     false,
-		WorkerCIDR:      "0.0.0.0/16",
-		PodIP:           "10.0.0.1",
+		R2WriteURL:         r2WriteURL,
+		R2WriterToken:      tc.cfg.BearerToken,
+		AWSAccessKeyID:     tc.cfg.AccessKeyID,
+		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
+		AWSRegion:          tc.cfg.Region,
+		MassifHeight:       14,
+		CommitmentEpoch:    1,
+		TrustCanopy:        false,
+		WorkerCIDR:         "0.0.0.0/16",
+		PodIP:              "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -88,13 +91,16 @@ func Test_QueueConsumer_multiLogBatches(t *testing.T) {
 
 	// Committer writes leaves into the MinIO-backed merklelog store.
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:      r2WriteURL,
-		R2WriterToken:   tc.cfg.BearerToken,
-		MassifHeight:    massifHeight,
-		CommitmentEpoch: 1,
-		TrustCanopy:     false,
-		WorkerCIDR:      "0.0.0.0/16",
-		PodIP:           "10.0.0.1",
+		R2WriteURL:         r2WriteURL,
+		R2WriterToken:      tc.cfg.BearerToken,
+		AWSAccessKeyID:     tc.cfg.AccessKeyID,
+		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
+		AWSRegion:          tc.cfg.Region,
+		MassifHeight:       massifHeight,
+		CommitmentEpoch:    1,
+		TrustCanopy:        false,
+		WorkerCIDR:         "0.0.0.0/16",
+		PodIP:              "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -209,7 +215,7 @@ func Test_QueueConsumer_multiLogBatches(t *testing.T) {
 				// add 1 to obtain the expected massif count for this log.
 				lastLeafIndex := uint64(li.leaves - 1)
 				expectedMassifs := uint32(massifs.MassifFromLeaf(massifHeight, lastLeafIndex) + 1)
-				assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, httpClient, log, li.id, expectedMassifs)
+				assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, httpClient, log, li.id, expectedMassifs)
 			}
 		})
 	}
@@ -235,13 +241,16 @@ func Test_QueueConsumer_batchSizes(t *testing.T) {
 
 	// Committer writes leaves into the MinIO-backed merklelog store
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:      r2WriteURL,
-		R2WriterToken:   tc.cfg.BearerToken,
-		MassifHeight:    14,
-		CommitmentEpoch: 1,
-		TrustCanopy:     false,
-		WorkerCIDR:      "0.0.0.0/16",
-		PodIP:           "10.0.0.1",
+		R2WriteURL:         r2WriteURL,
+		R2WriterToken:      tc.cfg.BearerToken,
+		AWSAccessKeyID:     tc.cfg.AccessKeyID,
+		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
+		AWSRegion:          tc.cfg.Region,
+		MassifHeight:       14,
+		CommitmentEpoch:    1,
+		TrustCanopy:        false,
+		WorkerCIDR:         "0.0.0.0/16",
+		PodIP:              "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -310,13 +319,16 @@ func Test_QueueConsumer_multiLogBatches_massifBoundaries(t *testing.T) {
 
 	// Committer writes leaves into the MinIO-backed merklelog store.
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:      r2WriteURL,
-		R2WriterToken:   tc.cfg.BearerToken,
-		MassifHeight:    massifHeight,
-		CommitmentEpoch: 1,
-		TrustCanopy:     false,
-		WorkerCIDR:      "0.0.0.0/16",
-		PodIP:           "10.0.0.1",
+		R2WriteURL:         r2WriteURL,
+		R2WriterToken:      tc.cfg.BearerToken,
+		AWSAccessKeyID:     tc.cfg.AccessKeyID,
+		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
+		AWSRegion:          tc.cfg.Region,
+		MassifHeight:       massifHeight,
+		CommitmentEpoch:    1,
+		TrustCanopy:        false,
+		WorkerCIDR:         "0.0.0.0/16",
+		PodIP:              "10.0.0.1",
 	}, httpClient, log)
 	require.NoError(t, err)
 
@@ -402,7 +414,7 @@ func Test_QueueConsumer_multiLogBatches_massifBoundaries(t *testing.T) {
 				}
 				lastLeafIndex := uint64(li.leaves - 1)
 				expectedMassifs := uint32(massifs.MassifFromLeaf(massifHeight, lastLeafIndex) + 1)
-				assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, httpClient, log, li.id, expectedMassifs)
+				assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, httpClient, log, li.id, expectedMassifs)
 			}
 		})
 	}
@@ -466,13 +478,16 @@ func Test_QueueConsumer_massifBoundaries(t *testing.T) {
 
 			// Committer writes leaves into the MinIO-backed merklelog store
 			comm, err := committer.NewCommitter(ranger.Config{
-				R2WriteURL:      r2WriteURL,
-				R2WriterToken:   tc.cfg.BearerToken,
-				MassifHeight:    3,
-				CommitmentEpoch: 1,
-				TrustCanopy:     false,
-				WorkerCIDR:      "0.0.0.0/16",
-				PodIP:           "10.0.0.1",
+				R2WriteURL:         r2WriteURL,
+				R2WriterToken:      tc.cfg.BearerToken,
+				AWSAccessKeyID:     tc.cfg.AccessKeyID,
+				AWSSecretAccessKey: tc.cfg.SecretAccessKey,
+				AWSRegion:          tc.cfg.Region,
+				MassifHeight:       3,
+				CommitmentEpoch:    1,
+				TrustCanopy:        false,
+				WorkerCIDR:         "0.0.0.0/16",
+				PodIP:              "10.0.0.1",
 			}, httpClient, log)
 			require.NoError(t, err)
 
@@ -510,7 +525,7 @@ func Test_QueueConsumer_massifBoundaries(t *testing.T) {
 			// massifHeight=3 => capacity 7 mmr nodes per massif. We derived the
 			// corresponding leaf count for those nodes above as leavesPerMassif.
 			expectedMassifs := uint32((totalLeaves + leavesPerMassif - 1) / leavesPerMassif)
-			assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, httpClient, log, logID, expectedMassifs)
+			assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, httpClient, log, logID, expectedMassifs)
 		})
 	}
 }

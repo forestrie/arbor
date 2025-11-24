@@ -99,14 +99,26 @@ func massifCountForLog(
 	t *testing.T,
 	r2WriteURL string,
 	bearerToken string,
+	accessKeyID string,
+	secretAccessKey string,
+	region string,
 	httpClient *ranger.HTTPClient,
 	logger *slog.Logger,
 	logID massifstorage.LogID,
 ) uint32 {
 	t.Helper()
 
-	// Disable x-amz-content-sha256 header for MinIO compatibility
-	factory, err := rangerstorage.NewS3Factory(r2WriteURL, bearerToken, httpClient, logger, s3.WithContentSHA256(false))
+	// Use SigV4 signing with MinIO credentials (matches production)
+	factory, err := rangerstorage.NewS3FactoryWithCredentials(
+		r2WriteURL,
+		bearerToken, // Fallback if no credentials
+		accessKeyID,
+		secretAccessKey,
+		region,
+		httpClient,
+		logger,
+		s3.WithContentSHA256(true), // SigV4 requires this
+	)
 	require.NoError(t, err)
 
 	store, err := factory.NewStore(nil)
@@ -132,6 +144,9 @@ func assertMassifCount(
 	t *testing.T,
 	r2WriteURL string,
 	bearerToken string,
+	accessKeyID string,
+	secretAccessKey string,
+	region string,
 	httpClient *ranger.HTTPClient,
 	logger *slog.Logger,
 	logID massifstorage.LogID,
@@ -143,6 +158,9 @@ func assertMassifCount(
 		t,
 		r2WriteURL,
 		bearerToken,
+		accessKeyID,
+		secretAccessKey,
+		region,
 		httpClient,
 		logger,
 		logID,
@@ -155,6 +173,9 @@ func assertMassifCount(
 			t,
 			r2WriteURL,
 			bearerToken,
+			accessKeyID,
+			secretAccessKey,
+			region,
 			httpClient,
 			logger,
 			logID,
@@ -170,13 +191,25 @@ func listMassifObjectsForLog(
 	t *testing.T,
 	r2WriteURL string,
 	bearerToken string,
+	accessKeyID string,
+	secretAccessKey string,
+	region string,
 	httpClient *ranger.HTTPClient,
 	logger *slog.Logger,
 	logID massifstorage.LogID,
 ) []string {
 	t.Helper()
 
-	client, err := s3.NewClient(r2WriteURL, bearerToken, httpClient, logger)
+	client, err := s3.NewClientWithCredentials(
+		r2WriteURL,
+		bearerToken, // Fallback if no credentials
+		accessKeyID,
+		secretAccessKey,
+		region,
+		httpClient,
+		logger,
+		s3.WithContentSHA256(true), // SigV4 requires this
+	)
 	require.NoError(t, err)
 
 	prefix, err := datatrails.StorageObjectPrefix(logID, massifstorage.ObjectMassifData)

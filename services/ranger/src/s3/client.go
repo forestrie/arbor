@@ -11,10 +11,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/forestrie/go-sigv4/signer"
 	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
+	"github.com/forestrie/go-sigv4/signer"
 )
 
 // HTTPDoer abstracts the subset of http.Client used by the S3 client.
@@ -34,9 +35,10 @@ type Client struct {
 	token                string
 	doer                 HTTPDoer
 	logger               *slog.Logger
-	signer               *signer.Signer // SigV4 signer for authenticated requests
-	includeContentSHA256 bool            // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
-	cloudflareCompat     bool            // If true, include Cloudflare-specific headers (e.g., x-amz-date)
+	signerPool           *sync.Pool     // Pool of SigV4 signers (one per goroutine)
+	signerConfig         *signer.Config // Config for creating signers (nil if not using SigV4)
+	includeContentSHA256 bool           // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
+	cloudflareCompat     bool           // If true, include Cloudflare-specific headers (e.g., x-amz-date)
 }
 
 // PutOptions controls conditional write behaviour for PUT requests.
@@ -145,22 +147,29 @@ func NewClientWithCredentials(baseURL, bearerToken, accessKeyID, secretAccessKey
 		cloudflareCompat:     true, // Default: enabled for Cloudflare R2 compatibility
 	}
 
-	// Initialize SigV4 signer if credentials are provided
+	// Initialize SigV4 signer pool if credentials are provided
+	// Each goroutine will get its own signer instance from the pool
 	if accessKeyID != "" && secretAccessKey != "" {
 		if region == "" {
 			region = "auto" // Default for Cloudflare R2
 		}
-		sigv4Config := signer.Config{
+		sigv4Config := &signer.Config{
 			Region:          region,
 			AccessKeyID:     accessKeyID,
 			SecretAccessKey: secretAccessKey,
 			Service:         "s3", // Default service name for S3-compatible APIs
 		}
-		sigv4Signer, err := signer.NewSigner(sigv4Config)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SigV4 signer: %w", err)
+		client.signerConfig = sigv4Config
+		client.signerPool = &sync.Pool{
+			New: func() interface{} {
+				s, err := signer.NewSigner(*sigv4Config)
+				if err != nil {
+					// This should never happen if config is valid, but handle it gracefully
+					return nil
+				}
+				return s
+			},
 		}
-		client.signer = sigv4Signer
 	}
 
 	for _, opt := range opts {
@@ -263,9 +272,11 @@ func (c *Client) ListObjects(
 		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 	}
 
-	// Sign request with SigV4 if signer is available, otherwise use bearer token
-	if c.signer != nil {
-		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
+	if c.signerPool != nil {
+		sig := c.signerPool.Get().(*signer.Signer)
+		defer c.signerPool.Put(sig)
+		if err := sig.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
 			return ListResult{}, fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else {
@@ -388,9 +399,11 @@ func (c *Client) GetObject(ctx context.Context, key string, opts GetOptions) (Ge
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", opts.RangeStart))
 	}
 
-	// Sign request with SigV4 if signer is available, otherwise use bearer token
-	if c.signer != nil {
-		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
+	if c.signerPool != nil {
+		sig := c.signerPool.Get().(*signer.Signer)
+		defer c.signerPool.Put(sig)
+		if err := sig.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
 			return GetResult{}, fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else if c.token != "" {
@@ -444,9 +457,11 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 	}
 
-	// Sign request with SigV4 if signer is available, otherwise use bearer token
-	if c.signer != nil {
-		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
+	if c.signerPool != nil {
+		sig := c.signerPool.Get().(*signer.Signer)
+		defer c.signerPool.Put(sig)
+		if err := sig.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
 			return fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else if c.token != "" {
