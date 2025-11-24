@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forestrie/go-sigv4/signer"
 	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
 )
 
@@ -33,8 +34,9 @@ type Client struct {
 	token                string
 	doer                 HTTPDoer
 	logger               *slog.Logger
-	includeContentSHA256 bool // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
-	cloudflareCompat     bool // If true, include Cloudflare-specific headers (e.g., x-amz-date)
+	signer               *signer.Signer // SigV4 signer for authenticated requests
+	includeContentSHA256 bool            // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
+	cloudflareCompat     bool            // If true, include Cloudflare-specific headers (e.g., x-amz-date)
 }
 
 // PutOptions controls conditional write behaviour for PUT requests.
@@ -76,7 +78,8 @@ func (e *Error) Error() string {
 
 // emptyBodySHA256 is the SHA256 hash of an empty string, used for x-amz-content-sha256
 // header on requests with no body (GET, DELETE, etc.)
-const emptyBodySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// This matches signer.EmptyStringSHA256 from go-sigv4
+const emptyBodySHA256 = signer.EmptyStringSHA256
 
 // formatAmzDate formats a time.Time as an AWS S3 x-amz-date header value.
 // Format: YYYYMMDDTHHMMSSZ (e.g., 20231201T120000Z)
@@ -106,7 +109,16 @@ func WithCloudflareCompat(enabled bool) ClientOption {
 // NewClient constructs a Client using the provided baseURL and bearer token.
 // By default, x-amz-content-sha256 header is included (required for Cloudflare R2).
 // Use WithContentSHA256(false) to disable it for S3-compatible backends that don't require it.
+// If AWS credentials are provided, SigV4 signing will be used instead of bearer token authentication.
 func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger, opts ...ClientOption) (*Client, error) {
+	return NewClientWithCredentials(baseURL, bearerToken, "", "", "", doer, logger, opts...)
+}
+
+// NewClientWithCredentials constructs a Client with AWS credentials for SigV4 signing.
+// If accessKeyID and secretAccessKey are provided, SigV4 signing will be used.
+// Otherwise, bearer token authentication will be used.
+// Region defaults to "auto" for Cloudflare R2 if not provided.
+func NewClientWithCredentials(baseURL, bearerToken, accessKeyID, secretAccessKey, region string, doer HTTPDoer, logger *slog.Logger, opts ...ClientOption) (*Client, error) {
 	if doer == nil {
 		return nil, fmt.Errorf("http doer is required")
 	}
@@ -131,6 +143,24 @@ func NewClient(baseURL, bearerToken string, doer HTTPDoer, logger *slog.Logger, 
 		logger:               logger,
 		includeContentSHA256: true, // Default: enabled for Cloudflare R2 compatibility
 		cloudflareCompat:     true, // Default: enabled for Cloudflare R2 compatibility
+	}
+
+	// Initialize SigV4 signer if credentials are provided
+	if accessKeyID != "" && secretAccessKey != "" {
+		if region == "" {
+			region = "auto" // Default for Cloudflare R2
+		}
+		sigv4Config := signer.Config{
+			Region:          region,
+			AccessKeyID:     accessKeyID,
+			SecretAccessKey: secretAccessKey,
+			Service:         "s3", // Default service name for S3-compatible APIs
+		}
+		sigv4Signer, err := signer.NewSigner(sigv4Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SigV4 signer: %w", err)
+		}
+		client.signer = sigv4Signer
 	}
 
 	for _, opt := range opts {
@@ -229,19 +259,25 @@ func (c *Client) ListObjects(
 	req = req.WithContext(ctx)
 
 	// Set headers for S3-compatible API
-	// if c.includeContentSHA256 {
-	// 	req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
-	// }
-
-	// Set Cloudflare-specific headers when cloudflareCompat is enabled
-	if c.cloudflareCompat {
-		req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
+	if c.includeContentSHA256 {
+		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 	}
 
-	if c.token == "" {
-		c.logger.Warn("ListObjects: no token provided")
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
+		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+			return ListResult{}, fmt.Errorf("failed to sign request: %w", err)
+		}
 	} else {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+		// Set Cloudflare-specific headers when cloudflareCompat is enabled (for bearer token auth)
+		if c.cloudflareCompat {
+			req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
+		}
+		if c.token == "" {
+			c.logger.Warn("ListObjects: no token provided")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
 	}
 
 	resp, err := c.doer.Do(ctx, req)
@@ -352,7 +388,12 @@ func (c *Client) GetObject(ctx context.Context, key string, opts GetOptions) (Ge
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", opts.RangeStart))
 	}
 
-	if c.token != "" {
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
+		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+			return GetResult{}, fmt.Errorf("failed to sign request: %w", err)
+		}
+	} else if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 
@@ -403,7 +444,12 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 	}
 
-	if c.token != "" {
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
+		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+			return fmt.Errorf("failed to sign request: %w", err)
+		}
+	} else if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 

@@ -32,6 +32,11 @@ type Config struct {
 	R2WriteURL    string
 	R2WriterToken string
 
+	// AWS Credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
+	AWSAccessKeyID     string
+	AWSSecretAccessKey string
+	AWSRegion          string // Defaults to "auto" for Cloudflare R2
+
 	// Deployment configuration (not from messages)
 	TrustCanopy         bool   // If true, verify hash by reading object. If false, trust path hash.
 	SuppressAcknowledge bool   // If true, skip acknowledging messages (primarily for tests).
@@ -164,6 +169,9 @@ func LoadConfig() Config {
 		R2PublicURL:       r2PublicURL,
 		R2WriteURL:        os.Getenv("R2_WRITE_URL"),
 		R2WriterToken:     os.Getenv("R2_WRITER_TOKEN"),
+		AWSAccessKeyID:    os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
 		TrustCanopy:       trustCanopy,
 		MassifHeight:      getUint8("MASSIF_HEIGHT", 14),
 		CommitmentEpoch:   getUint32("COMMITMENT_EPOCH", 1),
@@ -208,6 +216,12 @@ func (c Config) Validate() error {
 	}
 	if c.R2WriterToken == "" {
 		return fmt.Errorf("R2_WRITER_TOKEN is required")
+	}
+	if c.AWSAccessKeyID == "" {
+		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")
+	}
+	if c.AWSSecretAccessKey == "" {
+		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing")
 	}
 	if c.WorkerCIDR == "" {
 		return fmt.Errorf("WORKER_CIDR is required")

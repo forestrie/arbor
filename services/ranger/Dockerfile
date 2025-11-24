@@ -18,6 +18,7 @@ COPY go.work ./
 COPY src/go.mod src/go.sum* ./src/
 
 # Copy local module clones explicitly so they are available to go.work and replaces
+COPY go-sigv4 ./go-sigv4
 COPY go-datatrails-common ./go-datatrails-common
 COPY go-datatrails-serialization ./go-datatrails-serialization
 COPY go-datatrails-simplehash ./go-datatrails-simplehash

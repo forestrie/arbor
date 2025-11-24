@@ -40,8 +40,16 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		logger = slog.Default()
 	}
 
-	// Use S3 factory with x-amz-content-sha256 enabled by default (required for Cloudflare R2)
-	factory, err := storage.NewS3Factory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
+	// Use S3 factory with SigV4 signing enabled (required for Cloudflare R2 S3-compatible API)
+	factory, err := storage.NewS3FactoryWithCredentials(
+		cfg.R2WriteURL,
+		cfg.R2WriterToken,
+		cfg.AWSAccessKeyID,
+		cfg.AWSSecretAccessKey,
+		cfg.AWSRegion,
+		httpClient,
+		logger,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage factory: %w", err)
 	}

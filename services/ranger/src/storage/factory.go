@@ -28,12 +28,20 @@ func NewFactory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger, op
 // NewS3Factory initialises a Factory backed by an S3-compatible client.
 // By default, x-amz-content-sha256 header and cloudflareCompat mode are enabled (required for Cloudflare R2).
 // Use s3.WithContentSHA256(false) and s3.WithCloudflareCompat(false) options to disable them for S3-compatible backends that don't require them.
+// If AWS credentials are provided, SigV4 signing will be used instead of bearer token authentication.
 func NewS3Factory(baseURL, token string, doer s3.HTTPDoer, logger *slog.Logger, opts ...s3.ClientOption) (*Factory, error) {
+	return NewS3FactoryWithCredentials(baseURL, token, "", "", "", doer, logger, opts...)
+}
+
+// NewS3FactoryWithCredentials initialises a Factory backed by an S3-compatible client with AWS credentials.
+// If accessKeyID and secretAccessKey are provided, SigV4 signing will be used.
+// Otherwise, bearer token authentication will be used.
+func NewS3FactoryWithCredentials(baseURL, token, accessKeyID, secretAccessKey, region string, doer s3.HTTPDoer, logger *slog.Logger, opts ...s3.ClientOption) (*Factory, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	s3Client, err := s3.NewClient(baseURL, token, doer, logger, opts...)
+	s3Client, err := s3.NewClientWithCredentials(baseURL, token, accessKeyID, secretAccessKey, region, doer, logger, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build s3 client: %w", err)
 	}
