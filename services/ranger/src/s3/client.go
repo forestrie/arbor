@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
@@ -37,8 +36,7 @@ type Client struct {
 	token                string
 	doer                 HTTPDoer
 	logger               *slog.Logger
-	signerPool           *sync.Pool     // Pool of SigV4 signers (one per goroutine)
-	signerConfig         *signer.Config // Config for creating signers (nil if not using SigV4)
+	signer               *signer.Signer // SigV4 signer (thread-safe when ThreadSafety=true)
 	includeContentSHA256 bool           // If true, include x-amz-content-sha256 header (required for Cloudflare R2)
 	cloudflareCompat     bool           // If true, include Cloudflare-specific headers (e.g., x-amz-date)
 }
@@ -149,29 +147,24 @@ func NewClientWithCredentials(baseURL, bearerToken, accessKeyID, secretAccessKey
 		cloudflareCompat:     true, // Default: enabled for Cloudflare R2 compatibility
 	}
 
-	// Initialize SigV4 signer pool if credentials are provided
-	// Each goroutine will get its own signer instance from the pool
+	// Initialize SigV4 signer if credentials are provided
+	// The signer is thread-safe when ThreadSafety=true
 	if accessKeyID != "" && secretAccessKey != "" {
 		if region == "" {
 			region = "auto" // Default for Cloudflare R2
 		}
-		sigv4Config := &signer.Config{
+		sigv4Config := signer.Config{
 			Region:          region,
 			AccessKeyID:     accessKeyID,
 			SecretAccessKey: secretAccessKey,
 			Service:         "s3", // Default service name for S3-compatible APIs
+			ThreadSafety:    true, // Enable thread-safe operation
 		}
-		client.signerConfig = sigv4Config
-		client.signerPool = &sync.Pool{
-			New: func() interface{} {
-				s, err := signer.NewSigner(*sigv4Config)
-				if err != nil {
-					// This should never happen if config is valid, but handle it gracefully
-					return nil
-				}
-				return s
-			},
+		s, err := signer.NewSigner(sigv4Config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create signer: %w", err)
 		}
+		client.signer = s
 	}
 
 	for _, opt := range opts {
@@ -227,12 +220,10 @@ func (c *Client) PutObject(
 		req.Header.Set("x-amz-content-sha256", payloadHash)
 	}
 
-	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
-	if c.signerPool != nil {
-		sig := c.signerPool.Get().(*signer.Signer)
-		defer c.signerPool.Put(sig)
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
 		// TODO(UNSIGNED-PAYLOAD): If using UNSIGNED-PAYLOAD, pass "UNSIGNED-PAYLOAD" string here instead of payloadHash
-		if err := sig.SignHTTP(req, payloadHash, time.Now()); err != nil {
+		if err := c.signer.SignHTTP(req, payloadHash, time.Now()); err != nil {
 			return PutResult{}, fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else {
@@ -303,11 +294,9 @@ func (c *Client) ListObjects(
 		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 	}
 
-	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
-	if c.signerPool != nil {
-		sig := c.signerPool.Get().(*signer.Signer)
-		defer c.signerPool.Put(sig)
-		if err := sig.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
+		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
 			return ListResult{}, fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else {
@@ -430,11 +419,9 @@ func (c *Client) GetObject(ctx context.Context, key string, opts GetOptions) (Ge
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", opts.RangeStart))
 	}
 
-	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
-	if c.signerPool != nil {
-		sig := c.signerPool.Get().(*signer.Signer)
-		defer c.signerPool.Put(sig)
-		if err := sig.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
+		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
 			return GetResult{}, fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else if c.token != "" {
@@ -488,11 +475,9 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 		req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 	}
 
-	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
-	if c.signerPool != nil {
-		sig := c.signerPool.Get().(*signer.Signer)
-		defer c.signerPool.Put(sig)
-		if err := sig.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
+	// Sign request with SigV4 if signer is available, otherwise use bearer token
+	if c.signer != nil {
+		if err := c.signer.SignHTTP(req, emptyBodySHA256, time.Now()); err != nil {
 			return fmt.Errorf("failed to sign request: %w", err)
 		}
 	} else if c.token != "" {
