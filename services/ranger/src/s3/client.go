@@ -3,6 +3,8 @@ package s3
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -212,8 +214,37 @@ func (c *Client) PutObject(
 		req.Header.Set("If-None-Match", options.IfNoneMatch)
 	}
 
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
+	// Compute payload hash for SigV4 signing
+	// TODO(UNSIGNED-PAYLOAD): To use UNSIGNED-PAYLOAD instead of computing hash:
+	//   1. Replace payloadHash computation below with: payloadHash := "UNSIGNED-PAYLOAD"
+	//   2. Set header: req.Header.Set("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
+	//   3. Note: Cloudflare R2 may require actual hash, so test compatibility first
+	hash := sha256.Sum256(payload)
+	payloadHash := hex.EncodeToString(hash[:])
+
+	// Set headers for S3-compatible API
+	if c.includeContentSHA256 {
+		req.Header.Set("x-amz-content-sha256", payloadHash)
+	}
+
+	// Sign request with SigV4 if signer pool is available, otherwise use bearer token
+	if c.signerPool != nil {
+		sig := c.signerPool.Get().(*signer.Signer)
+		defer c.signerPool.Put(sig)
+		// TODO(UNSIGNED-PAYLOAD): If using UNSIGNED-PAYLOAD, pass "UNSIGNED-PAYLOAD" string here instead of payloadHash
+		if err := sig.SignHTTP(req, payloadHash, time.Now()); err != nil {
+			return PutResult{}, fmt.Errorf("failed to sign request: %w", err)
+		}
+	} else {
+		// Set Cloudflare-specific headers when cloudflareCompat is enabled (for bearer token auth)
+		if c.cloudflareCompat {
+			req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
+		}
+		if c.token == "" {
+			c.logger.Warn("PutObject: no token provided")
+		} else {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
 	}
 
 	resp, err := c.doer.Do(ctx, req)
