@@ -157,7 +157,7 @@ func LoadConfig() Config {
 
 	r2WriterToken := os.Getenv("R2_WRITER_TOKEN")
 	awsAccessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
-	awsSecretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
 
 	// Automatically derive AWS_SECRET_ACCESS_KEY from R2_WRITER_TOKEN if not explicitly set
 	if awsSecretAccessKey == "" && r2WriterToken != "" {
