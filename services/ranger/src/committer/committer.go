@@ -141,6 +141,12 @@ func (c *Committer) nextIDTimestampWithRetry(ctx context.Context) (uint64, error
 	return c.idState.NextID()
 }
 
+// logNotice logs a message at the NOTICE level (between INFO and WARN).
+// When the logger level is set to NOTICE, it excludes INFO and below, but includes WARN and ERROR.
+func (c *Committer) logNotice(ctx context.Context, msg string, args ...any) {
+	c.logger.Log(ctx, ranger.LevelNotice, msg, args...)
+}
+
 // ProcessBatch processes messages belonging to a single logID span.
 func (c *Committer) ProcessBatch(
 	ctx context.Context,
@@ -240,7 +246,7 @@ func (c *Committer) ProcessBatch(
 				batch.Errs[msgIdx] = err
 				return lastCommit, err
 			}
-			c.logger.Info(
+			c.logNotice(ctx,
 				"committed",
 				"index", mmrIndex,
 				"content", fmt.Sprintf("%x", parsed.Hash),
@@ -274,7 +280,7 @@ func (c *Committer) ProcessBatch(
 	if err := massifs.CommitContext(ctx, store, &mc); err != nil {
 		return lastCommit, err
 	}
-	c.logger.Info(
+	c.logNotice(ctx,
 		"committed",
 		"index", mmrIndex,
 		"content", fmt.Sprintf("%x", parsed.Hash),

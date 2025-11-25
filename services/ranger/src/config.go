@@ -1,6 +1,7 @@
 package ranger
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -48,9 +49,14 @@ type Config struct {
 	CommitmentEpoch uint32 // Commitment epoch (default 1)
 }
 
+// LevelNotice is a custom log level between INFO (0) and WARN (4).
+// When set as the log level, it excludes INFO and below, but includes WARN and ERROR.
+const LevelNotice slog.Level = 2
+
 var levelAliases = map[string]slog.Level{
 	"debug":   slog.LevelDebug,
 	"info":    slog.LevelInfo,
+	"notice":  LevelNotice,
 	"warn":    slog.LevelWarn,
 	"warning": slog.LevelWarn,
 	"error":   slog.LevelError,
@@ -274,5 +280,5 @@ func logConfigValue[T any](logger *slog.Logger, name string, value T) {
 		v = fmt.Sprintf("%v", val)
 	}
 
-	logger.Warn("config value", "name", name, "value", v, "empty", empty)
+	logger.Log(context.Background(), LevelNotice, "config value", "name", name, "value", v, "empty", empty)
 }
