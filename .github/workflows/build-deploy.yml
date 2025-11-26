@@ -13,6 +13,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  # Note: GitHub App token will be used for cross-repo operations
 
 jobs:
   build-and-deploy:
@@ -52,20 +53,6 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker europe-west2-docker.pkg.dev
 
-      - name: Authenticate to GKE cluster
-        run: |
-          gcloud container clusters get-credentials forest-dev-1 --zone=europe-west2-a
-
-      - name: Create/Update ranger secrets
-        env:
-          RANGER_QUEUE_API_TOKEN: ${{ secrets.RANGER_QUEUE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          kubectl create secret generic ranger-secrets \
-            --from-literal=queue-api-token="${RANGER_QUEUE_API_TOKEN}" \
-            --namespace=forestrie-arbor \
-            --dry-run=client -o yaml | kubectl apply -f -
-
       - name: Compute image tag
         id: vars
         run: echo "image_tag=main-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -91,3 +78,22 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
         run: task scout:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GITAPP_ID }}
+          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
+
+      - name: Trigger arbor-flux to sync ranger secrets
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          
+          # Trigger arbor-flux workflow to sync ranger secrets after build
+          gh api repos/forestrie/arbor-flux/dispatches \
+            --method POST \
+            -f event_type='sync-ranger-secrets' \
+            -f client_payload='{"source":"arbor","workflow":"build-deploy","run_id":"'${{ github.run_id }}'","sha":"'${{ github.sha }}'"}'

@@ -18,13 +18,24 @@ The infrastructure repository (forest-1) already uses Flux for GitOps-based depl
 
 ## Decision
 
-We will implement Flux GitOps deployment for Arbor services with the following components:
+We implement Flux GitOps deployment for Arbor services with the following
+components:
 
-1. **Arbor repository as source of truth**: Service Kubernetes manifests remain in arbor repository alongside service code
-2. **Flux GitRepository**: Forest-1 references arbor repository via GitRepository source
-3. **Flux Kustomization**: Forest-1 creates Flux Kustomization resources that reference arbor GitRepository
-4. **ImageUpdateAutomation**: Flux automatically updates image tags in arbor manifests when new images are pushed
-5. **Kustomize-based manifests**: Services use Kustomize for manifest organization (aligned with existing forest-1 patterns)
+1. **arbor-flux repository**: Service Kubernetes manifests in separate
+   arbor-flux repository (not in arbor source repository)
+2. **Flux GitRepository**: Forest-1 references arbor-flux repository via
+   GitRepository source
+3. **Flux Kustomization**: Forest-1 creates Flux Kustomization
+   resources that reference arbor-flux GitRepository
+4. **ImageUpdateAutomation**: Flux automatically updates image tags in
+   arbor-flux manifests when new images are pushed
+5. **Kustomize-based manifests**: Services use Kustomize for manifest
+   organization
+
+**Note**: This decision was updated to use arbor-flux repository instead
+of direct arbor repository. See
+[ops-cd-flow.md](../forest-1/docs/ops-cd-flow.md) for complete
+deployment workflow.
 
 ## Consequences
 
@@ -40,7 +51,7 @@ We will implement Flux GitOps deployment for Arbor services with the following c
 
 ### Negative
 
-- **Flux write access required**: ImageUpdateAutomation needs write access to arbor repository (SSH key or GitHub App)
+- **Flux write access required**: ImageUpdateAutomation needs write access to arbor-flux repository (GitHub App)
 - **Git commit noise**: Flux will create commits for image tag updates (mitigated with [ci skip] in commit message)
 - **Two-repository monitoring**: Deployment status requires checking both arbor and forest-1 repositories
 - **Initial setup complexity**: Requires GitRepository, Kustomization, and ImageUpdateAutomation configuration
@@ -55,10 +66,16 @@ We will implement Flux GitOps deployment for Arbor services with the following c
 
 ### Repository Structure
 
-- **Arbor**: `services/ranger/k8s/kustomization.yaml` - Kustomize manifest with image reference
-- **Forest-1**: `clusters/gke-dev/sources/arbor-gitrepository.yaml` - GitRepository pointing to arbor
-- **Forest-1**: `clusters/gke-dev/forestrie-arbor/ranger.yaml` - Flux Kustomization for ranger service
-- **Forest-1**: `clusters/gke-dev/image-automation/` - ImageRepository, ImagePolicy, ImageUpdateAutomation
+- **arbor-flux**: `clusters/gke-dev/services/ranger/kustomization.yaml` -
+  Kustomize manifest with image reference (does not include namespace)
+- **forest-1**: `clusters/gke-dev/sources/arbor-gitrepository.yaml` -
+  GitRepository pointing to arbor-flux
+- **forest-1**: `clusters/gke-dev/forestrie-arbor.yaml` - Flux Kustomization
+  for namespace management
+- **forest-1**: `clusters/gke-dev/arbor-flux.yaml` - Flux Kustomization
+  for arbor-flux services
+- **arbor-flux**: `clusters/gke-dev/image-automation/` -
+  ImageRepository, ImagePolicy, ImageUpdateAutomation (all image automation resources)
 
 ### Image Tagging
 
@@ -74,11 +91,16 @@ Images are tagged with format: `main-{short-sha}-{run}`
 1. Developer pushes code to arbor `main` branch
 2. GitHub Actions builds Docker image with tag `main-{short-sha}-{run}`
 3. Image pushed to Artifact Registry
-4. Flux ImageRepository detects new image
-5. Flux ImagePolicy selects latest image (numerical sort on run number)
-6. Flux ImageUpdateAutomation updates `kustomization.yaml` in arbor repo
-7. Flux Kustomization reconciles deployment with new image tag
-8. Deployment rolls out automatically
+4. Build workflow triggers `sync-ranger-secrets` in arbor-flux
+5. Flux ImageRepository detects new image
+6. Flux ImagePolicy selects latest image (numerical sort on run number)
+7. Flux ImageUpdateAutomation updates `kustomization.yaml` in
+   arbor-flux repo
+8. Flux Kustomization reconciles deployment with new image tag
+9. Deployment rolls out automatically
+
+See [ops-cd-flow.md](../forest-1/docs/ops-cd-flow.md) for complete
+workflow with sequence diagrams.
 
 ## Alternatives Considered
 
@@ -103,4 +125,6 @@ Images are tagged with format: `main-{short-sha}-{run}`
 - [Flux Image Update Automation](https://fluxcd.io/flux/components/image/imageupdateautomations/)
 - [Flux GitRepository](https://fluxcd.io/flux/components/source/gitrepositories/)
 - [Kustomize](https://kustomize.io/)
+- [Deployment Flow](../forest-1/docs/ops-cd-flow.md) - Complete CD
+  workflow documentation
 - ADR-001 in forest-1: Arbor GitRepository Integration
