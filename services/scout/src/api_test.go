@@ -25,7 +25,7 @@ func TestHeadIndex_UsesPathLogIDAndReturnsZeroIndex(t *testing.T) {
 
 	const logID = "test-log"
 
-	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/logs/"+logID+"/head-index", nil)
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/logs/"+logID+"/head-index", nil)
 	if err != nil {
 		t.Fatalf("NewRequest failed: %v", err)
 	}
