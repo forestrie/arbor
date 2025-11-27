@@ -148,4 +148,4 @@ jobs:
           gh api repos/forestrie/arbor-flux/dispatches \
             --method POST \
             -f event_type='sync-ranger-secrets' \
-            --input /tmp/client_payload.json
+            -F client_payload=@/tmp/client_payload.json
