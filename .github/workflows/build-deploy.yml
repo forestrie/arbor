@@ -134,8 +134,18 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Create client_payload JSON in a temporary file to avoid quotation/encoding issues
+          cat > /tmp/client_payload.json << EOF
+          {
+            "source": "arbor",
+            "workflow": "build-deploy",
+            "run_id": "${{ github.run_id }}",
+            "sha": "${{ github.sha }}"
+          }
+          EOF
+
           # Trigger arbor-flux workflow to sync ranger secrets after build
           gh api repos/forestrie/arbor-flux/dispatches \
             --method POST \
             -f event_type='sync-ranger-secrets' \
-            -f client_payload='{"source":"arbor","workflow":"build-deploy","run_id":"'${{ github.run_id }}'","sha":"'${{ github.sha }}'"}'
+            --input /tmp/client_payload.json
