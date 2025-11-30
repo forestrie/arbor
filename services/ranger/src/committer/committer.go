@@ -194,8 +194,9 @@ func (c *Committer) ProcessBatch(
 	// lastCommit is a ByLogID index and is treated as an exclusive upper bound
 	// for messages that have been fully processed and committed.
 	lastCommit := start
+	i := start
 
-	for i := start; i < end; i++ {
+	for ; i < end; i++ {
 		msgIdx := batch.ByLogID[i]
 		if batch.Errs[msgIdx] != nil {
 			continue
@@ -233,7 +234,7 @@ func (c *Committer) ProcessBatch(
 		mmrIndex, err = mc.AddHashedLeaf(
 			sha256.New(),
 			idTimestamp,
-			idTimestampBytes,
+			parsed.Hash, // only first 24 bytes used from this in current format
 			parsed.LogID,
 			parsed.Hash,
 			leafHash,
@@ -249,6 +250,7 @@ func (c *Committer) ProcessBatch(
 			c.logNotice(ctx,
 				"committed",
 				"index", mmrIndex,
+				"count", lastCommit-i+1,
 				"content", fmt.Sprintf("%x", parsed.Hash),
 				"leaf", fmt.Sprintf("%x", leafHash))
 
@@ -283,6 +285,7 @@ func (c *Committer) ProcessBatch(
 	c.logNotice(ctx,
 		"committed",
 		"index", mmrIndex,
+		"count", lastCommit-i+1,
 		"content", fmt.Sprintf("%x", parsed.Hash),
 		"leaf", fmt.Sprintf("%x", leafHash))
 
