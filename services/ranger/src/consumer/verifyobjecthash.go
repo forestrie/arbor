@@ -15,7 +15,7 @@ import (
 )
 
 // VerifyObjectHash reads the object from R2 and verifies its SHA256 hash matches the path hash.
-func VerifyObjectHash(ctx context.Context, cfg ranger.Config, parsed *ParsedNotification, httpClient *ranger.HTTPClient, logger *slog.Logger) error {
+func VerifyObjectHash(ctx context.Context, cfg ranger.Config, parsed *ProcessedNotification, httpClient *ranger.HTTPClient, logger *slog.Logger) error {
 	_ = logger
 
 	if cfg.R2PublicURL == "" {

@@ -33,7 +33,7 @@ type QueuePullResult struct {
 	// that any message on the queue is intended from *some* ranger version and
 	// will at least decode correctly. Conuming it will not accidentally consume
 	// a message intended for a different service.
-	Decoded []ParsedNotification
+	Decoded []ProcessedNotification
 
 	// ByLogID contains an index into Messages for each message ordered by LogID
 	ByLogID []int

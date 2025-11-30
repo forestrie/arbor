@@ -155,7 +155,7 @@ func (c *Committer) ProcessBatch(
 ) (int, error) {
 	var mmrIndex uint64
 	var leafHash []byte
-	var parsed consumer.ParsedNotification
+	var parsed consumer.ProcessedNotification
 
 	if start >= end {
 		return start, nil
@@ -234,10 +234,11 @@ func (c *Committer) ProcessBatch(
 		mmrIndex, err = mc.AddHashedLeaf(
 			sha256.New(),
 			idTimestamp,
-			parsed.Hash, // only first 24 bytes used from this in current format
+			parsed.ExtraBytes0, // only first 24 bytes used from this in current format
 			parsed.LogID,
 			parsed.Hash,
 			leafHash,
+			parsed.ExtraBytes1,
 		)
 		if errors.Is(err, massifs.ErrMassifFull) {
 			// Commit the current massif; all items up to and including i are now

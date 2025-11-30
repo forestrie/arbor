@@ -3,6 +3,7 @@ package consumer
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -212,7 +213,7 @@ func (q *QueueConsumer) ProcessBatchWithCommitter(ctx context.Context, qbatch *Q
 	}
 
 	qbatch.R2Notification = make([]R2Notification, n)
-	qbatch.Decoded = make([]ParsedNotification, n)
+	qbatch.Decoded = make([]ProcessedNotification, n)
 	qbatch.Errs = make([]error, n)
 	qbatch.Ack = make([]bool, n)
 	qbatch.ByLogID = make([]int, n)
@@ -238,7 +239,7 @@ func (q *QueueConsumer) ProcessBatchWithCommitter(ctx context.Context, qbatch *Q
 			continue
 		}
 
-		if err := parseObjectPath(&qbatch.Decoded[i], qbatch.R2Notification[i].Object.Key); err != nil {
+		if err := processObjectPath(&qbatch.Decoded[i], qbatch.R2Notification[i].Object.Key); err != nil {
 			qbatch.Errs[i] = fmt.Errorf("failed to parse object path %s for message id=%s: %w", qbatch.R2Notification[i].Object.Key, msg.ID, err)
 			qbatch.Ack[i] = true
 			continue
@@ -379,8 +380,8 @@ func (q *QueueConsumer) ackBatch(ctx context.Context, qbatch *QueuePullResult, s
 	q.logger.Info("ackBatch", "acked", end-start)
 }
 
-// parseObjectPath extracts logId, fenceIndex, and hash from R2 object path.
-func parseObjectPath(note *ParsedNotification, path string) error {
+// processObjectPath extracts logId, fenceIndex, and hash from R2 object path.
+func processObjectPath(note *ProcessedNotification, path string) error {
 	var err error
 
 	cleanPath := strings.TrimPrefix(filepath.Clean(path), "/")
@@ -414,10 +415,21 @@ func parseObjectPath(note *ParsedNotification, path string) error {
 		return fmt.Errorf("invalid hash format: not hex-encoded: %w", err)
 	}
 
-	note.FenceIndex, err = strconv.Atoi(fenceIndexStr)
+	i, err := strconv.ParseInt(fenceIndexStr, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid fenceIndex %q: %w", fenceIndexStr, err)
 	}
+	note.FenceIndex = uint64(i)
+
+	// Compute extraBytes0 and extraBytes1 to match TypeScript encoding:
+	// extraBytes0 = 24 bytes: 16 bytes zeros + 8 bytes (fenceIndex as big-endian uint64)
+	// extraBytes1 = 32 bytes (full hash)
+	note.ExtraBytes0 = make([]byte, 24)
+	// First 16 bytes are zeros (already initialized to 0)
+	binary.BigEndian.PutUint64(note.ExtraBytes0[16:24], note.FenceIndex)
+	note.ExtraBytes1 = make([]byte, 32)
+	copy(note.ExtraBytes1, note.Hash)
+
 	return nil
 }
 

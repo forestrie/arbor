@@ -16,12 +16,14 @@ type R2Object struct {
 	ETag string `json:"eTag"`
 }
 
-// ParsedNotification contains extracted data from R2 notification.
-type ParsedNotification struct {
-	LogID      []byte
-	FenceIndex int
-	Hash       []byte
-	Path       string
-	ETag       string
-	EventTime  string
+// ProcessedNotification contains extracted data from R2 notification.
+type ProcessedNotification struct {
+	LogID       []byte
+	FenceIndex  uint64
+	ExtraBytes0 []byte
+	ExtraBytes1 []byte
+	Hash        []byte
+	Path        string
+	ETag        string
+	EventTime   string
 }
