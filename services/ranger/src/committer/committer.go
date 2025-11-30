@@ -254,7 +254,7 @@ func (c *Committer) ProcessBatch(
 				"content", fmt.Sprintf("%x", parsed.Hash),
 				"leaf", fmt.Sprintf("%x", leafHash))
 
-			lastCommit = i + 1
+			lastCommit = i
 			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 			if err != nil {
 				return lastCommit, fmt.Errorf("failed to get append context after rollover: %w", err)
@@ -285,7 +285,7 @@ func (c *Committer) ProcessBatch(
 	c.logNotice(ctx,
 		"committed",
 		"index", mmrIndex,
-		"count", lastCommit-i+1,
+		"count", lastCommit-(i-1),
 		"content", fmt.Sprintf("%x", parsed.Hash),
 		"leaf", fmt.Sprintf("%x", leafHash))
 
