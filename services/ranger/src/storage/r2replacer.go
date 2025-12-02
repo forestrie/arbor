@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
+	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 )
 
@@ -44,12 +45,67 @@ func (r *Replacer) Put(
 	data []byte,
 	failIfExists bool,
 ) error {
-	prefix, err := datatrails.StorageObjectPrefix(r.logID, ty)
+	var massifHeight uint8
+	var err error
+
+	// Extract massifHeight from data based on object type
+	switch ty {
+	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData:
+		// Extract massifHeight from MassifStart header (byte 27)
+		if len(data) < int(massifs.MassifStartKeyMassifHeightFirstByte+1) {
+			return fmt.Errorf("massif data too short to read MassifHeight")
+		}
+		massifHeight = data[massifs.MassifStartKeyMassifHeightFirstByte]
+	case massifstorage.ObjectCheckpoint:
+		// For checkpoints, we need to read the associated massif to get massifHeight
+		// For now, fall back to old format - this will be improved when we have
+		// massif context available
+		prefix, err := datatrails.StorageObjectPrefix(r.logID, ty)
+		if err != nil {
+			return fmt.Errorf("failed to derive storage prefix: %w", err)
+		}
+		objectPath, err := massifstorage.ObjectPath(prefix, r.logID, massifIndex, ty)
+		if err != nil {
+			return fmt.Errorf("failed to derive object path: %w", err)
+		}
+
+		opts := PutOptions{}
+		if failIfExists {
+			opts.IfNoneMatch = "*"
+			opts.FailIfExists = true
+		}
+
+		if _, err = r.client.PutObject(ctx, objectPath, data, opts); err != nil {
+			return fmt.Errorf("failed to write object %s: %w", objectPath, err)
+		}
+
+		r.logger.Info("put", "path", objectPath)
+		return nil
+	default:
+		return fmt.Errorf("unsupported object type: %v", ty)
+	}
+
+	// Use new v2 path format for massifs
+	basePrefix, err := datatrails.StorageObjectPrefixWithHeight(r.logID, massifHeight, ty)
 	if err != nil {
 		return fmt.Errorf("failed to derive storage prefix: %w", err)
 	}
 
-	objectPath, err := massifstorage.ObjectPath(prefix, r.logID, massifIndex, ty)
+	// Add Arbor service prefix: v2/merklelog/massifs/ or v2/merklelog/checkpoints/
+	var servicePrefix string
+	switch ty {
+	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
+		servicePrefix = datatrails.V2MerklelogMassifsPrefix + "/"
+	case massifstorage.ObjectCheckpoint, massifstorage.ObjectPathCheckpoints:
+		servicePrefix = datatrails.V2MerklelogCheckpointsPrefix + "/"
+	default:
+		return fmt.Errorf("unsupported object type: %v", ty)
+	}
+
+	// Combine service prefix with base format
+	fullPrefix := servicePrefix + basePrefix
+
+	objectPath, err := massifstorage.ObjectPath(fullPrefix, r.logID, massifIndex, ty)
 	if err != nil {
 		return fmt.Errorf("failed to derive object path: %w", err)
 	}
