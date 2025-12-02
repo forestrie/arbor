@@ -74,6 +74,8 @@ func (s *Store) HasCapability(feature massifstorage.StorageFeature) bool {
 }
 
 // HeadIndex fetches the last object index for the given object type.
+// Uses old v1 path format for backward compatibility.
+// For new v2 format, use HeadIndexWithHeight.
 func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (uint32, error) {
 	cache, err := s.currentLog()
 	if err != nil {
@@ -91,6 +93,65 @@ func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (
 
 	for {
 		listResult, err := s.client.ListObjects(ctx, prefix, continuation, 1000)
+		if err != nil {
+			return 0, err
+		}
+
+		if len(listResult.Objects) > 0 {
+			lastKey = listResult.Objects[len(listResult.Objects)-1].Key
+			found = true
+		}
+
+		if !listResult.IsTruncated || listResult.NextContinuationToken == "" {
+			break
+		}
+		continuation = listResult.NextContinuationToken
+	}
+
+	if !found {
+		return 0, massifstorage.ErrLogEmpty
+	}
+
+	index, err := massifstorage.GetObjectIndex(lastKey, otype)
+	if err != nil {
+		return 0, err
+	}
+	return index, nil
+}
+
+// HeadIndexWithHeight fetches the last object index using the new v2 path format.
+func (s *Store) HeadIndexWithHeight(ctx context.Context, massifHeight uint8, otype massifstorage.ObjectType) (uint32, error) {
+	cache, err := s.currentLog()
+	if err != nil {
+		return 0, err
+	}
+
+	// Get base prefix from core function
+	basePrefix, err := datatrails.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
+	if err != nil {
+		return 0, err
+	}
+
+	// Add Arbor service prefix
+	var servicePrefix string
+	switch otype {
+	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
+		servicePrefix = datatrails.V2MerklelogMassifsPrefix + "/"
+	case massifstorage.ObjectCheckpoint, massifstorage.ObjectPathCheckpoints:
+		servicePrefix = datatrails.V2MerklelogCheckpointsPrefix + "/"
+	default:
+		return 0, fmt.Errorf("unsupported object type: %v", otype)
+	}
+
+	// Combine service prefix with base format
+	fullPrefix := servicePrefix + basePrefix
+
+	var continuation string
+	var lastKey string
+	found := false
+
+	for {
+		listResult, err := s.client.ListObjects(ctx, fullPrefix, continuation, 1000)
 		if err != nil {
 			return 0, err
 		}
@@ -146,6 +207,8 @@ func (s *Store) CheckpointData(massifIndex uint32) ([]byte, bool, error) {
 }
 
 // ObjectPath constructs the storage path for the given object type and massif index.
+// Uses old v1 path format for backward compatibility.
+// For new v2 format, use ObjectPathWithHeight.
 func (s *Store) ObjectPath(massifIndex uint32, otype massifstorage.ObjectType) (string, error) {
 	cache, err := s.currentLog()
 	if err != nil {
@@ -157,6 +220,36 @@ func (s *Store) ObjectPath(massifIndex uint32, otype massifstorage.ObjectType) (
 		return "", fmt.Errorf("failed to compute prefix: %w", err)
 	}
 	return massifstorage.ObjectPath(prefix, cache.logID, massifIndex, otype)
+}
+
+// ObjectPathWithHeight constructs the storage path using the new v2 path format.
+func (s *Store) ObjectPathWithHeight(massifHeight uint8, massifIndex uint32, otype massifstorage.ObjectType) (string, error) {
+	cache, err := s.currentLog()
+	if err != nil {
+		return "", err
+	}
+
+	// Get base prefix from core function
+	basePrefix, err := datatrails.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
+	if err != nil {
+		return "", fmt.Errorf("failed to compute prefix: %w", err)
+	}
+
+	// Add Arbor service prefix
+	var servicePrefix string
+	switch otype {
+	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
+		servicePrefix = datatrails.V2MerklelogMassifsPrefix + "/"
+	case massifstorage.ObjectCheckpoint, massifstorage.ObjectPathCheckpoints:
+		servicePrefix = datatrails.V2MerklelogCheckpointsPrefix + "/"
+	default:
+		return "", fmt.Errorf("unsupported object type: %v", otype)
+	}
+
+	// Combine service prefix with base format
+	fullPrefix := servicePrefix + basePrefix
+
+	return massifstorage.ObjectPath(fullPrefix, cache.logID, massifIndex, otype)
 }
 
 // MassifReadN reads up to n bytes (or the entire blob if n < 0) from the massif data object.
