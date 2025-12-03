@@ -127,7 +127,7 @@ func (s *Store) HeadIndexWithHeight(ctx context.Context, massifHeight uint8, oty
 	}
 
 	// Get base prefix from core function
-	basePrefix, err := datatrails.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
 	if err != nil {
 		return 0, err
 	}
@@ -136,9 +136,9 @@ func (s *Store) HeadIndexWithHeight(ctx context.Context, massifHeight uint8, oty
 	var servicePrefix string
 	switch otype {
 	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
-		servicePrefix = datatrails.V2MerklelogMassifsPrefix + "/"
+		servicePrefix = massifstorage.V2MerklelogMassifsPrefix + "/"
 	case massifstorage.ObjectCheckpoint, massifstorage.ObjectPathCheckpoints:
-		servicePrefix = datatrails.V2MerklelogCheckpointsPrefix + "/"
+		servicePrefix = massifstorage.V2MerklelogCheckpointsPrefix + "/"
 	default:
 		return 0, fmt.Errorf("unsupported object type: %v", otype)
 	}
@@ -230,7 +230,7 @@ func (s *Store) ObjectPathWithHeight(massifHeight uint8, massifIndex uint32, oty
 	}
 
 	// Get base prefix from core function
-	basePrefix, err := datatrails.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute prefix: %w", err)
 	}
@@ -239,9 +239,9 @@ func (s *Store) ObjectPathWithHeight(massifHeight uint8, massifIndex uint32, oty
 	var servicePrefix string
 	switch otype {
 	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
-		servicePrefix = datatrails.V2MerklelogMassifsPrefix + "/"
+		servicePrefix = massifstorage.V2MerklelogMassifsPrefix + "/"
 	case massifstorage.ObjectCheckpoint, massifstorage.ObjectPathCheckpoints:
-		servicePrefix = datatrails.V2MerklelogCheckpointsPrefix + "/"
+		servicePrefix = massifstorage.V2MerklelogCheckpointsPrefix + "/"
 	default:
 		return "", fmt.Errorf("unsupported object type: %v", otype)
 	}

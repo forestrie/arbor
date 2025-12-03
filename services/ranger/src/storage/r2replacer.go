@@ -86,7 +86,7 @@ func (r *Replacer) Put(
 	}
 
 	// Use new v2 path format for massifs
-	basePrefix, err := datatrails.StorageObjectPrefixWithHeight(r.logID, massifHeight, ty)
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(r.logID, massifHeight, ty)
 	if err != nil {
 		return fmt.Errorf("failed to derive storage prefix: %w", err)
 	}
@@ -95,9 +95,9 @@ func (r *Replacer) Put(
 	var servicePrefix string
 	switch ty {
 	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
-		servicePrefix = datatrails.V2MerklelogMassifsPrefix + "/"
+		servicePrefix = massifstorage.V2MerklelogMassifsPrefix + "/"
 	case massifstorage.ObjectCheckpoint, massifstorage.ObjectPathCheckpoints:
-		servicePrefix = datatrails.V2MerklelogCheckpointsPrefix + "/"
+		servicePrefix = massifstorage.V2MerklelogCheckpointsPrefix + "/"
 	default:
 		return fmt.Errorf("unsupported object type: %v", ty)
 	}
