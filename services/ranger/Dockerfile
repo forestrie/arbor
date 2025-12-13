@@ -8,34 +8,34 @@ ARG BUILD_DATE=unknown
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
 
-# Workspace root for ranger and its local clones
+# Workspace root (Docker build context is expected to be the services/ directory)
 WORKDIR /build
 
 # Copy workspace file so Go sees all local modules
-COPY go.work ./
+COPY ranger/go.work ./ranger/go.work
 
 # Copy go module files for the ranger service
-COPY src/go.mod src/go.sum* ./src/
+COPY ranger/src/go.mod ranger/src/go.sum* ./ranger/src/
 
 # Copy local module clones explicitly so they are available to go.work and replaces
-COPY go-sigv4 ./go-sigv4
-COPY go-datatrails-common ./go-datatrails-common
-COPY go-datatrails-serialization ./go-datatrails-serialization
-COPY go-datatrails-simplehash ./go-datatrails-simplehash
-COPY go-merklelog-azure ./go-merklelog-azure
-COPY go-merklelog-datatrails ./go-merklelog-datatrails
-COPY go-merklelog-fs ./go-merklelog-fs
-COPY go-merklelog-provider-testing ./go-merklelog-provider-testing
-COPY go-merklelog ./go-merklelog
+COPY _deps/go-sigv4 ./_deps/go-sigv4
+COPY _deps/go-datatrails-common ./_deps/go-datatrails-common
+COPY _deps/go-datatrails-serialization ./_deps/go-datatrails-serialization
+COPY _deps/go-datatrails-simplehash ./_deps/go-datatrails-simplehash
+COPY _deps/go-merklelog-azure ./_deps/go-merklelog-azure
+COPY _deps/go-merklelog-datatrails ./_deps/go-merklelog-datatrails
+COPY _deps/go-merklelog-fs ./_deps/go-merklelog-fs
+COPY _deps/go-merklelog-provider-testing ./_deps/go-merklelog-provider-testing
+COPY _deps/go-merklelog ./_deps/go-merklelog
 
 # Switch to module root for ranger
-WORKDIR /build/src
+WORKDIR /build/ranger/src
 
 # Download module dependencies (using go.work and replace directives)
 RUN go mod download
 
 # Copy application source
-COPY src/ .
+COPY ranger/src/ .
 
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
@@ -56,7 +56,7 @@ RUN addgroup -g 1000 ranger && \
 WORKDIR /app
 
 # Copy binary from builder
-COPY --from=builder /build/src/ranger /app/ranger
+COPY --from=builder /build/ranger/src/ranger /app/ranger
 
 # Change ownership
 RUN chown -R ranger:ranger /app

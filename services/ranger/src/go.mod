@@ -40,14 +40,14 @@ require (
 )
 
 replace (
-	github.com/datatrails/go-datatrails-common => ../go-datatrails-common
-	github.com/datatrails/go-datatrails-serialization/eventsv1 => ../go-datatrails-serialization/eventsv1
-	github.com/datatrails/go-datatrails-simplehash => ../go-datatrails-simplehash
-	github.com/forestrie/go-merklelog-azure => ../go-merklelog-azure
-	github.com/forestrie/go-merklelog-datatrails => ../go-merklelog-datatrails
-	github.com/forestrie/go-merklelog-fs => ../go-merklelog-fs
-	github.com/forestrie/go-merklelog-provider-testing => ../go-merklelog-provider-testing
-	github.com/forestrie/go-merklelog/massifs => ../go-merklelog/massifs
-	github.com/forestrie/go-merklelog/mmr => ../go-merklelog/mmr
-	github.com/forestrie/go-sigv4 => ../go-sigv4
+	github.com/datatrails/go-datatrails-common => ../../_deps/go-datatrails-common
+	github.com/datatrails/go-datatrails-serialization/eventsv1 => ../../_deps/go-datatrails-serialization/eventsv1
+	github.com/datatrails/go-datatrails-simplehash => ../../_deps/go-datatrails-simplehash
+	github.com/forestrie/go-merklelog-azure => ../../_deps/go-merklelog-azure
+	github.com/forestrie/go-merklelog-datatrails => ../../_deps/go-merklelog-datatrails
+	github.com/forestrie/go-merklelog-fs => ../../_deps/go-merklelog-fs
+	github.com/forestrie/go-merklelog-provider-testing => ../../_deps/go-merklelog-provider-testing
+	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs
+	github.com/forestrie/go-merklelog/mmr => ../../_deps/go-merklelog/mmr
+	github.com/forestrie/go-sigv4 => ../../_deps/go-sigv4
 )

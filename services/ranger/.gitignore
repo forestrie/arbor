@@ -1,14 +1,5 @@
 /go.work
 /go.work.sum
-/.local
 /ranger
 /taskfiles
-/go-sigv4
-/go-datatrails-common
-/go-merklelog
-/go-merklelog-datatrails
-/go-datatrails-simplehash
-/go-datatrails-serialization
-/go-merklelog-azure
-/go-merklelog-fs
-/go-merklelog-provider-testing
+/.local
