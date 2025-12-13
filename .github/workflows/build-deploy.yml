@@ -79,6 +79,12 @@ jobs:
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
         run: task scout:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
+      - name: Build Sealer Image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+
       - name: Push Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
@@ -88,6 +94,11 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
         run: task scout:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Push Sealer image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: task sealer:push IMAGE_TAG=${IMAGE_TAG}
 
       - name: Generate GitHub App Token
         id: app-token

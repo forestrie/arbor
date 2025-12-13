@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/google/uuid"
 )
@@ -47,7 +46,7 @@ func TestReplacerPutSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	factory, err := NewFactory(server.URL+"/bucket", "token", &testClient{client: server.Client()}, testLogger())
+	factory, err := NewFactory(server.URL+"/bucket", "token", 14, &testClient{client: server.Client()}, testLogger())
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)
 	}
@@ -61,17 +60,21 @@ func TestReplacerPutSuccess(t *testing.T) {
 		t.Fatalf("Put: %v", err)
 	}
 
-	prefix, err := datatrails.StorageObjectPrefix(logID, massifstorage.ObjectMassifData)
+	// Construct expected path using v2 format
+	massifHeight := uint8(14)
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(logID, massifHeight, massifstorage.ObjectMassifData)
 	if err != nil {
 		t.Fatalf("prefix: %v", err)
 	}
-	expectedPath, err := massifstorage.ObjectPath(prefix, logID, 1, massifstorage.ObjectMassifData)
+	servicePrefix := massifstorage.V2MerklelogMassifsPrefix + "/"
+	fullPrefix := servicePrefix + basePrefix
+	expectedPath, err := massifstorage.ObjectPath(fullPrefix, logID, 1, massifstorage.ObjectMassifData)
 	if err != nil {
 		t.Fatalf("object path: %v", err)
 	}
 
 	if recorded.path != "/bucket/"+expectedPath {
-		t.Fatalf("unexpected path %s", recorded.path)
+		t.Fatalf("unexpected path %s, expected %s", recorded.path, "/bucket/"+expectedPath)
 	}
 	if recorded.ifNoneMatch != "*" {
 		t.Fatalf("expected If-None-Match *, got %q", recorded.ifNoneMatch)
@@ -89,7 +92,7 @@ func TestReplacerPutConflictMapping(t *testing.T) {
 	}))
 	defer server.Close()
 
-	factory, err := NewFactory(server.URL, "token", &testClient{client: server.Client()}, testLogger())
+	factory, err := NewFactory(server.URL, "token", 14, &testClient{client: server.Client()}, testLogger())
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)
 	}
@@ -113,7 +116,7 @@ func TestReplacerPutNotAvailable(t *testing.T) {
 	}))
 	defer server.Close()
 
-	factory, err := NewFactory(server.URL, "token", &testClient{client: server.Client()}, testLogger())
+	factory, err := NewFactory(server.URL, "token", 14, &testClient{client: server.Client()}, testLogger())
 	if err != nil {
 		t.Fatalf("NewFactory: %v", err)
 	}

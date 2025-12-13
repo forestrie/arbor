@@ -7,6 +7,9 @@
 *.out
 vendor/
 
+# Local cloned dependencies for go.work-based builds
+/services/_deps/
+
 # IDE
 .vscode/
 .idea/

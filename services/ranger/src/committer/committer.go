@@ -40,6 +40,11 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		logger = slog.Default()
 	}
 
+	massifHeight := cfg.MassifHeight
+	if massifHeight == 0 {
+		massifHeight = 14 // Default
+	}
+
 	// Use S3 factory with SigV4 signing enabled (required for Cloudflare R2 S3-compatible API)
 	factory, err := storage.NewS3FactoryWithCredentials(
 		cfg.R2WriteURL,
@@ -47,6 +52,7 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		cfg.AWSAccessKeyID,
 		cfg.AWSSecretAccessKey,
 		cfg.AWSRegion,
+		massifHeight,
 		httpClient,
 		logger,
 	)
@@ -62,11 +68,6 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ID state: %w", err)
-	}
-
-	massifHeight := cfg.MassifHeight
-	if massifHeight == 0 {
-		massifHeight = 14 // Default
 	}
 
 	return &Committer{
@@ -89,7 +90,12 @@ func NewR2Committer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *sl
 		logger = slog.Default()
 	}
 
-	factory, err := storage.NewR2Factory(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
+	massifHeight := cfg.MassifHeight
+	if massifHeight == 0 {
+		massifHeight = 14 // Default
+	}
+
+	factory, err := storage.NewR2Factory(cfg.R2WriteURL, cfg.R2WriterToken, massifHeight, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage factory: %w", err)
 	}
@@ -102,11 +108,6 @@ func NewR2Committer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *sl
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ID state: %w", err)
-	}
-
-	massifHeight := cfg.MassifHeight
-	if massifHeight == 0 {
-		massifHeight = 14 // Default
 	}
 
 	return &Committer{

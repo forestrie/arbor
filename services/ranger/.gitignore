@@ -1,5 +1,6 @@
 /go.work
 /go.work.sum
+/.local
 /ranger
 /taskfiles
 /go-sigv4

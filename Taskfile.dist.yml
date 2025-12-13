@@ -17,6 +17,9 @@ includes:
   scout:
     taskfile: taskfiles/service-scout.yml
     dir: .
+  sealer:
+    taskfile: taskfiles/service-sealer.yml
+    dir: .
 tasks:
   registry-auth:
     desc: Configure Docker authentication for Artifact Registry
@@ -39,6 +42,8 @@ tasks:
     cmds:
       - |
         export GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
+
+        # Existing ranger bootstrap (service-local clones)
         (cd services/ranger && sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
         if [ -f services/ranger/go.work ]; then
           echo "services/ranger/go.work exists, you may need to update it"
@@ -61,6 +66,30 @@ tasks:
         EOF
         fi
 
+        # New sealer bootstrap (shared clones under services/_deps)
+        mkdir -p services/_deps
+        (cd services/sealer && sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
+        if [ -f services/sealer/go.work ]; then
+          echo "services/sealer/go.work exists, you may need to update it"
+        else
+        cat <<EOF > services/sealer/go.work
+        go 1.24.4
+        use (
+          ./src
+          ../_deps/go-datatrails-common
+          ../_deps/go-datatrails-serialization/eventsv1
+          ../_deps/go-datatrails-simplehash
+          ../_deps/go-merklelog-azure
+          ../_deps/go-merklelog-datatrails
+          ../_deps/go-merklelog-fs
+          ../_deps/go-merklelog-provider-testing
+          ../_deps/go-merklelog/massifs
+          ../_deps/go-merklelog/mmr
+          ../_deps/go-sigv4
+        )
+        EOF
+        fi
+
   test:
     desc: run all the tests
     cmds:
@@ -72,7 +101,7 @@ tasks:
     vars:
       GO_TEST_TAGS: '{{.GO_TEST_TAGS | default ""}}'
       GO_MOD_DIRS:
-        sh: find services -type f -name 'go.mod' ! -path 'services/ranger/go-*/*'
+        sh: find services -type f -name 'go.mod' ! -path 'services/ranger/go-*/*' ! -path 'services/_deps/*/*'
     cmds:
       - for: { var: GO_MOD_DIRS, as: MODULE }
         cmd: |

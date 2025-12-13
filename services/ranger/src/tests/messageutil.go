@@ -16,7 +16,6 @@ import (
 	"github.com/forestrie/arbor/services/ranger/consumer"
 	"github.com/forestrie/arbor/services/ranger/s3"
 	rangerstorage "github.com/forestrie/arbor/services/ranger/storage"
-	datatrails "github.com/forestrie/go-merklelog-datatrails/datatrails"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/google/uuid"
 )
@@ -102,19 +101,20 @@ func massifCountForLog(
 	accessKeyID string,
 	secretAccessKey string,
 	region string,
+	massifHeight uint8,
 	httpClient *ranger.HTTPClient,
 	logger *slog.Logger,
 	logID massifstorage.LogID,
 ) uint32 {
 	t.Helper()
 
-	// Use SigV4 signing with MinIO credentials (matches production)
 	factory, err := rangerstorage.NewS3FactoryWithCredentials(
 		r2WriteURL,
 		bearerToken, // Fallback if no credentials
 		accessKeyID,
 		secretAccessKey,
 		region,
+		massifHeight,
 		httpClient,
 		logger,
 		s3.WithContentSHA256(true), // SigV4 requires this
@@ -147,6 +147,7 @@ func assertMassifCount(
 	accessKeyID string,
 	secretAccessKey string,
 	region string,
+	massifHeight uint8,
 	httpClient *ranger.HTTPClient,
 	logger *slog.Logger,
 	logID massifstorage.LogID,
@@ -161,6 +162,7 @@ func assertMassifCount(
 		accessKeyID,
 		secretAccessKey,
 		region,
+		massifHeight,
 		httpClient,
 		logger,
 		logID,
@@ -176,6 +178,7 @@ func assertMassifCount(
 			accessKeyID,
 			secretAccessKey,
 			region,
+			massifHeight,
 			httpClient,
 			logger,
 			logID,
@@ -194,6 +197,7 @@ func listMassifObjectsForLog(
 	accessKeyID string,
 	secretAccessKey string,
 	region string,
+	massifHeight uint8,
 	httpClient *ranger.HTTPClient,
 	logger *slog.Logger,
 	logID massifstorage.LogID,
@@ -212,8 +216,14 @@ func listMassifObjectsForLog(
 	)
 	require.NoError(t, err)
 
-	prefix, err := datatrails.StorageObjectPrefix(logID, massifstorage.ObjectMassifData)
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(
+		logID,
+		massifHeight,
+		massifstorage.ObjectPathMassifs,
+	)
 	require.NoError(t, err)
+
+	prefix := massifstorage.V2MerklelogMassifsPrefix + "/" + basePrefix
 
 	ctx := t.Context()
 	var keys []string

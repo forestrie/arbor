@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 )
 
 // Store provides backend-agnostic implementations of massifs.ObjectReader and ObjectWriter.
 type Store struct {
-	client ObjectClient
-	logger *slog.Logger
+	client       ObjectClient
+	logger       *slog.Logger
+	massifHeight uint8
 
 	logCaches map[string]*logCache
 	selected  *logCache
@@ -26,7 +26,8 @@ type logCache struct {
 }
 
 // NewStore constructs a reader/writer for the given logID.
-func NewStore(client ObjectClient, logID massifstorage.LogID, logger *slog.Logger) (*Store, error) {
+// All Store instances are bound to a specific massifHeight for v2 path format.
+func NewStore(client ObjectClient, logID massifstorage.LogID, massifHeight uint8, logger *slog.Logger) (*Store, error) {
 	if client == nil {
 		return nil, fmt.Errorf("object client is required")
 	}
@@ -35,9 +36,10 @@ func NewStore(client ObjectClient, logID massifstorage.LogID, logger *slog.Logge
 	}
 
 	store := &Store{
-		client:    client,
-		logger:    logger,
-		logCaches: make(map[string]*logCache),
+		client:       client,
+		logger:       logger,
+		massifHeight: massifHeight,
+		logCaches:    make(map[string]*logCache),
 	}
 
 	if len(logID) != 0 {
@@ -74,60 +76,15 @@ func (s *Store) HasCapability(feature massifstorage.StorageFeature) bool {
 }
 
 // HeadIndex fetches the last object index for the given object type.
-// Uses old v1 path format for backward compatibility.
-// For new v2 format, use HeadIndexWithHeight.
+// Uses the v2 path format with the massifHeight stored in the Store instance.
 func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (uint32, error) {
 	cache, err := s.currentLog()
 	if err != nil {
 		return 0, err
 	}
 
-	prefix, err := datatrails.StorageObjectPrefix(cache.logID, otype)
-	if err != nil {
-		return 0, err
-	}
-
-	var continuation string
-	var lastKey string
-	found := false
-
-	for {
-		listResult, err := s.client.ListObjects(ctx, prefix, continuation, 1000)
-		if err != nil {
-			return 0, err
-		}
-
-		if len(listResult.Objects) > 0 {
-			lastKey = listResult.Objects[len(listResult.Objects)-1].Key
-			found = true
-		}
-
-		if !listResult.IsTruncated || listResult.NextContinuationToken == "" {
-			break
-		}
-		continuation = listResult.NextContinuationToken
-	}
-
-	if !found {
-		return 0, massifstorage.ErrLogEmpty
-	}
-
-	index, err := massifstorage.GetObjectIndex(lastKey, otype)
-	if err != nil {
-		return 0, err
-	}
-	return index, nil
-}
-
-// HeadIndexWithHeight fetches the last object index using the new v2 path format.
-func (s *Store) HeadIndexWithHeight(ctx context.Context, massifHeight uint8, otype massifstorage.ObjectType) (uint32, error) {
-	cache, err := s.currentLog()
-	if err != nil {
-		return 0, err
-	}
-
-	// Get base prefix from core function
-	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
+	// Get base prefix from core function using stored massifHeight
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, s.massifHeight, otype)
 	if err != nil {
 		return 0, err
 	}
@@ -207,30 +164,15 @@ func (s *Store) CheckpointData(massifIndex uint32) ([]byte, bool, error) {
 }
 
 // ObjectPath constructs the storage path for the given object type and massif index.
-// Uses old v1 path format for backward compatibility.
-// For new v2 format, use ObjectPathWithHeight.
+// Uses the v2 path format with the massifHeight stored in the Store instance.
 func (s *Store) ObjectPath(massifIndex uint32, otype massifstorage.ObjectType) (string, error) {
 	cache, err := s.currentLog()
 	if err != nil {
 		return "", err
 	}
 
-	prefix, err := datatrails.StorageObjectPrefix(cache.logID, otype)
-	if err != nil {
-		return "", fmt.Errorf("failed to compute prefix: %w", err)
-	}
-	return massifstorage.ObjectPath(prefix, cache.logID, massifIndex, otype)
-}
-
-// ObjectPathWithHeight constructs the storage path using the new v2 path format.
-func (s *Store) ObjectPathWithHeight(massifHeight uint8, massifIndex uint32, otype massifstorage.ObjectType) (string, error) {
-	cache, err := s.currentLog()
-	if err != nil {
-		return "", err
-	}
-
-	// Get base prefix from core function
-	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, massifHeight, otype)
+	// Get base prefix from core function using stored massifHeight
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, s.massifHeight, otype)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute prefix: %w", err)
 	}
@@ -345,7 +287,7 @@ func (s *Store) ensureLog(logID massifstorage.LogID) (*logCache, error) {
 		return cache, nil
 	}
 
-	writer, err := NewReplacer(s.client, logID, s.logger)
+	writer, err := NewReplacer(s.client, logID, s.massifHeight, s.logger)
 	if err != nil {
 		return nil, err
 	}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 )
@@ -13,13 +12,14 @@ import (
 // Replacer implements the massifs.ObjectWriter interface using a generic
 // ObjectClient backend (S3, R2, etc.).
 type Replacer struct {
-	client ObjectClient
-	logID  massifstorage.LogID
-	logger *slog.Logger
+	client       ObjectClient
+	logID        massifstorage.LogID
+	massifHeight uint8
+	logger       *slog.Logger
 }
 
 // NewReplacer builds a Replacer for the provided log ID.
-func NewReplacer(client ObjectClient, logID massifstorage.LogID, logger *slog.Logger) (*Replacer, error) {
+func NewReplacer(client ObjectClient, logID massifstorage.LogID, massifHeight uint8, logger *slog.Logger) (*Replacer, error) {
 	if client == nil {
 		return nil, fmt.Errorf("object client is required")
 	}
@@ -31,9 +31,10 @@ func NewReplacer(client ObjectClient, logID massifstorage.LogID, logger *slog.Lo
 	}
 
 	return &Replacer{
-		client: client,
-		logID:  logID,
-		logger: logger,
+		client:       client,
+		logID:        logID,
+		massifHeight: massifHeight,
+		logger:       logger,
 	}, nil
 }
 
@@ -45,48 +46,19 @@ func (r *Replacer) Put(
 	data []byte,
 	failIfExists bool,
 ) error {
-	var massifHeight uint8
-	var err error
-
-	// Extract massifHeight from data based on object type
-	switch ty {
-	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData:
-		// Extract massifHeight from MassifStart header (byte 27)
-		if len(data) < int(massifs.MassifStartKeyMassifHeightFirstByte+1) {
-			return fmt.Errorf("massif data too short to read MassifHeight")
+	// Use stored massifHeight for v2 path format
+	// For massifs, verify massifHeight matches data if available
+	if ty == massifstorage.ObjectMassifStart || ty == massifstorage.ObjectMassifData {
+		if len(data) >= int(massifs.MassifStartKeyMassifHeightFirstByte+1) {
+			dataMassifHeight := data[massifs.MassifStartKeyMassifHeightFirstByte]
+			if dataMassifHeight != r.massifHeight {
+				return fmt.Errorf("massifHeight mismatch: stored=%d, data=%d", r.massifHeight, dataMassifHeight)
+			}
 		}
-		massifHeight = data[massifs.MassifStartKeyMassifHeightFirstByte]
-	case massifstorage.ObjectCheckpoint:
-		// For checkpoints, we need to read the associated massif to get massifHeight
-		// For now, fall back to old format - this will be improved when we have
-		// massif context available
-		prefix, err := datatrails.StorageObjectPrefix(r.logID, ty)
-		if err != nil {
-			return fmt.Errorf("failed to derive storage prefix: %w", err)
-		}
-		objectPath, err := massifstorage.ObjectPath(prefix, r.logID, massifIndex, ty)
-		if err != nil {
-			return fmt.Errorf("failed to derive object path: %w", err)
-		}
-
-		opts := PutOptions{}
-		if failIfExists {
-			opts.IfNoneMatch = "*"
-			opts.FailIfExists = true
-		}
-
-		if _, err = r.client.PutObject(ctx, objectPath, data, opts); err != nil {
-			return fmt.Errorf("failed to write object %s: %w", objectPath, err)
-		}
-
-		r.logger.Info("put", "path", objectPath)
-		return nil
-	default:
-		return fmt.Errorf("unsupported object type: %v", ty)
 	}
 
-	// Use new v2 path format for massifs
-	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(r.logID, massifHeight, ty)
+	// Use new v2 path format
+	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(r.logID, r.massifHeight, ty)
 	if err != nil {
 		return fmt.Errorf("failed to derive storage prefix: %w", err)
 	}

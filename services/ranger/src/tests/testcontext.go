@@ -98,12 +98,22 @@ type MinioEmulator struct {
 	client *s3.Client
 }
 
+// DeleteLog deletes all stored objects for the given log ID.
+//
+// NOTE: This intentionally deletes both legacy v1 (datatrails) prefixes and the
+// v2 merklelog prefixes (massifs/checkpoints) across all heights. This avoids
+// test flakiness when log IDs are deterministically generated across runs.
 func (m *MinioEmulator) DeleteLog(logID massifstorage.LogID) {
-	if logID == nil {
+	if len(logID) == 0 {
 		return
 	}
-	prefix := datatrails.StoragePrefixPath(logID)
-	m.DeleteByStoragePrefix(prefix)
+
+	// Legacy v1 prefix (best-effort).
+	m.DeleteByStoragePrefix(datatrails.StoragePrefixPath(logID))
+
+	// v2 prefixes (across all heights): list + filter by parsed log id.
+	m.DeleteByParsedLogIDPrefix(massifstorage.V2MerklelogMassifsPrefix+"/", logID)
+	m.DeleteByParsedLogIDPrefix(massifstorage.V2MerklelogCheckpointsPrefix+"/", logID)
 }
 
 func (m *MinioEmulator) DeleteByStoragePrefix(prefix string) {
@@ -128,10 +138,40 @@ func (m *MinioEmulator) DeleteByStoragePrefix(prefix string) {
 	}
 }
 
+func (m *MinioEmulator) DeleteByParsedLogIDPrefix(prefix string, logID massifstorage.LogID) {
+	if prefix == "" || len(logID) == 0 {
+		return
+	}
+
+	ctx := context.Background()
+	continuation := ""
+	for {
+		res, err := m.client.ListObjects(ctx, prefix, continuation, 1000)
+		if err != nil {
+			return
+		}
+		for _, obj := range res.Objects {
+			parsed := massifstorage.ParsePrefixedLogID("tenant/", obj.Key)
+			if parsed == nil {
+				continue
+			}
+			if string(parsed) != string(logID) {
+				continue
+			}
+			_ = m.client.DeleteObject(ctx, obj.Key)
+		}
+		if !res.IsTruncated || res.NextContinuationToken == "" {
+			break
+		}
+		continuation = res.NextContinuationToken
+	}
+}
+
 type TestContext struct {
 	*mmrtesting.TestContext[*MinioEmulator]
 	cfg     minioConfig
-	factory *rangerstorage.Factory
+	baseURL string
+	logger  *slog.Logger
 	doer    *httpDoer
 	testCfg mmrtesting.TestOptions
 }
@@ -171,30 +211,32 @@ func NewTestContext(t *testing.T, opts ...massifs.Option) *TestContext {
 	emulator := &MinioEmulator{client: client}
 	base := mmrtesting.NewTestContext(t, emulator, cfg)
 
-	// Use SigV4 signing with MinIO credentials (matches production)
-	factory, err := rangerstorage.NewS3FactoryWithCredentials(
-		baseURL,
-		minioCfg.BearerToken, // Fallback if no credentials
-		minioCfg.AccessKeyID,
-		minioCfg.SecretAccessKey,
-		minioCfg.Region,
-		doer,
-		logger,
-		s3.WithContentSHA256(true), // SigV4 requires this
-	)
-	require.NoError(t, err)
-
 	return &TestContext{
 		TestContext: base,
 		cfg:         minioCfg,
-		factory:     factory,
+		baseURL:     baseURL,
+		logger:      logger,
 		doer:        doer,
 		testCfg:     *cfg,
 	}
 }
 
-func (tc *TestContext) NewBuilder() mmrtesting.LogBuilder {
-	store, err := tc.factory.NewStore(nil)
+func (tc *TestContext) NewBuilder(massifHeight uint8) mmrtesting.LogBuilder {
+	// Build a store configured with the requested massifHeight.
+	factory, err := rangerstorage.NewS3FactoryWithCredentials(
+		tc.baseURL,
+		tc.cfg.BearerToken, // Fallback if no credentials
+		tc.cfg.AccessKeyID,
+		tc.cfg.SecretAccessKey,
+		tc.cfg.Region,
+		massifHeight,
+		tc.doer,
+		tc.logger,
+		s3.WithContentSHA256(true), // SigV4 requires this
+	)
+	require.NoError(tc.T, err)
+
+	store, err := factory.NewStore(nil)
 	require.NoError(tc.T, err)
 
 	builder := mmrtesting.LogBuilder{
@@ -206,6 +248,7 @@ func (tc *TestContext) NewBuilder() mmrtesting.LogBuilder {
 				return tc.G.EncodeLeafForAddition(a)
 			},
 		},
+		// Ensure log cleanup for this test; DeleteLog implementation deletes v1+v2 objects.
 		DeleteLog:          tc.DeleteLog,
 		SelectLog:          store.SelectLog,
 		ObjectReader:       store,
@@ -215,9 +258,18 @@ func (tc *TestContext) NewBuilder() mmrtesting.LogBuilder {
 	return builder
 }
 
+func (tc *TestContext) DeleteLog(logID massifstorage.LogID) {
+	// Override mmrtesting.TestContext.DeleteLog (which only deletes v1 prefixes)
+	// so that ranger integration tests clean up v2 objects too.
+	if tc == nil || tc.Emulator == nil {
+		return
+	}
+	tc.Emulator.DeleteLog(logID)
+}
+
 func NewBuilderFactory(tc *TestContext) providers.BuilderFactory {
-	return func() mmrtesting.LogBuilder {
-		return tc.NewBuilder()
+	return func(massifHeight uint8) mmrtesting.LogBuilder {
+		return tc.NewBuilder(massifHeight)
 	}
 }
 
