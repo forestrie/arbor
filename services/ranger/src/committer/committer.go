@@ -155,7 +155,6 @@ func (c *Committer) ProcessBatch(
 	start, end int,
 ) (int, error) {
 	var mmrIndex uint64
-	var leafHash []byte
 	var parsed consumer.ProcessedNotification
 
 	if start >= end {
@@ -223,7 +222,7 @@ func (c *Committer) ProcessBatch(
 		hasher := sha256.New()
 		hasher.Write(idTimestampBytes)
 		hasher.Write(parsed.Hash)
-		leafHash = hasher.Sum(nil)
+		leafHash := hasher.Sum(nil)
 
 		if len(leafHash) != massifs.ValueBytes {
 			err := fmt.Errorf("invalid leaf hash length %d", len(leafHash))
@@ -287,9 +286,7 @@ func (c *Committer) ProcessBatch(
 	c.logNotice(ctx,
 		"committed",
 		"index", mmrIndex,
-		"count", lastCommit-(i-1),
-		"content", fmt.Sprintf("%x", parsed.Hash),
-		"leaf", fmt.Sprintf("%x", leafHash))
+		"count", lastCommit-(i-1))
 
 	return end, nil
 }

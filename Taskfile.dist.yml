@@ -45,6 +45,12 @@ tasks:
 
         # Ranger bootstrap (shared clones under services/_deps)
         mkdir -p services/_deps
+
+        # bootstrap arbor wide dependencies
+        sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .
+
+        exit 0
+        # bootstrap ranger
         (cd services/ranger && sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
 
         # Always (re)generate go.work since it's gitignored and should match the current layout.
@@ -64,6 +70,8 @@ tasks:
           ../_deps/go-sigv4
         )
         EOF
+
+        # bootstrap sealer
 
         # New sealer bootstrap (shared clones under services/_deps)
         mkdir -p services/_deps

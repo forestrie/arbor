@@ -3,7 +3,6 @@ package consumer
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -405,7 +403,7 @@ func processObjectPath(note *ProcessedNotification, path string) error {
 	}
 	note.LogID = uid[:]
 
-	fenceIndexStr := parts[3]
+	// fenceIndexStr := parts[3]
 	hash := parts[4]
 
 	if len(hash) != 64 {
@@ -415,20 +413,16 @@ func processObjectPath(note *ProcessedNotification, path string) error {
 		return fmt.Errorf("invalid hash format: not hex-encoded: %w", err)
 	}
 
-	i, err := strconv.ParseInt(fenceIndexStr, 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid fenceIndex %q: %w", fenceIndexStr, err)
-	}
-	note.FenceIndex = uint64(i)
+	// i, err := strconv.ParseInt(fenceIndexStr, 10, 64)
+	// if err != nil {
+	// 	return fmt.Errorf("invalid fenceIndex %q: %w", fenceIndexStr, err)
+	// }
+	// note.FenceIndex = uint64(i)
 
 	// Compute extraBytes0 and extraBytes1 to match TypeScript encoding:
-	// extraBytes0 = 24 bytes: 16 bytes zeros + 8 bytes (fenceIndex as big-endian uint64)
+	// extraBytes0 = 32 bytes: 16 bytes zeros + 8 bytes (fenceIndex as big-endian uint64)
 	// extraBytes1 = 32 bytes (full hash)
-	note.ExtraBytes0 = make([]byte, 24)
-	// First 16 bytes are zeros (already initialized to 0)
-	binary.BigEndian.PutUint64(note.ExtraBytes0[16:24], note.FenceIndex)
-	note.ExtraBytes1 = make([]byte, 32)
-	copy(note.ExtraBytes1, note.Hash)
+	copy(note.ExtraBytes0, note.Hash)
 
 	return nil
 }
