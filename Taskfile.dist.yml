@@ -49,7 +49,6 @@ tasks:
         # bootstrap arbor wide dependencies
         sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .
 
-        exit 0
         # bootstrap ranger
         (cd services/ranger && sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
 
