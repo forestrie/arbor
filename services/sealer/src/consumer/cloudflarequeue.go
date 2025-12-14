@@ -28,9 +28,9 @@ type QueuePullResult struct {
 type QueueAckResponse struct {
 	Success bool `json:"success"`
 	Result  struct {
-		AckCount   int      `json:"ackCount"`
-		RetryCount int      `json:"retryCount"`
-		Warnings   []string `json:"warnings"`
+		AckCount   int         `json:"ackCount"`
+		RetryCount int         `json:"retryCount"`
+		Warnings   interface{} `json:"warnings"` // Can be []string or {} (object)
 	} `json:"result"`
 	Errors []struct {
 		Code    int    `json:"code"`

@@ -249,10 +249,12 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 		return fmt.Errorf("no messages acknowledged: ackCount=0")
 	}
 
-	// Log any warnings from the response
-	if len(ackResp.Result.Warnings) > 0 {
-		for _, w := range ackResp.Result.Warnings {
-			q.logger.Warn("ack response warning", "messageID", message.ID, "warning", w)
+	// Log any warnings from the response (if it's a string array)
+	if warnings, ok := ackResp.Result.Warnings.([]interface{}); ok {
+		for _, w := range warnings {
+			if warningStr, ok := w.(string); ok {
+				q.logger.Warn("ack response warning", "messageID", message.ID, "warning", warningStr)
+			}
 		}
 	}
 
