@@ -3,7 +3,6 @@ package consumer
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -293,28 +292,28 @@ func parseLogIDFromObjectPath(path string) ([]byte, error) {
 	cleanPath := strings.TrimPrefix(filepath.Clean(path), "/")
 	parts := strings.Split(cleanPath, "/")
 
-	if len(parts) < 5 {
-		return nil, fmt.Errorf("invalid path format: expected logs/{logId}/leaves/{fenceIndex}/{hash}, got %d segments", len(parts))
+	// Expected format: v2/merklelog/massifs/{massifID}/{logID}/{index}.log
+	// Example: v2/merklelog/massifs/14/3062ea57-c184-41d8-bd61-296b02c680d8/0000000000000000.log
+	if len(parts) < 6 {
+		return nil, fmt.Errorf("invalid path format: expected v2/merklelog/massifs/{massifID}/{logID}/{index}.log, got %d segments", len(parts))
 	}
-	if parts[0] != "logs" {
-		return nil, fmt.Errorf("invalid path format: expected 'logs' prefix, got %q", parts[0])
+	if parts[0] != "v2" {
+		return nil, fmt.Errorf("invalid path format: expected 'v2' prefix, got %q", parts[0])
 	}
-	if parts[2] != "leaves" {
-		return nil, fmt.Errorf("invalid path format: expected 'leaves' segment, got %q", parts[2])
+	if parts[1] != "merklelog" {
+		return nil, fmt.Errorf("invalid path format: expected 'merklelog' segment, got %q", parts[1])
+	}
+	if parts[2] != "massifs" {
+		return nil, fmt.Errorf("invalid path format: expected 'massifs' segment, got %q", parts[2])
 	}
 
-	uid, err := uuid.Parse(parts[1])
+	// parts[3] is the massifID (e.g., "14")
+	// parts[4] is the logID (UUID format)
+	// parts[5] is the index file (e.g., "0000000000000000.log")
+
+	uid, err := uuid.Parse(parts[4])
 	if err != nil {
-		return nil, err
-	}
-
-	// Optional validation: ensure the hash segment looks like hex.
-	hash := parts[4]
-	if len(hash) != 64 {
-		return nil, fmt.Errorf("invalid hash length: expected 64 hex characters, got %d", len(hash))
-	}
-	if _, err := hex.DecodeString(hash); err != nil {
-		return nil, fmt.Errorf("invalid hash format: not hex-encoded: %w", err)
+		return nil, fmt.Errorf("invalid logID format at position 4: %w", err)
 	}
 
 	return uid[:], nil
