@@ -213,11 +213,56 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 		return fmt.Errorf("ack request failed: status=%d, body=%s", resp.StatusCode, string(b))
 	}
 
+	// Read the response body first, then decode it
+	// This allows us to log the raw body if parsing fails
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		q.logger.Warn("failed to read ack response body", "messageID", message.ID, "error", err)
+		return fmt.Errorf("failed to read ack response body: %w", err)
+	}
+
+	// Parse and validate the response body to ensure acknowledgment actually succeeded
+	var ackResp QueueAckResponse
+	if err := json.Unmarshal(bodyBytes, &ackResp); err != nil {
+		// If we can't parse the response, log it with the raw body
+		q.logger.Warn("failed to parse ack response", "messageID", message.ID, "error", err, "body", string(bodyBytes))
+		return fmt.Errorf("failed to parse ack response: %w", err)
+	}
+
+	// Check for errors in the response
+	if len(ackResp.Errors) > 0 {
+		for _, e := range ackResp.Errors {
+			q.logger.Warn("ack response error", "messageID", message.ID, "code", e.Code, "message", e.Message)
+		}
+		return fmt.Errorf("ack request returned errors: %d error(s)", len(ackResp.Errors))
+	}
+
+	// Check the success field
+	if !ackResp.Success {
+		q.logger.Warn("ack request failed", "messageID", message.ID, "success", ackResp.Success, "ackCount", ackResp.Result.AckCount)
+		return fmt.Errorf("ack request failed: success=false, ackCount=%d", ackResp.Result.AckCount)
+	}
+
+	// Check that at least one message was acknowledged
+	if ackResp.Result.AckCount == 0 {
+		q.logger.Warn("no messages acknowledged", "messageID", message.ID, "ackCount", ackResp.Result.AckCount)
+		return fmt.Errorf("no messages acknowledged: ackCount=0")
+	}
+
+	// Log any warnings from the response
+	if len(ackResp.Result.Warnings) > 0 {
+		for _, w := range ackResp.Result.Warnings {
+			q.logger.Warn("ack response warning", "messageID", message.ID, "warning", w)
+		}
+	}
+
 	return nil
 }
 
 func (q *QueueConsumer) ackAll(ctx context.Context, messages []QueueMessage) {
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	failureCount := 0
 
 	for _, msg := range messages {
 		msg := msg
@@ -225,13 +270,21 @@ func (q *QueueConsumer) ackAll(ctx context.Context, messages []QueueMessage) {
 		go func() {
 			defer wg.Done()
 			if err := q.AcknowledgeMessage(ctx, msg); err != nil {
+				mu.Lock()
+				failureCount++
+				mu.Unlock()
 				q.logger.Warn("failed to acknowledge message", "messageID", msg.ID, "error", err)
 			}
 		}()
 	}
 
 	wg.Wait()
-	q.logger.Info("acknowledged messages", "count", len(messages))
+	successCount := len(messages) - failureCount
+	q.logger.Info("acknowledged messages",
+		"count", successCount,
+		"total", len(messages),
+		"failed", failureCount,
+	)
 }
 
 func parseLogIDFromObjectPath(path string) ([]byte, error) {

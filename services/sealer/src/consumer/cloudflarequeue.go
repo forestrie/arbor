@@ -23,3 +23,17 @@ type QueuePullResult struct {
 	MessageBacklogCount int            `json:"message_backlog_count"`
 	Messages            []QueueMessage `json:"messages"`
 }
+
+// QueueAckResponse represents the acknowledgment response from Cloudflare Queue.
+type QueueAckResponse struct {
+	Success bool `json:"success"`
+	Result  struct {
+		AckCount   int      `json:"ackCount"`
+		RetryCount int      `json:"retryCount"`
+		Warnings   []string `json:"warnings"`
+	} `json:"result"`
+	Errors []struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"errors"`
+}
