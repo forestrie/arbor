@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -17,7 +16,7 @@ func TestQueuePullResponseUnmarshal(t *testing.T) {
 		Bucket:    "bucket",
 		EventTime: "2025-11-09T17:39:43Z",
 		Object: R2Object{
-			Key:  "logs/de305d54-75b4-431b-adb2-eb6b9e546014/leaves/0/" + strings.Repeat("b", 64),
+			Key:  "v2/merklelog/massifs/14/de305d54-75b4-431b-adb2-eb6b9e546014/0000000000000000.log",
 			Size: 99,
 			ETag: "etag",
 		},
@@ -70,7 +69,7 @@ func TestQueuePullResponseUnmarshal(t *testing.T) {
 
 func TestParseLogIDFromObjectPath(t *testing.T) {
 	logID := uuid.New()
-	key := fmt.Sprintf("logs/%s/leaves/1/%s", logID.String(), strings.Repeat("a", 64))
+	key := fmt.Sprintf("v2/merklelog/massifs/14/%s/0000000000000000.log", logID.String())
 
 	b, err := parseLogIDFromObjectPath(key)
 	if err != nil {

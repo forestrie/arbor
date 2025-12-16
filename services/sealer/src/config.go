@@ -26,6 +26,9 @@ type Config struct {
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 
+	// Delegation signer / GCP Workload Identity configuration
+	DelegationSignerServiceAccountEmail string
+
 	// R2 Access Configuration
 	R2BucketName  string
 	R2AccountID   string
@@ -138,6 +141,7 @@ func LoadConfig() Config {
 		QueueBatchSize:     getInt("SEALER_QUEUE_BATCH_SIZE", 1),
 		PollInterval:       getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
+		DelegationSignerServiceAccountEmail: os.Getenv("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL"),
 		R2BucketName:       bucketName,
 		R2AccountID:        accountID,
 		R2PublicURL:        r2PublicURL,
@@ -157,6 +161,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "SEALER_QUEUE_BATCH_SIZE", c.QueueBatchSize)
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
+	logConfigValue(logger, "DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL", c.DelegationSignerServiceAccountEmail)
 	logConfigValue(logger, "R2_PUBLIC_URL", c.R2PublicURL)
 	logConfigValue(logger, "R2_WRITE_URL", c.R2WriteURL)
 	logSecretDigest(logger, "R2_WRITER_TOKEN", c.R2WriterToken)
@@ -178,6 +183,10 @@ func (c Config) Validate() error {
 	}
 	if c.QueueBatchSize > 32 {
 		return fmt.Errorf("SEALER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
+	}
+
+	if c.DelegationSignerServiceAccountEmail == "" {
+		return fmt.Errorf("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL is required")
 	}
 
 	// Required now (strict parity for future checkpoint work)

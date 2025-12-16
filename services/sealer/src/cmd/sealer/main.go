@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/forestrie/arbor/services/sealer"
 	"github.com/forestrie/arbor/services/sealer/consumer"
@@ -53,6 +54,28 @@ func main() {
 		syscall.SIGINT,
 	)
 	defer stop()
+
+	// Startup check: ensure we can obtain an impersonated access token for the
+	// delegation-signer service account. Fail fast to avoid running without the
+	// required trust boundary plumbing.
+	startupCtx, startupCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer startupCancel()
+	tokenInfo, err := sealer.AcquireDelegationSignerAccessTokenInfo(startupCtx, cfg.DelegationSignerServiceAccountEmail)
+	if err != nil {
+		slog.Error("failed to obtain delegation signer access token",
+			"target_service_account", cfg.DelegationSignerServiceAccountEmail,
+			"error", err,
+		)
+		os.Exit(1)
+	}
+	slog.Info("obtained delegation signer access token",
+		"target_service_account", tokenInfo.TargetServiceAccount,
+		"token_type", tokenInfo.TokenType,
+		"expiry", tokenInfo.Expiry,
+		"expires_in", tokenInfo.ExpiresIn.String(),
+		"token_len", tokenInfo.TokenLength,
+		"token_fingerprint", tokenInfo.TokenFingerprint,
+	)
 
 	httpClient := sealer.NewHTTPClient(logger)
 
