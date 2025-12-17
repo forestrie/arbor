@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -156,11 +158,11 @@ func NewClientWithCredentials(baseURL, bearerToken, accessKeyID, secretAccessKey
 			region = "auto" // Default for Cloudflare R2
 		}
 		sigv4Config := signer.Config{
-			Region:          region,
-			AccessKeyID:     accessKeyID,
-			SecretAccessKey: secretAccessKey,
-			Service:         "s3",  // Default service name for S3-compatible APIs
-			ThreadSafety:    true,  // Enable thread-safe operation
+			Region:                region,
+			AccessKeyID:           accessKeyID,
+			SecretAccessKey:       secretAccessKey,
+			Service:               "s3", // Default service name for S3-compatible APIs
+			ThreadSafety:          true, // Enable thread-safe operation
 			DisableHeaderHoisting: false,
 		}
 		s, err := signer.NewSigner(sigv4Config)
@@ -188,76 +190,116 @@ func (c *Client) PutObject(
 		return PutResult{}, fmt.Errorf("object key is required")
 	}
 
-	targetURL := c.baseURL.JoinPath(key)
-
-	req, err := http.NewRequest(http.MethodPut, targetURL.String(), bytes.NewReader(payload))
-	if err != nil {
-		return PutResult{}, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req = req.WithContext(ctx)
-
-	if options.ContentType != "" {
-		req.Header.Set("Content-Type", options.ContentType)
-	} else {
-		req.Header.Set("Content-Type", "application/octet-stream")
-	}
-
-	if options.IfMatch != "" {
-		req.Header.Set("If-Match", options.IfMatch)
-	}
-	if options.IfNoneMatch != "" {
-		req.Header.Set("If-None-Match", options.IfNoneMatch)
-	}
-
 	// Compute payload hash for SigV4 signing.
 	hash := sha256.Sum256(payload)
 	payloadHash := hex.EncodeToString(hash[:])
 
-	// Set headers for S3-compatible API.
-	if c.includeContentSHA256 {
-		req.Header.Set("x-amz-content-sha256", payloadHash)
-	}
+	const maxAttempts = 4
+	var lastErr error
 
-	// Sign request with SigV4 if signer is available, otherwise use bearer token.
-	if c.signer != nil {
-		if err := c.signer.SignHTTP(req, payloadHash, time.Now()); err != nil {
-			return PutResult{}, fmt.Errorf("failed to sign request: %w", err)
+	targetURL := c.baseURL.JoinPath(key)
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			// Small bounded backoff for transient connection errors.
+			delay := time.Duration(attempt) * 50 * time.Millisecond
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return PutResult{}, ctx.Err()
+			case <-timer.C:
+			}
 		}
-	} else {
-		// Set Cloudflare-specific headers when cloudflareCompat is enabled (for bearer token auth).
-		if c.cloudflareCompat {
-			req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
+
+		req, err := http.NewRequest(http.MethodPut, targetURL.String(), bytes.NewReader(payload))
+		if err != nil {
+			return PutResult{}, fmt.Errorf("failed to create request: %w", err)
 		}
-		if c.token == "" {
-			c.logger.Warn("PutObject: no token provided")
+		req = req.WithContext(ctx)
+
+		if options.ContentType != "" {
+			req.Header.Set("Content-Type", options.ContentType)
 		} else {
-			req.Header.Set("Authorization", "Bearer "+c.token)
+			req.Header.Set("Content-Type", "application/octet-stream")
 		}
+
+		if options.IfMatch != "" {
+			req.Header.Set("If-Match", options.IfMatch)
+		}
+		if options.IfNoneMatch != "" {
+			req.Header.Set("If-None-Match", options.IfNoneMatch)
+		}
+
+		// Set headers for S3-compatible API.
+		if c.includeContentSHA256 {
+			req.Header.Set("x-amz-content-sha256", payloadHash)
+		}
+
+		// Sign request with SigV4 if signer is available, otherwise use bearer token.
+		if c.signer != nil {
+			if err := c.signer.SignHTTP(req, payloadHash, time.Now()); err != nil {
+				return PutResult{}, fmt.Errorf("failed to sign request: %w", err)
+			}
+		} else {
+			// Set Cloudflare-specific headers when cloudflareCompat is enabled (for bearer token auth).
+			if c.cloudflareCompat {
+				req.Header.Set("x-amz-date", formatAmzDate(time.Now()))
+			}
+			if c.token == "" {
+				c.logger.Warn("PutObject: no token provided")
+			} else {
+				req.Header.Set("Authorization", "Bearer "+c.token)
+			}
+		}
+
+		resp, err := c.doer.Do(ctx, req)
+		if err != nil {
+			lastErr = err
+			if isRetryableIOError(err) && attempt < maxAttempts-1 {
+				c.logger.Warn("PutObject transient error; retrying", "key", key, "attempt", attempt+1, "error", err)
+				continue
+			}
+			return PutResult{}, fmt.Errorf("put object request failed: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			const maxBody = int64(8 << 10) // 8KB
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+			apiErr := &Error{
+				StatusCode: resp.StatusCode,
+				Body:       string(body),
+			}
+			if mappedErr := storageobjects.MapPutError(resp.StatusCode, options.FailIfExists, apiErr); mappedErr != nil {
+				return PutResult{}, mappedErr
+			}
+			return PutResult{}, apiErr
+		}
+
+		return PutResult{
+			ETag: resp.Header.Get("ETag"),
+		}, nil
 	}
 
-	resp, err := c.doer.Do(ctx, req)
-	if err != nil {
-		return PutResult{}, fmt.Errorf("put object request failed: %w", err)
-	}
-	defer resp.Body.Close()
+	return PutResult{}, fmt.Errorf("put object request failed: %w", lastErr)
+}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		const maxBody = int64(8 << 10) // 8KB
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
-		apiErr := &Error{
-			StatusCode: resp.StatusCode,
-			Body:       string(body),
-		}
-		if mappedErr := storageobjects.MapPutError(resp.StatusCode, options.FailIfExists, apiErr); mappedErr != nil {
-			return PutResult{}, mappedErr
-		}
-		return PutResult{}, apiErr
+func isRetryableIOError(err error) bool {
+	if err == nil {
+		return false
 	}
-
-	return PutResult{
-		ETag: resp.Header.Get("ETag"),
-	}, nil
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	return false
 }
 
 // ListObjects performs an S3 ListObjectsV2 request with the provided prefix.
@@ -504,5 +546,3 @@ func (c *Client) DeleteObject(ctx context.Context, key string) error {
 		return apiErr
 	}
 }
-
-
