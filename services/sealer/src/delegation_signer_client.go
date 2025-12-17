@@ -201,17 +201,17 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 		return nil, fmt.Errorf("unexpected COSE_Sign1 array length: %d", len(coseArr))
 	}
 
-	protectedBytes, ok := coseArr[0].([]byte)
+	protectedBytes, ok := asBstr(coseArr[0])
 	if !ok {
-		return nil, fmt.Errorf("COSE_Sign1[0] (protected) is not bstr")
+		return nil, fmt.Errorf("COSE_Sign1[0] (protected) is not bstr (type=%T)", coseArr[0])
 	}
-	payloadBytes, ok := coseArr[2].([]byte)
+	payloadBytes, ok := asBstr(coseArr[2])
 	if !ok {
-		return nil, fmt.Errorf("COSE_Sign1[2] (payload) is not bstr")
+		return nil, fmt.Errorf("COSE_Sign1[2] (payload) is not bstr (type=%T)", coseArr[2])
 	}
-	signature, ok := coseArr[3].([]byte)
+	signature, ok := asBstr(coseArr[3])
 	if !ok {
-		return nil, fmt.Errorf("COSE_Sign1[3] (signature) is not bstr")
+		return nil, fmt.Errorf("COSE_Sign1[3] (signature) is not bstr (type=%T)", coseArr[3])
 	}
 
 	protectedMap, err := decodeIntKeyedMap(protectedBytes)
@@ -226,7 +226,7 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 	alg, _ := asInt64(protectedMap[1])
 	cty, _ := protectedMap[3].(string)
 	kidHex := ""
-	if kid, ok := protectedMap[4].([]byte); ok && len(kid) > 0 {
+	if kid, ok := asBstr(protectedMap[4]); ok && len(kid) > 0 {
 		kidHex = hex.EncodeToString(kid)
 	}
 
@@ -235,7 +235,7 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 	mmrEnd := toNumericString(payloadMap[4])
 
 	delegationIDHex := ""
-	if did, ok := payloadMap[10].([]byte); ok && len(did) > 0 {
+	if did, ok := asBstr(payloadMap[10]); ok && len(did) > 0 {
 		delegationIDHex = hex.EncodeToString(did)
 	}
 
@@ -289,6 +289,38 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 		PayloadDelegatedCurve:  delegatedCurve,
 		SignatureSize:          len(signature),
 	}, nil
+}
+
+func asBstr(v any) ([]byte, bool) {
+	switch t := v.(type) {
+	case nil:
+		return nil, false
+	case []byte:
+		return t, true
+	case cbor.RawMessage:
+		return []byte(t), true
+	case cbor.Tag:
+		return asBstr(t.Content)
+	case cbor.RawTag:
+		var inner any
+		if err := cbor.Unmarshal([]byte(t.Content), &inner); err != nil {
+			return nil, false
+		}
+		return asBstr(inner)
+	case []any:
+		// Some encoders may represent binary data as an array of small integers.
+		out := make([]byte, len(t))
+		for i, el := range t {
+			n, ok := asInt64(el)
+			if !ok || n < 0 || n > 255 {
+				return nil, false
+			}
+			out[i] = byte(n)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 func decodeIntKeyedMap(b []byte) (map[int64]any, error) {
