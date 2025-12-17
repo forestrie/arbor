@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,6 +29,9 @@ type Config struct {
 
 	// Delegation signer / GCP Workload Identity configuration
 	DelegationSignerServiceAccountEmail string
+	DelegationSignerURL                 string
+	DelegationLogIDPrefix               string
+	DelegationKeyCurve                  string
 
 	// R2 Access Configuration
 	R2BucketName  string
@@ -133,23 +137,26 @@ func LoadConfig() Config {
 	}
 
 	cfg := Config{
-		Port:               getEnvOrDefault("PORT", "9090"),
-		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
-		ShutdownTimeout:    getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:           os.Getenv("SEALER_QUEUE_URL"),
-		QueueAPIToken:      os.Getenv("SEALER_QUEUE_API_TOKEN"),
-		QueueBatchSize:     getInt("SEALER_QUEUE_BATCH_SIZE", 1),
-		PollInterval:       getDuration("POLL_INTERVAL", 5*time.Second),
-		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
+		Port:                                getEnvOrDefault("PORT", "9090"),
+		LogLevel:                            getEnvOrDefault("LOG_LEVEL", "info"),
+		ShutdownTimeout:                     getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		QueueURL:                            os.Getenv("SEALER_QUEUE_URL"),
+		QueueAPIToken:                       os.Getenv("SEALER_QUEUE_API_TOKEN"),
+		QueueBatchSize:                      getInt("SEALER_QUEUE_BATCH_SIZE", 1),
+		PollInterval:                        getDuration("POLL_INTERVAL", 5*time.Second),
+		VisibilityTimeout:                   getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		DelegationSignerServiceAccountEmail: os.Getenv("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL"),
-		R2BucketName:       bucketName,
-		R2AccountID:        accountID,
-		R2PublicURL:        r2PublicURL,
-		R2WriteURL:         os.Getenv("R2_WRITE_URL"),
-		R2WriterToken:      r2WriterToken,
-		AWSAccessKeyID:     awsAccessKeyID,
-		AWSSecretAccessKey: awsSecretAccessKey,
-		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
+		DelegationSignerURL:                 os.Getenv("DELEGATION_SIGNER_URL"),
+		DelegationLogIDPrefix:               os.Getenv("DELEGATION_LOG_ID_PREFIX"),
+		DelegationKeyCurve:                  getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256k1"),
+		R2BucketName:                        bucketName,
+		R2AccountID:                         accountID,
+		R2PublicURL:                         r2PublicURL,
+		R2WriteURL:                          os.Getenv("R2_WRITE_URL"),
+		R2WriterToken:                       r2WriterToken,
+		AWSAccessKeyID:                      awsAccessKeyID,
+		AWSSecretAccessKey:                  awsSecretAccessKey,
+		AWSRegion:                           getEnvOrDefault("AWS_REGION", "auto"),
 	}
 
 	return cfg
@@ -162,6 +169,9 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 	logConfigValue(logger, "DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL", c.DelegationSignerServiceAccountEmail)
+	logConfigValue(logger, "DELEGATION_SIGNER_URL", c.DelegationSignerURL)
+	logConfigValue(logger, "DELEGATION_LOG_ID_PREFIX", c.DelegationLogIDPrefix)
+	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
 	logConfigValue(logger, "R2_PUBLIC_URL", c.R2PublicURL)
 	logConfigValue(logger, "R2_WRITE_URL", c.R2WriteURL)
 	logSecretDigest(logger, "R2_WRITER_TOKEN", c.R2WriterToken)
@@ -188,6 +198,15 @@ func (c Config) Validate() error {
 	if c.DelegationSignerServiceAccountEmail == "" {
 		return fmt.Errorf("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL is required")
 	}
+	if c.DelegationSignerURL == "" {
+		return fmt.Errorf("DELEGATION_SIGNER_URL is required")
+	}
+	if err := validateHTTPSURL(c.DelegationSignerURL); err != nil {
+		return fmt.Errorf("DELEGATION_SIGNER_URL is invalid: %w", err)
+	}
+	if _, err := ParseDelegationCurve(c.DelegationKeyCurve); err != nil {
+		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)
+	}
 
 	// Required now (strict parity for future checkpoint work)
 	if c.R2WriteURL == "" {
@@ -203,6 +222,24 @@ func (c Config) Validate() error {
 		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing")
 	}
 
+	return nil
+}
+
+func validateHTTPSURL(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("empty")
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return fmt.Errorf("scheme must be http or https")
+	}
+	if u.Host == "" {
+		return fmt.Errorf("missing host")
+	}
 	return nil
 }
 

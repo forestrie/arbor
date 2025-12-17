@@ -21,9 +21,16 @@ type DelegationSignerTokenInfo struct {
 	TokenFingerprint     string
 }
 
-// AcquireDelegationSignerAccessTokenInfo impersonates the delegation-signer service account and
-// fetches a single access token. The token value is never returned; only safe metadata is returned.
-func AcquireDelegationSignerAccessTokenInfo(ctx context.Context, targetServiceAccountEmail string) (*DelegationSignerTokenInfo, error) {
+// DelegationSignerAccessToken holds the access token plus safe metadata for logging.
+// The AccessToken value is sensitive; do not log it.
+type DelegationSignerAccessToken struct {
+	AccessToken string
+	Info        DelegationSignerTokenInfo
+}
+
+// AcquireDelegationSignerAccessToken impersonates the delegation-signer service account and
+// fetches a single access token.
+func AcquireDelegationSignerAccessToken(ctx context.Context, targetServiceAccountEmail string) (*DelegationSignerAccessToken, error) {
 	target := targetServiceAccountEmail
 	if target == "" {
 		return nil, fmt.Errorf("target service account email is empty")
@@ -56,14 +63,15 @@ func AcquireDelegationSignerAccessTokenInfo(ctx context.Context, targetServiceAc
 		expiresIn = time.Until(tok.Expiry).Round(time.Second)
 	}
 
-	return &DelegationSignerTokenInfo{
-		TargetServiceAccount: target,
-		TokenType:            tok.TokenType,
-		Expiry:               tok.Expiry,
-		ExpiresIn:            expiresIn,
-		TokenLength:          len(tok.AccessToken),
-		TokenFingerprint:     fingerprint,
+	return &DelegationSignerAccessToken{
+		AccessToken: tok.AccessToken,
+		Info: DelegationSignerTokenInfo{
+			TargetServiceAccount: target,
+			TokenType:            tok.TokenType,
+			Expiry:               tok.Expiry,
+			ExpiresIn:            expiresIn,
+			TokenLength:          len(tok.AccessToken),
+			TokenFingerprint:     fingerprint,
+		},
 	}, nil
 }
-
-

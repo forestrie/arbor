@@ -60,7 +60,7 @@ func main() {
 	// required trust boundary plumbing.
 	startupCtx, startupCancel := context.WithTimeout(ctx, 20*time.Second)
 	defer startupCancel()
-	tokenInfo, err := sealer.AcquireDelegationSignerAccessTokenInfo(startupCtx, cfg.DelegationSignerServiceAccountEmail)
+	token, err := sealer.AcquireDelegationSignerAccessToken(startupCtx, cfg.DelegationSignerServiceAccountEmail)
 	if err != nil {
 		slog.Error("failed to obtain delegation signer access token",
 			"target_service_account", cfg.DelegationSignerServiceAccountEmail,
@@ -69,15 +69,49 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("obtained delegation signer access token",
-		"target_service_account", tokenInfo.TargetServiceAccount,
-		"token_type", tokenInfo.TokenType,
-		"expiry", tokenInfo.Expiry,
-		"expires_in", tokenInfo.ExpiresIn.String(),
-		"token_len", tokenInfo.TokenLength,
-		"token_fingerprint", tokenInfo.TokenFingerprint,
+		"target_service_account", token.Info.TargetServiceAccount,
+		"token_type", token.Info.TokenType,
+		"expiry", token.Info.Expiry,
+		"expires_in", token.Info.ExpiresIn.String(),
+		"token_len", token.Info.TokenLength,
+		"token_fingerprint", token.Info.TokenFingerprint,
 	)
 
 	httpClient := sealer.NewHTTPClient(logger)
+
+	// Startup check: request a delegation certificate from the Cloudflare worker
+	// using the impersonated access token.
+	certInfo, err := sealer.RequestDelegationCertificate(
+		startupCtx,
+		httpClient,
+		cfg.DelegationSignerURL,
+		token.AccessToken,
+		cfg.DelegationKeyCurve,
+		cfg.DelegationLogIDPrefix,
+	)
+	if err != nil {
+		slog.Error("failed to obtain delegation certificate",
+			"delegation_signer_url", cfg.DelegationSignerURL,
+			"curve", cfg.DelegationKeyCurve,
+			"log_id_prefix", cfg.DelegationLogIDPrefix,
+			"error", err,
+		)
+		os.Exit(1)
+	}
+	slog.Info("obtained delegation certificate",
+		"cert_sha256", certInfo.CertSHA256,
+		"cert_size", certInfo.CertSize,
+		"alg", certInfo.ProtectedAlg,
+		"cty", certInfo.ProtectedCty,
+		"kid_hex", certInfo.ProtectedKidHex,
+		"delegation_id_hex", certInfo.PayloadDelegationIDHex,
+		"log_id", certInfo.PayloadLogID,
+		"log_id_prefix", certInfo.PayloadLogIDPrefix,
+		"mmr_start", certInfo.PayloadMmrStart,
+		"mmr_end", certInfo.PayloadMmrEnd,
+		"delegated_curve", certInfo.PayloadDelegatedCurve,
+		"signature_size", certInfo.SignatureSize,
+	)
 
 	healthMux := http.NewServeMux()
 	setupHealthChecks(healthMux)
