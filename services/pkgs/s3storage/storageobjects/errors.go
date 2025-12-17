@@ -8,8 +8,10 @@ import (
 
 // MapHTTPError translates an HTTP status code into a massifstorage error.
 // This unified function handles Get, List, and Put operations.
+//
 // For Put operations, set failIfExists to true to treat precondition failures
-// as existence conflicts (ErrExistsOC) rather than content conflicts (ErrContentOC).
+// as existence conflicts (ErrExistsOC) rather than content conflicts
+// (ErrContentOC).
 func MapHTTPError(statusCode int, failIfExists bool) error {
 	switch statusCode {
 	case http.StatusNotFound:
@@ -23,7 +25,7 @@ func MapHTTPError(statusCode int, failIfExists bool) error {
 		http.StatusTooManyRequests, http.StatusServiceUnavailable:
 		return massifstorage.ErrNotAvailable
 	default:
-		// Return nil for unhandled status codes to allow the original error to propagate
+		// Return nil for unhandled status codes to allow the original error to propagate.
 		return nil
 	}
 }
@@ -70,4 +72,5 @@ func MapDeleteError(statusCode int, originalErr error) error {
 		return originalErr
 	}
 }
+
 

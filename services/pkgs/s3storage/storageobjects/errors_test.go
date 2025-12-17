@@ -84,3 +84,5 @@ func TestMapPutError_UnhandledStatusReturnsOriginalError(t *testing.T) {
 		t.Fatalf("expected original error to be returned, got %v", got)
 	}
 }
+
+

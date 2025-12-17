@@ -4,3 +4,5 @@ package storageobjects
 type PutResult struct {
 	ETag string
 }
+
+

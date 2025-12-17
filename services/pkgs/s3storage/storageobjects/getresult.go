@@ -5,3 +5,5 @@ type GetResult struct {
 	Data []byte
 	ETag string
 }
+
+

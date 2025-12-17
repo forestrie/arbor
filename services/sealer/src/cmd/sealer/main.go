@@ -79,38 +79,35 @@ func main() {
 
 	httpClient := sealer.NewHTTPClient(logger)
 
-	// Startup check: request a delegation certificate from the Cloudflare worker
-	// using the impersonated access token.
-	certInfo, err := sealer.RequestDelegationCertificate(
+	leaseMgr := sealer.NewDelegationLeaseManager(0, 0)
+
+	// Startup check: obtain (and cache) a global time-limited delegation lease.
+	lease, err := leaseMgr.EnsureValid(
 		startupCtx,
 		httpClient,
+		logger,
 		cfg.DelegationSignerURL,
 		token.AccessToken,
 		cfg.DelegationKeyCurve,
-		cfg.DelegationLogIDPrefix,
 	)
 	if err != nil {
-		slog.Error("failed to obtain delegation certificate",
+		slog.Error("failed to obtain delegation lease",
 			"delegation_signer_url", cfg.DelegationSignerURL,
 			"curve", cfg.DelegationKeyCurve,
-			"log_id_prefix", cfg.DelegationLogIDPrefix,
 			"error", err,
 		)
 		os.Exit(1)
 	}
-	slog.Info("obtained delegation certificate",
-		"cert_sha256", certInfo.CertSHA256,
-		"cert_size", certInfo.CertSize,
-		"alg", certInfo.ProtectedAlg,
-		"cty", certInfo.ProtectedCty,
-		"kid_hex", certInfo.ProtectedKidHex,
-		"delegation_id_hex", certInfo.PayloadDelegationIDHex,
-		"log_id", certInfo.PayloadLogID,
-		"log_id_prefix", certInfo.PayloadLogIDPrefix,
-		"mmr_start", certInfo.PayloadMmrStart,
-		"mmr_end", certInfo.PayloadMmrEnd,
-		"delegated_curve", certInfo.PayloadDelegatedCurve,
-		"signature_size", certInfo.SignatureSize,
+	slog.Info("obtained delegation lease",
+		"cert_sha256", lease.Info.CertSHA256,
+		"cert_size", lease.Info.CertSize,
+		"alg", lease.Info.ProtectedAlg,
+		"cty", lease.Info.ProtectedCty,
+		"kid_hex", lease.Info.ProtectedKidHex,
+		"issued_at", lease.IssuedAt,
+		"expires_at", lease.ExpiresAt,
+		"delegated_curve", lease.Info.PayloadDelegatedCurve,
+		"signature_size", lease.Info.SignatureSize,
 	)
 
 	healthMux := http.NewServeMux()
@@ -128,7 +125,7 @@ func main() {
 		}
 	}()
 
-	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger)
+	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr)
 	go queueConsumer.ConsumeQueue(ctx)
 
 	<-ctx.Done()

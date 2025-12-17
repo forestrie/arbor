@@ -1,0 +1,328 @@
+package sealer
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
+	"github.com/forestrie/go-merklelog/massifs"
+	commoncbor "github.com/forestrie/go-merklelog/massifs/cbor"
+	commoncose "github.com/forestrie/go-merklelog/massifs/cose"
+	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
+	"github.com/forestrie/go-merklelog/mmr"
+	"github.com/google/uuid"
+	"github.com/veraison/go-cose"
+)
+
+const (
+	// delegationCertUnprotectedLabel is the application-private COSE unprotected
+	// header label for embedding the delegation certificate bytes.
+	//
+	// See forest-1/docs/arc-delegation-signer-cose-cbor-scitt.md.
+	delegationCertUnprotectedLabel int64 = 1000
+)
+
+// CheckpointLog seals/checkpoints the provided logID using v2 massif storage schema only.
+//
+// This intentionally rejects legacy formats (no backwards compatibility).
+//
+// Concurrency note: CheckpointLog is safe to run concurrently for different logs,
+// but callers should avoid running it concurrently for the same logID within a
+// process. Cross-process concurrency is handled via optimistic concurrency
+// (ETag / If-Match) on checkpoint writes.
+func CheckpointLog(
+	ctx context.Context,
+	svc SealerService,
+	batch SealerBatch,
+	logID massifstorage.LogID,
+	massifHeight uint8,
+) error {
+	if svc.HTTPClient == nil {
+		return fmt.Errorf("http client is required")
+	}
+	logger := svc.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if len(logID) == 0 {
+		return fmt.Errorf("logID is required")
+	}
+	if massifHeight == 0 {
+		return fmt.Errorf("massifHeight is required")
+	}
+	if batch.DelegationAccessToken == "" {
+		return fmt.Errorf("delegation access token is required")
+	}
+	if svc.LeaseManager == nil {
+		return fmt.Errorf("delegation lease manager is required")
+	}
+
+	// Derive a stable string representation when needed.
+	logUUID, err := uuid.FromBytes(logID)
+	if err != nil {
+		return fmt.Errorf("invalid logID bytes: %w", err)
+	}
+	logIDString := logUUID.String()
+
+	// Ensure we have a valid global delegation lease before doing any sealing work.
+	lease, err := svc.LeaseManager.EnsureValid(
+		ctx,
+		svc.HTTPClient,
+		logger,
+		svc.Cfg.DelegationSignerURL,
+		batch.DelegationAccessToken,
+		svc.Cfg.DelegationKeyCurve,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to obtain delegation lease: %w", err)
+	}
+	coseSigner, kid, pubKey, err := lease.COSESigner()
+	if err != nil {
+		return fmt.Errorf("delegation signer setup failed: %w", err)
+	}
+	keyIdentifier := string(kid)
+
+	// Build shared clients.
+	s3Client, err := s3.NewClientWithCredentials(
+		svc.Cfg.R2WriteURL,
+		svc.Cfg.R2WriterToken,
+		svc.Cfg.AWSAccessKeyID,
+		svc.Cfg.AWSSecretAccessKey,
+		svc.Cfg.AWSRegion,
+		svc.HTTPClient,
+		logger,
+	)
+	if err != nil {
+		return fmt.Errorf("build s3 client: %w", err)
+	}
+
+	factory, err := merklelog.NewFactory(s3Client, massifHeight, logger)
+	if err != nil {
+		return fmt.Errorf("build merklelog store factory: %w", err)
+	}
+	store, err := factory.NewStore(massifstorage.LogID(logID))
+	if err != nil {
+		return fmt.Errorf("build store: %w", err)
+	}
+
+	headMassifIndex, err := store.HeadIndex(ctx, massifstorage.ObjectMassifData)
+	if errors.Is(err, massifstorage.ErrLogEmpty) {
+		// Nothing to seal.
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("head massif index: %w", err)
+	}
+
+	// Determine the latest existing checkpoint (if any).
+	var startMassifIndex uint32 = 0
+	var baseState massifs.MMRState
+	lastCheckpointIndex, err := store.HeadIndex(ctx, massifstorage.ObjectCheckpoint)
+	switch {
+	case errors.Is(err, massifstorage.ErrLogEmpty):
+		// Start from scratch.
+		baseState = massifs.MMRState{MMRSize: 0}
+	case err != nil:
+		return fmt.Errorf("head checkpoint index: %w", err)
+	default:
+		codec, err := massifs.NewCBORCodec()
+		if err != nil {
+			return fmt.Errorf("init cbor codec: %w", err)
+		}
+		cp, err := massifs.GetCheckpoint(ctx, store, codec, lastCheckpointIndex)
+		if err != nil {
+			return fmt.Errorf("read checkpoint %d: %w", lastCheckpointIndex, err)
+		}
+
+		// Reject legacy checkpoint states.
+		if cp.MMRState.LegacySealRoot != nil || cp.MMRState.Version == int(massifs.MMRStateVersion0) {
+			return fmt.Errorf("legacy checkpoint state detected (no backward compatibility)")
+		}
+		startMassifIndex = lastCheckpointIndex
+		baseState = cp.MMRState
+	}
+
+	codec, err := massifs.NewCBORCodec()
+	if err != nil {
+		return fmt.Errorf("init cbor codec: %w", err)
+	}
+	rootSigner := massifs.NewRootSigner(svc.Cfg.DelegationSignerServiceAccountEmail, codec)
+
+	// Process each massif from the last checkpoint to head.
+	for mi := startMassifIndex; mi <= headMassifIndex; mi++ {
+		mc, err := massifs.GetMassifContext(ctx, store, mi)
+		if err != nil {
+			return fmt.Errorf("read massif %d: %w", mi, err)
+		}
+
+		// Reject legacy massif formats.
+		if mc.Start.Version != 1 {
+			return fmt.Errorf("legacy massif version %d detected (no backward compatibility)", mc.Start.Version)
+		}
+		if mc.Start.MassifHeight != massifHeight {
+			return fmt.Errorf("massif height mismatch: path=%d header=%d", massifHeight, mc.Start.MassifHeight)
+		}
+
+		// Rehydrate base peaks on first use.
+		if baseState.MMRSize != 0 && baseState.Peaks == nil {
+			peaks, err := mmr.PeakHashes(&mc, baseState.MMRSize-1)
+			if err != nil {
+				return fmt.Errorf("rehydrate base peaks: %w", err)
+			}
+			baseState.Peaks = peaks
+		}
+
+		curSize := mc.RangeCount()
+		if curSize == 0 {
+			continue
+		}
+
+		var newPeaks [][]byte
+		if baseState.MMRSize == 0 {
+			peaks, err := mmr.PeakHashes(&mc, curSize-1)
+			if err != nil {
+				return fmt.Errorf("compute peaks: %w", err)
+			}
+			newPeaks = peaks
+		} else {
+			peaks, err := mc.CheckConsistency(baseState)
+			if err != nil {
+				return fmt.Errorf("consistency check (massif=%d): %w", mi, err)
+			}
+			if peaks == nil {
+				// No advance since last checkpoint (or already covered).
+				continue
+			}
+			newPeaks = peaks
+		}
+
+		// If the lease is expired or likely to expire during this run, abort so
+		// the message can be retried and a fresh lease acquired.
+		if time.Until(lease.ExpiresAt) < svc.LeaseManager.RenewBefore() {
+			return ErrDelegationExpired
+		}
+
+		state := massifs.MMRState{
+			Version:         int(massifs.MMRStateVersionCurrent),
+			MMRSize:         curSize,
+			Peaks:           newPeaks,
+			Timestamp:       time.Now().UnixMilli(),
+			IDTimestamp:     mc.Start.LastID,
+			CommitmentEpoch: mc.Start.CommitmentEpoch,
+		}
+
+		signed, err := rootSigner.Sign1(
+			coseSigner,
+			keyIdentifier,
+			pubKey,
+			logIDString,
+			state,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("sign checkpoint (massif=%d): %w", mi, err)
+		}
+
+		// Inject delegation certificate bytes in unprotected header label 1000.
+		msg, err := commoncose.NewCoseSign1MessageFromCBOR(signed, massifs.NewCheckpointDecOptions()...)
+		if err != nil {
+			return fmt.Errorf("decode signed checkpoint: %w", err)
+		}
+		if msg.Headers.Unprotected == nil {
+			msg.Headers.Unprotected = cose.UnprotectedHeader{}
+		}
+		msg.Headers.Unprotected[delegationCertUnprotectedLabel] = lease.CertBytes
+
+		signedWithDeleg, err := msg.MarshalCBOR()
+		if err != nil {
+			return fmt.Errorf("encode checkpoint: %w", err)
+		}
+
+		// Write checkpoint with optimistic concurrency.
+		if err := putCheckpoint(ctx, store, codec, mi, curSize, signedWithDeleg); err != nil {
+			return fmt.Errorf("write checkpoint (massif=%d): %w", mi, err)
+		}
+
+		// Advance base state.
+		baseState.MMRSize = curSize
+		baseState.Peaks = newPeaks
+	}
+
+	return nil
+}
+
+func putCheckpoint(ctx context.Context, store *merklelog.Store, codec commoncbor.CBORCodec, massifIndex uint32, mmrSize uint64, data []byte) error {
+	const maxAttempts = 5
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Prefer create-only on first attempt.
+		if attempt == 0 {
+			err := store.Put(ctx, massifIndex, massifstorage.ObjectCheckpoint, data, true)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, massifstorage.ErrExistsOC) {
+				return err
+			}
+		}
+
+		// Read current object to get ETag and decide whether we still need to write.
+		existing, err := store.CheckpointRead(ctx, massifIndex)
+		if err != nil {
+			if errors.Is(err, massifstorage.ErrDoesNotExist) {
+				// Retry create-only.
+				continue
+			}
+			return err
+		}
+
+		// If someone else already wrote a checkpoint at an equal-or-newer size, we can stop.
+		cp, err := massifs.GetCheckpoint(ctx, store, codec, massifIndex)
+		if err == nil && cp.MMRState.MMRSize >= mmrSize {
+			return nil
+		}
+
+		etag, ok, err := store.CheckpointETag(massifIndex)
+		if err != nil {
+			return err
+		}
+		if !ok || etag == "" {
+			// This shouldn't happen because CheckpointRead cached it, but guard anyway.
+			_ = existing
+			return fmt.Errorf("missing etag for checkpoint %d after read", massifIndex)
+		}
+
+		err = store.PutWithETag(ctx, massifIndex, massifstorage.ObjectCheckpoint, data, false, etag)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, massifstorage.ErrContentOC) {
+			// ETag mismatch; retry.
+			continue
+		}
+		return err
+	}
+
+	return fmt.Errorf("checkpoint write retries exceeded for massif %d", massifIndex)
+}
+
+func kidFromECDSAPublicKey(pub *ecdsa.PublicKey) ([]byte, error) {
+	if pub == nil {
+		return nil, fmt.Errorf("public key is nil")
+	}
+	if pub.Curve == nil || pub.X == nil || pub.Y == nil {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	uncompressed := elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+	sum := sha256.Sum256(uncompressed)
+	kid := make([]byte, 16)
+	copy(kid, sum[:16])
+	return kid, nil
+}

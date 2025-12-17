@@ -14,8 +14,8 @@ import (
 
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
-	"github.com/forestrie/arbor/services/ranger/s3"
-	rangerstorage "github.com/forestrie/arbor/services/ranger/storage"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/google/uuid"
 )
@@ -108,7 +108,7 @@ func massifCountForLog(
 ) uint32 {
 	t.Helper()
 
-	factory, err := rangerstorage.NewS3FactoryWithCredentials(
+	factory, err := merklelog.NewS3FactoryWithCredentials(
 		r2WriteURL,
 		bearerToken, // Fallback if no credentials
 		accessKeyID,

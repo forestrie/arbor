@@ -17,6 +17,9 @@ COPY sealer/go.work ./sealer/go.work
 # Copy go module files for the sealer service
 COPY sealer/src/go.mod sealer/src/go.sum* ./sealer/src/
 
+# Copy shared packages used via go.work
+COPY pkgs/s3storage ./pkgs/s3storage
+
 # Copy local module clones explicitly so they are available to go.work and replaces
 COPY _deps/go-sigv4 ./_deps/go-sigv4
 COPY _deps/go-datatrails-common ./_deps/go-datatrails-common
@@ -27,6 +30,7 @@ COPY _deps/go-merklelog-datatrails ./_deps/go-merklelog-datatrails
 COPY _deps/go-merklelog-fs ./_deps/go-merklelog-fs
 COPY _deps/go-merklelog-provider-testing ./_deps/go-merklelog-provider-testing
 COPY _deps/go-merklelog ./_deps/go-merklelog
+COPY pkgs/s3storage ./pkgs/s3storage
 
 # Switch to module root for sealer
 WORKDIR /build/sealer/src

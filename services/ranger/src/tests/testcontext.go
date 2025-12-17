@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/forestrie/arbor/services/ranger/s3"
-	rangerstorage "github.com/forestrie/arbor/services/ranger/storage"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/go-merklelog-datatrails/datatrails"
 	"github.com/forestrie/go-merklelog-provider-testing/mmrtesting"
 	"github.com/forestrie/go-merklelog-provider-testing/providers"
@@ -223,7 +223,7 @@ func NewTestContext(t *testing.T, opts ...massifs.Option) *TestContext {
 
 func (tc *TestContext) NewBuilder(massifHeight uint8) mmrtesting.LogBuilder {
 	// Build a store configured with the requested massifHeight.
-	factory, err := rangerstorage.NewS3FactoryWithCredentials(
+	factory, err := merklelog.NewS3FactoryWithCredentials(
 		tc.baseURL,
 		tc.cfg.BearerToken, // Fallback if no credentials
 		tc.cfg.AccessKeyID,

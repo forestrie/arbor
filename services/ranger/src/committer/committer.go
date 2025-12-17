@@ -11,7 +11,8 @@ import (
 
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
-	"github.com/forestrie/arbor/services/ranger/storage"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
+	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog/massifs"
 	"github.com/forestrie/go-merklelog/massifs/snowflakeid"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
@@ -19,7 +20,7 @@ import (
 
 // Committer implements MassifCommitter for batch processing messages into merklelog.
 type Committer struct {
-	factory *storage.Factory
+	factory *merklelog.Factory
 
 	idState         *snowflakeid.IDState
 	logger          *slog.Logger
@@ -46,7 +47,7 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 	}
 
 	// Use S3 factory with SigV4 signing enabled (required for Cloudflare R2 S3-compatible API)
-	factory, err := storage.NewS3FactoryWithCredentials(
+	factory, err := merklelog.NewS3FactoryWithCredentials(
 		cfg.R2WriteURL,
 		cfg.R2WriterToken,
 		cfg.AWSAccessKeyID,
@@ -95,9 +96,13 @@ func NewR2Committer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *sl
 		massifHeight = 14 // Default
 	}
 
-	factory, err := storage.NewR2Factory(cfg.R2WriteURL, cfg.R2WriterToken, massifHeight, httpClient, logger)
+	r2Client, err := r2.NewClient(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create storage factory: %w", err)
+		return nil, fmt.Errorf("failed to create r2 client: %w", err)
+	}
+	factory, err := merklelog.NewFactory(r2Client, massifHeight, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create merklelog storage factory: %w", err)
 	}
 
 	idState, err := snowflakeid.NewIDState(snowflakeid.Config{

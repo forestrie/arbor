@@ -1,9 +1,9 @@
-package storage
+package merklelog
 
 import (
 	"context"
 
-	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
+	storageobjects "github.com/forestrie/arbor/services/pkgs/s3storage/storageobjects"
 )
 
 // ListObject and ListPage are aliases to the shared storageobjects types so
@@ -21,10 +21,12 @@ type PutOptions = storageobjects.PutOptions
 type PutResult = storageobjects.PutResult
 
 // ObjectClient is a backend-agnostic interface for minimal blob operations
-// required by the storage layer.
+// required by the merklelog storage layer.
 type ObjectClient interface {
 	ListObjects(ctx context.Context, prefix, continuation string, maxKeys int) (ListPage, error)
 	GetObject(ctx context.Context, key string, opts GetOptions) (GetResult, error)
 	PutObject(ctx context.Context, key string, data []byte, opts PutOptions) (PutResult, error)
 	DeleteObject(ctx context.Context, key string) error
 }
+
+

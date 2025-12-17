@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,14 +24,22 @@ type QueueConsumer struct {
 	cfg        sealer.Config
 	httpClient *sealer.HTTPClient
 	logger     *slog.Logger
+	leaseMgr   *sealer.DelegationLeaseManager
+}
+
+type logWork struct {
+	logIDBytes   []byte
+	massifHeight uint8
+	messages     []QueueMessage
 }
 
 // NewQueueConsumer constructs a QueueConsumer with a config copy and shared HTTP client.
-func NewQueueConsumer(cfg sealer.Config, httpClient *sealer.HTTPClient, logger *slog.Logger) *QueueConsumer {
+func NewQueueConsumer(cfg sealer.Config, httpClient *sealer.HTTPClient, logger *slog.Logger, leaseMgr *sealer.DelegationLeaseManager) *QueueConsumer {
 	return &QueueConsumer{
 		cfg:        cfg,
 		httpClient: httpClient,
 		logger:     logger,
+		leaseMgr:   leaseMgr,
 	}
 }
 
@@ -116,48 +126,133 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 // ProcessAndAcknowledge extracts the set of unique log IDs referenced by messages.
 // It acknowledges all messages regardless of decode/parsing errors.
 func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *QueuePullResult) error {
-	uniqueLogIDs := make(map[string]struct{})
+	unique := make(map[string]*logWork)
+	var invalidMessages []QueueMessage
 
 	for _, msg := range qbatch.Messages {
 		var bodyJSON string
 		if err := json.Unmarshal(msg.Body, &bodyJSON); err != nil {
 			q.logger.Warn("failed to unmarshal message body wrapper", "messageID", msg.ID, "error", err)
+			invalidMessages = append(invalidMessages, msg)
 			continue
 		}
 
 		var note R2Notification
 		if err := json.Unmarshal([]byte(bodyJSON), &note); err != nil {
 			q.logger.Warn("failed to unmarshal R2 notification", "messageID", msg.ID, "error", err)
+			invalidMessages = append(invalidMessages, msg)
 			continue
 		}
 
 		if note.Action != "PutObject" {
 			q.logger.Debug("skipping non-PutObject notification", "messageID", msg.ID, "action", note.Action)
+			invalidMessages = append(invalidMessages, msg)
 			continue
 		}
 
-		logID, err := parseLogIDFromObjectPath(note.Object.Key)
+		logID, massifHeight, err := parseLogIDAndMassifHeightFromObjectPath(note.Object.Key)
 		if err != nil {
 			q.logger.Warn("failed to parse object key", "messageID", msg.ID, "key", note.Object.Key, "error", err)
+			invalidMessages = append(invalidMessages, msg)
 			continue
 		}
 
 		u, err := uuid.FromBytes(logID)
 		if err != nil {
 			q.logger.Warn("failed to format logID", "messageID", msg.ID, "error", err)
+			invalidMessages = append(invalidMessages, msg)
 			continue
 		}
-		uniqueLogIDs[u.String()] = struct{}{}
+
+		key := u.String()
+		w, ok := unique[key]
+		if !ok {
+			w = &logWork{
+				logIDBytes:   logID,
+				massifHeight: massifHeight,
+			}
+			unique[key] = w
+		} else if w.massifHeight != massifHeight {
+			q.logger.Warn("inconsistent massif height for log within batch",
+				"logID", key,
+				"prevHeight", w.massifHeight,
+				"newHeight", massifHeight,
+				"messageID", msg.ID,
+			)
+			invalidMessages = append(invalidMessages, msg)
+			continue
+		}
+		w.messages = append(w.messages, msg)
 	}
 
 	// Log a concise summary; avoid dumping a large set into logs.
 	q.logger.Info("sealer poll summary",
 		"messages", len(qbatch.Messages),
-		"uniqueLogs", len(uniqueLogIDs),
-		"sampleLogIDs", sampleKeys(uniqueLogIDs, 5),
+		"uniqueLogs", len(unique),
+		"sampleLogIDs", sampleKeysFromWork(unique, 5),
+		"invalidMessages", len(invalidMessages),
 	)
 
-	q.ackAll(ctx, qbatch.Messages)
+	// Always ack invalid/unprocessable messages so they don't poison the queue.
+	if len(invalidMessages) > 0 {
+		q.ackAll(ctx, invalidMessages)
+	}
+
+	if len(unique) == 0 {
+		return nil
+	}
+
+	// Acquire a delegation signer token once per batch.
+	token, err := sealer.AcquireDelegationSignerAccessToken(ctx, q.cfg.DelegationSignerServiceAccountEmail)
+	if err != nil {
+		return fmt.Errorf("failed to obtain delegation signer access token: %w", err)
+	}
+
+	svc := sealer.SealerService{
+		Cfg:          q.cfg,
+		HTTPClient:   q.httpClient,
+		Logger:       q.logger,
+		LeaseManager: q.leaseMgr,
+	}
+	batchCtx := sealer.SealerBatch{
+		DelegationAccessToken: token.AccessToken,
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	failures := 0
+
+	for _, w := range unique {
+		w := w
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sealer.CheckpointLog(ctx, svc, batchCtx, w.logIDBytes, w.massifHeight); err != nil {
+				if errors.Is(err, sealer.ErrDelegationExpired) {
+					// Expected retry path: do not ack messages for this log so the queue will redeliver.
+					q.logger.Info("log checkpointing aborted due to expiring delegation; will retry",
+						"logID", keyFromLogIDBytes(w.logIDBytes),
+						"massifHeight", w.massifHeight,
+						"error", err,
+					)
+					return
+				}
+				mu.Lock()
+				failures++
+				mu.Unlock()
+				q.logger.Warn("log checkpointing failed", "logID", keyFromLogIDBytes(w.logIDBytes), "massifHeight", w.massifHeight, "error", err)
+				// Don't ack messages for this log; they will be retried after visibility timeout.
+				return
+			}
+			// Ack only messages for successfully checkpointed logs.
+			q.ackAll(ctx, w.messages)
+		}()
+	}
+
+	wg.Wait()
+	if failures > 0 {
+		return fmt.Errorf("sealing failed for %d log(s)", failures)
+	}
 	return nil
 }
 
@@ -331,4 +426,58 @@ func sampleKeys(m map[string]struct{}, max int) []string {
 		}
 	}
 	return out
+}
+
+func parseLogIDAndMassifHeightFromObjectPath(path string) ([]byte, uint8, error) {
+	cleanPath := strings.TrimPrefix(filepath.Clean(path), "/")
+	parts := strings.Split(cleanPath, "/")
+
+	// Expected format: v2/merklelog/massifs/{massifHeight}/{logID}/{index}.log
+	if len(parts) < 6 {
+		return nil, 0, fmt.Errorf("invalid path format: expected v2/merklelog/massifs/{massifHeight}/{logID}/{index}.log, got %d segments", len(parts))
+	}
+	if parts[0] != "v2" {
+		return nil, 0, fmt.Errorf("invalid path format: expected 'v2' prefix, got %q", parts[0])
+	}
+	if parts[1] != "merklelog" {
+		return nil, 0, fmt.Errorf("invalid path format: expected 'merklelog' segment, got %q", parts[1])
+	}
+	if parts[2] != "massifs" {
+		return nil, 0, fmt.Errorf("invalid path format: expected 'massifs' segment, got %q", parts[2])
+	}
+
+	h64, err := strconv.ParseUint(parts[3], 10, 8)
+	if err != nil || h64 == 0 {
+		return nil, 0, fmt.Errorf("invalid massif height %q", parts[3])
+	}
+	massifHeight := uint8(h64)
+
+	uid, err := uuid.Parse(parts[4])
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid logID format at position 4: %w", err)
+	}
+
+	return uid[:], massifHeight, nil
+}
+
+func sampleKeysFromWork(m map[string]*logWork, max int) []string {
+	if max <= 0 {
+		return nil
+	}
+	out := make([]string, 0, max)
+	for k := range m {
+		out = append(out, k)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+func keyFromLogIDBytes(b []byte) string {
+	u, err := uuid.FromBytes(b)
+	if err != nil {
+		return fmt.Sprintf("%x", b)
+	}
+	return u.String()
 }

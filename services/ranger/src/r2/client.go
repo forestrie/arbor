@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 
-	storageobjects "github.com/forestrie/arbor/services/ranger/storageobjects"
+	storageobjects "github.com/forestrie/arbor/services/pkgs/s3storage/storageobjects"
 )
 
 // HTTPDoer abstracts the subset of http.Client used by the R2 client.

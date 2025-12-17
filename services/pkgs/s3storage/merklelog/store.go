@@ -1,4 +1,4 @@
-package storage
+package merklelog
 
 import (
 	"context"
@@ -8,7 +8,8 @@ import (
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 )
 
-// Store provides backend-agnostic implementations of massifs.ObjectReader and ObjectWriter.
+// Store provides backend-agnostic implementations of massifs.ObjectReader and massifs.ObjectWriter.
+// It is bound to a specific massifHeight for v2 path formatting.
 type Store struct {
 	client       ObjectClient
 	logger       *slog.Logger
@@ -18,11 +19,16 @@ type Store struct {
 	selected  *logCache
 }
 
+type cachedObject struct {
+	data []byte
+	etag string
+}
+
 type logCache struct {
 	logID       massifstorage.LogID
 	writer      *Replacer
-	massifs     map[uint32][]byte
-	checkpoints map[uint32][]byte
+	massifs     map[uint32]cachedObject
+	checkpoints map[uint32]cachedObject
 }
 
 // NewStore constructs a reader/writer for the given logID.
@@ -65,16 +71,6 @@ func (s *Store) SelectLog(ctx context.Context, logID massifstorage.LogID) error 
 	return nil
 }
 
-// HasCapability reports supported storage features.
-func (s *Store) HasCapability(feature massifstorage.StorageFeature) bool {
-	switch feature {
-	case massifstorage.OptimisticWrite:
-		return s.selected != nil && s.selected.writer != nil
-	default:
-		return false
-	}
-}
-
 // HeadIndex fetches the last object index for the given object type.
 // Uses the v2 path format with the massifHeight stored in the Store instance.
 func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (uint32, error) {
@@ -83,13 +79,13 @@ func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (
 		return 0, err
 	}
 
-	// Get base prefix from core function using stored massifHeight
+	// Get base prefix from core function using stored massifHeight.
 	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, s.massifHeight, otype)
 	if err != nil {
 		return 0, err
 	}
 
-	// Add Arbor service prefix
+	// Add Arbor service prefix.
 	var servicePrefix string
 	switch otype {
 	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
@@ -100,7 +96,6 @@ func (s *Store) HeadIndex(ctx context.Context, otype massifstorage.ObjectType) (
 		return 0, fmt.Errorf("unsupported object type: %v", otype)
 	}
 
-	// Combine service prefix with base format
 	fullPrefix := servicePrefix + basePrefix
 
 	var continuation string
@@ -142,11 +137,11 @@ func (s *Store) MassifData(massifIndex uint32) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
-	data, ok := cache.massifs[massifIndex]
+	obj, ok := cache.massifs[massifIndex]
 	if !ok {
 		return nil, false, nil
 	}
-	return data, true, nil
+	return obj.data, true, nil
 }
 
 // CheckpointData returns cached checkpoint data if available.
@@ -156,11 +151,37 @@ func (s *Store) CheckpointData(massifIndex uint32) ([]byte, bool, error) {
 		return nil, false, err
 	}
 
-	data, ok := cache.checkpoints[massifIndex]
+	obj, ok := cache.checkpoints[massifIndex]
 	if !ok {
 		return nil, false, nil
 	}
-	return data, true, nil
+	return obj.data, true, nil
+}
+
+// MassifETag returns the cached ETag for a massif object if present.
+func (s *Store) MassifETag(massifIndex uint32) (string, bool, error) {
+	cache, err := s.currentLog()
+	if err != nil {
+		return "", false, err
+	}
+	obj, ok := cache.massifs[massifIndex]
+	if !ok {
+		return "", false, nil
+	}
+	return obj.etag, true, nil
+}
+
+// CheckpointETag returns the cached ETag for a checkpoint object if present.
+func (s *Store) CheckpointETag(massifIndex uint32) (string, bool, error) {
+	cache, err := s.currentLog()
+	if err != nil {
+		return "", false, err
+	}
+	obj, ok := cache.checkpoints[massifIndex]
+	if !ok {
+		return "", false, nil
+	}
+	return obj.etag, true, nil
 }
 
 // ObjectPath constructs the storage path for the given object type and massif index.
@@ -171,13 +192,11 @@ func (s *Store) ObjectPath(massifIndex uint32, otype massifstorage.ObjectType) (
 		return "", err
 	}
 
-	// Get base prefix from core function using stored massifHeight
 	basePrefix, err := massifstorage.StorageObjectPrefixWithHeight(cache.logID, s.massifHeight, otype)
 	if err != nil {
 		return "", fmt.Errorf("failed to compute prefix: %w", err)
 	}
 
-	// Add Arbor service prefix
 	var servicePrefix string
 	switch otype {
 	case massifstorage.ObjectMassifStart, massifstorage.ObjectMassifData, massifstorage.ObjectPathMassifs:
@@ -188,9 +207,7 @@ func (s *Store) ObjectPath(massifIndex uint32, otype massifstorage.ObjectType) (
 		return "", fmt.Errorf("unsupported object type: %v", otype)
 	}
 
-	// Combine service prefix with base format
 	fullPrefix := servicePrefix + basePrefix
-
 	return massifstorage.ObjectPath(fullPrefix, cache.logID, massifIndex, otype)
 }
 
@@ -211,6 +228,7 @@ func (s *Store) MassifReadN(ctx context.Context, massifIndex uint32, n int) ([]b
 		opts.RangeStart = 0
 		opts.RangeLength = int64(n)
 		if n == 0 {
+			// Preserve ranger behavior: treat 0 as "read all" rather than 1 byte.
 			opts.RangeLength = -1
 		}
 	} else {
@@ -222,7 +240,7 @@ func (s *Store) MassifReadN(ctx context.Context, massifIndex uint32, n int) ([]b
 		return nil, err
 	}
 
-	cache.massifs[massifIndex] = result.Data
+	cache.massifs[massifIndex] = cachedObject{data: result.Data, etag: result.ETag}
 	return result.Data, nil
 }
 
@@ -243,11 +261,12 @@ func (s *Store) CheckpointRead(ctx context.Context, massifIndex uint32) ([]byte,
 		return nil, err
 	}
 
-	cache.checkpoints[massifIndex] = result.Data
+	cache.checkpoints[massifIndex] = cachedObject{data: result.Data, etag: result.ETag}
 	return result.Data, nil
 }
 
-// Put delegates to the underlying writer to store massif or checkpoint data.
+// Put implements massifs.ObjectWriter using unconditional (or create-only) writes.
+// For consistent updates (If-Match), use PutWithETag.
 func (s *Store) Put(
 	ctx context.Context,
 	massifIndex uint32,
@@ -255,20 +274,39 @@ func (s *Store) Put(
 	data []byte,
 	failIfExists bool,
 ) error {
+	return s.PutWithETag(ctx, massifIndex, ty, data, failIfExists, "")
+}
+
+// PutWithETag writes the object with explicit conditional semantics.
+//
+// This method delegates to the underlying ObjectClient and updates the Store cache
+// (data + ETag) on success.
+func (s *Store) PutWithETag(
+	ctx context.Context,
+	massifIndex uint32,
+	ty massifstorage.ObjectType,
+	data []byte,
+	failIfExists bool,
+	etag string,
+) error {
 	cache, err := s.currentLog()
 	if err != nil {
 		return err
 	}
-	if err := cache.writer.Put(ctx, massifIndex, ty, data, failIfExists); err != nil {
+	if cache.writer == nil {
+		return fmt.Errorf("writer not initialized")
+	}
+
+	result, err := cache.writer.PutWithETag(ctx, massifIndex, ty, data, failIfExists, etag)
+	if err != nil {
 		return err
 	}
 
-	// Update cache after successful write, matching Azure implementation behavior
 	switch ty {
 	case massifstorage.ObjectMassifData:
-		cache.massifs[massifIndex] = data
+		cache.massifs[massifIndex] = cachedObject{data: data, etag: result.ETag}
 	case massifstorage.ObjectCheckpoint:
-		cache.checkpoints[massifIndex] = data
+		cache.checkpoints[massifIndex] = cachedObject{data: data, etag: result.ETag}
 	}
 
 	return nil
@@ -295,13 +333,11 @@ func (s *Store) ensureLog(logID massifstorage.LogID) (*logCache, error) {
 	cache := &logCache{
 		logID:       append(massifstorage.LogID{}, logID...),
 		writer:      writer,
-		massifs:     make(map[uint32][]byte),
-		checkpoints: make(map[uint32][]byte),
+		massifs:     make(map[uint32]cachedObject),
+		checkpoints: make(map[uint32]cachedObject),
 	}
 	s.logCaches[key] = cache
 	return cache, nil
 }
 
-// Errors returned from the underlying ObjectClient are expected to already
-// be mapped into massifstorage errors by the backend implementations (S3, R2,
-// etc.), so Store does not perform any additional HTTP-specific translation.
+

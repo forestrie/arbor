@@ -6,6 +6,7 @@ toolchain go1.24.4
 
 require (
 	github.com/datatrails/go-datatrails-common v0.30.0
+	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog-datatrails v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog-provider-testing v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
@@ -43,6 +44,7 @@ replace (
 	github.com/datatrails/go-datatrails-common => ../../_deps/go-datatrails-common
 	github.com/datatrails/go-datatrails-serialization/eventsv1 => ../../_deps/go-datatrails-serialization/eventsv1
 	github.com/datatrails/go-datatrails-simplehash => ../../_deps/go-datatrails-simplehash
+	github.com/forestrie/arbor/services/pkgs/s3storage => ../../pkgs/s3storage
 	github.com/forestrie/go-merklelog-azure => ../../_deps/go-merklelog-azure
 	github.com/forestrie/go-merklelog-datatrails => ../../_deps/go-merklelog-datatrails
 	github.com/forestrie/go-merklelog-fs => ../../_deps/go-merklelog-fs

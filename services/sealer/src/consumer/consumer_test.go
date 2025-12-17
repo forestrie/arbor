@@ -85,3 +85,24 @@ func TestParseLogIDFromObjectPath(t *testing.T) {
 		t.Fatalf("expected %s, got %s", logID, roundTrip)
 	}
 }
+
+func TestParseLogIDAndMassifHeightFromObjectPath(t *testing.T) {
+	logID := uuid.New()
+	key := fmt.Sprintf("v2/merklelog/massifs/14/%s/0000000000000000.log", logID.String())
+
+	b, h, err := parseLogIDAndMassifHeightFromObjectPath(key)
+	if err != nil {
+		t.Fatalf("parseLogIDAndMassifHeightFromObjectPath: %v", err)
+	}
+	if h != 14 {
+		t.Fatalf("expected massif height 14, got %d", h)
+	}
+
+	roundTrip, err := uuid.FromBytes(b)
+	if err != nil {
+		t.Fatalf("uuid.FromBytes: %v", err)
+	}
+	if roundTrip != logID {
+		t.Fatalf("expected %s, got %s", logID, roundTrip)
+	}
+}

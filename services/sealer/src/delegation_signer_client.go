@@ -1,19 +1,11 @@
 package sealer
 
 import (
-	"bytes"
-	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -36,43 +28,6 @@ func ParseDelegationCurve(raw string) (DelegationCurve, error) {
 	}
 }
 
-type DelegatedKeypair struct {
-	Curve DelegationCurve
-	X     [32]byte
-	Y     [32]byte
-}
-
-func GenerateDelegatedKeypair(curve DelegationCurve) (*DelegatedKeypair, error) {
-	switch curve {
-	case DelegationCurveSecp256r1:
-		priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("generate P-256 key: %w", err)
-		}
-		var x, y [32]byte
-		priv.PublicKey.X.FillBytes(x[:])
-		priv.PublicKey.Y.FillBytes(y[:])
-		return &DelegatedKeypair{Curve: curve, X: x, Y: y}, nil
-	case DelegationCurveSecp256k1:
-		priv, err := secp256k1.GeneratePrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("generate secp256k1 key: %w", err)
-		}
-		pub := priv.PubKey()
-		// Uncompressed SEC1: 0x04 || X(32) || Y(32)
-		uc := pub.SerializeUncompressed()
-		if len(uc) != 65 || uc[0] != 0x04 {
-			return nil, fmt.Errorf("unexpected secp256k1 uncompressed pubkey encoding")
-		}
-		var x, y [32]byte
-		copy(x[:], uc[1:33])
-		copy(y[:], uc[33:65])
-		return &DelegatedKeypair{Curve: curve, X: x, Y: y}, nil
-	default:
-		return nil, fmt.Errorf("unsupported curve %q", curve)
-	}
-}
-
 type DelegationCertificateInfo struct {
 	CertSHA256             string
 	CertSize               int
@@ -84,105 +39,12 @@ type DelegationCertificateInfo struct {
 	PayloadLogIDPrefix     string
 	PayloadMmrStart        string
 	PayloadMmrEnd          string
+	PayloadIssuedAt        string
+	PayloadExpiresAt       string
+	PayloadIssuedAtUnix    uint64
+	PayloadExpiresAtUnix   uint64
 	PayloadDelegatedCurve  string
 	SignatureSize          int
-}
-
-func RequestDelegationCertificate(
-	ctx context.Context,
-	httpClient *HTTPClient,
-	signerBaseURL string,
-	accessToken string,
-	curveRaw string,
-	logIDPrefix string,
-) (*DelegationCertificateInfo, error) {
-	if httpClient == nil {
-		return nil, fmt.Errorf("http client is nil")
-	}
-	if strings.TrimSpace(signerBaseURL) == "" {
-		return nil, fmt.Errorf("signer base URL is empty")
-	}
-	if strings.TrimSpace(accessToken) == "" {
-		return nil, fmt.Errorf("access token is empty")
-	}
-
-	curve, err := ParseDelegationCurve(curveRaw)
-	if err != nil {
-		return nil, err
-	}
-
-	keypair, err := GenerateDelegatedKeypair(curve)
-	if err != nil {
-		return nil, err
-	}
-
-	// Delegation request schema is string-keyed CBOR map.
-	// delegated_pubkey is a COSE_Key EC2 map with integer labels.
-	crv := int64(8) // secp256k1
-	if curve == DelegationCurveSecp256r1 {
-		crv = 1
-	}
-
-	coseKey := map[int64]any{
-		1:  int64(2),     // kty = EC2
-		-1: crv,          // crv
-		-2: keypair.X[:], // x (bstr, 32 bytes)
-		-3: keypair.Y[:], // y (bstr, 32 bytes)
-	}
-
-	reqMap := map[string]any{
-		"delegated_pubkey": coseKey,
-		// Always include constraints as a map (worker expects a map).
-		"constraints": map[string]any{},
-	}
-	if strings.TrimSpace(logIDPrefix) != "" {
-		reqMap["log_id_prefix"] = strings.TrimSpace(logIDPrefix)
-	}
-
-	body, err := cbor.Marshal(reqMap)
-	if err != nil {
-		return nil, fmt.Errorf("encode CBOR request: %w", err)
-	}
-
-	endpoint := strings.TrimRight(strings.TrimSpace(signerBaseURL), "/") + "/api/delegations"
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/cbor")
-
-	resp, err := httpClient.Do(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("call delegation signer: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBytes, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		// Attempt to produce a safe, useful error message.
-		preview := respBytes
-		if len(preview) > 1024 {
-			preview = preview[:1024]
-		}
-		return nil, fmt.Errorf(
-			"delegation signer returned status=%d content_type=%q body_len=%d body_preview_hex=%s",
-			resp.StatusCode,
-			resp.Header.Get("Content-Type"),
-			len(respBytes),
-			hex.EncodeToString(preview),
-		)
-	}
-
-	info, err := ParseDelegationCertificate(respBytes)
-	if err != nil {
-		return nil, err
-	}
-	return info, nil
 }
 
 func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, error) {
@@ -233,6 +95,11 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 	logID, _ := payloadMap[1].(string)
 	mmrStart := toNumericString(payloadMap[3])
 	mmrEnd := toNumericString(payloadMap[4])
+	issuedAt := toNumericString(payloadMap[8])
+	expiresAt := toNumericString(payloadMap[9])
+
+	issuedAtUnix, _ := asUint64(payloadMap[8])
+	expiresAtUnix, _ := asUint64(payloadMap[9])
 
 	delegationIDHex := ""
 	if did, ok := asBstr(payloadMap[10]); ok && len(did) > 0 {
@@ -286,6 +153,10 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 		PayloadLogIDPrefix:     logIDPrefix,
 		PayloadMmrStart:        mmrStart,
 		PayloadMmrEnd:          mmrEnd,
+		PayloadIssuedAt:        issuedAt,
+		PayloadExpiresAt:       expiresAt,
+		PayloadIssuedAtUnix:    issuedAtUnix,
+		PayloadExpiresAtUnix:   expiresAtUnix,
 		PayloadDelegatedCurve:  delegatedCurve,
 		SignatureSize:          len(signature),
 	}, nil
@@ -380,6 +251,48 @@ func asInt64(v any) (int64, bool) {
 			return 0, false
 		}
 		return int64(t), true
+	default:
+		return 0, false
+	}
+}
+
+func asUint64(v any) (uint64, bool) {
+	switch t := v.(type) {
+	case uint64:
+		return t, true
+	case uint32:
+		return uint64(t), true
+	case uint16:
+		return uint64(t), true
+	case uint8:
+		return uint64(t), true
+	case int64:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case int32:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case int16:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case int8:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case int:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case uint:
+		return uint64(t), true
 	default:
 		return 0, false
 	}

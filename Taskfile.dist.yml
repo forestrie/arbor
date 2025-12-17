@@ -57,6 +57,7 @@ tasks:
         go 1.24.4
         use (
           ./src
+          ../pkgs/s3storage
           ../_deps/go-datatrails-common
           ../_deps/go-datatrails-serialization/eventsv1
           ../_deps/go-datatrails-simplehash
@@ -81,6 +82,7 @@ tasks:
         go 1.24.4
         use (
           ./src
+          ../pkgs/s3storage
           ../_deps/go-datatrails-common
           ../_deps/go-datatrails-serialization/eventsv1
           ../_deps/go-datatrails-simplehash
@@ -133,4 +135,7 @@ tasks:
       - task: minio:start
       - |
         export GOWORK="$(pwd)/services/ranger/go.work"
-        cd services/ranger/src/tests && go test {{.GO_TEST_TAGS}}  -race  -v ./...
+        (cd services/ranger/src/tests && go test {{.GO_TEST_TAGS}} -race -v ./...)
+
+        export GOWORK="$(pwd)/services/sealer/go.work"
+        (cd services/sealer/src/tests && go test {{.GO_TEST_TAGS}} -race -v ./...)
