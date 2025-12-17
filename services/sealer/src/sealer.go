@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -87,7 +88,10 @@ func CheckpointLog(
 	if err != nil {
 		return fmt.Errorf("delegation signer setup failed: %w", err)
 	}
-	keyIdentifier := string(kid)
+	// RootSigner encodes keyIdentifier as a CBOR text string inside the cnf claim,
+	// so it MUST be valid UTF-8. The raw kid bytes are arbitrary, so we hex-encode
+	// them to get a stable, printable identifier.
+	keyIdentifier := hex.EncodeToString(kid)
 
 	// Build shared clients.
 	s3Client, err := s3.NewClientWithCredentials(
