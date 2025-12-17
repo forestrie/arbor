@@ -295,6 +295,11 @@ func isRetryableIOError(err error) bool {
 	if errors.Is(err, io.EOF) {
 		return true
 	}
+	// net/http can surface this unexported sentinel error when reusing pooled
+	// keep-alive connections. It's safe to retry with a fresh connection.
+	if strings.Contains(err.Error(), "server closed idle connection") {
+		return true
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
 		return true
