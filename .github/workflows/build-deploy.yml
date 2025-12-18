@@ -85,6 +85,12 @@ jobs:
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
         run: task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
+      - name: Build Forester Image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: task forester:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+
       - name: Push Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
@@ -99,6 +105,11 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
         run: task sealer:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Push Forester image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+        run: task forester:push IMAGE_TAG=${IMAGE_TAG}
 
       - name: Generate GitHub App Token
         id: app-token

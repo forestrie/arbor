@@ -20,6 +20,9 @@ includes:
   sealer:
     taskfile: taskfiles/service-sealer.yml
     dir: .
+  forester:
+    taskfile: taskfiles/service-forester.yml
+    dir: .
 tasks:
   registry-auth:
     desc: Configure Docker authentication for Artifact Registry
@@ -79,6 +82,29 @@ tasks:
 
         # Always (re)generate go.work since it's gitignored and should match the current layout.
         cat <<EOF > services/sealer/go.work
+        go 1.24.4
+        use (
+          ./src
+          ../pkgs/s3storage
+          ../_deps/go-datatrails-common
+          ../_deps/go-datatrails-serialization/eventsv1
+          ../_deps/go-datatrails-simplehash
+          ../_deps/go-merklelog-azure
+          ../_deps/go-merklelog-datatrails
+          ../_deps/go-merklelog-fs
+          ../_deps/go-merklelog-provider-testing
+          ../_deps/go-merklelog/massifs
+          ../_deps/go-merklelog/mmr
+          ../_deps/go-sigv4
+        )
+        EOF
+
+        # bootstrap forester (shared clones under services/_deps)
+        mkdir -p services/_deps
+        (cd services/forester && sh -c "$GIT_BOOTSTRAP_SH" - dirs . && sh -c "$GIT_BOOTSTRAP_SH" - clone . && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
+
+        # Always (re)generate go.work since it's gitignored and should match the current layout.
+        cat <<EOF > services/forester/go.work
         go 1.24.4
         use (
           ./src
