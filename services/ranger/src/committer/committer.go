@@ -7,11 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
-	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog/massifs"
 	"github.com/forestrie/go-merklelog/massifs/snowflakeid"
@@ -125,28 +124,6 @@ func NewR2Committer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *sl
 	}, nil
 }
 
-// nextIDTimestampWithRetry wraps the underlying snowflake ID generator so that
-// if the generator is temporarily overloaded, we sleep for a minimal interval
-// and retry once. If the second attempt fails, that error is returned.
-func (c *Committer) nextIDTimestampWithRetry(ctx context.Context) (uint64, error) {
-	idTimestamp, err := c.idState.NextID()
-	if err == nil {
-		return idTimestamp, nil
-	}
-
-	if !errors.Is(err, snowflakeid.ErrOverloaded) {
-		return 0, err
-	}
-
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case <-time.After(time.Millisecond):
-	}
-
-	return c.idState.NextID()
-}
-
 // logNotice logs a message at the NOTICE level (between INFO and WARN).
 // When the logger level is set to NOTICE, it excludes INFO and below, but includes WARN and ERROR.
 func (c *Committer) logNotice(ctx context.Context, msg string, args ...any) {
@@ -214,7 +191,7 @@ func (c *Committer) ProcessBatch(
 			continue
 		}
 
-		idTimestamp, err := c.nextIDTimestampWithRetry(ctx)
+		idTimestamp, err := mc.NextIDTimestamp(ctx, c.idState)
 		if err != nil {
 			err = fmt.Errorf("failed to generate id timestamp: %w", err)
 			batch.Errs[msgIdx] = err
@@ -236,15 +213,7 @@ func (c *Committer) ProcessBatch(
 			continue
 		}
 
-		mmrIndex, err = mc.AddHashedLeaf(
-			sha256.New(),
-			idTimestamp,
-			parsed.ExtraBytes0, // only first 24 bytes used from this in current format
-			parsed.LogID,
-			parsed.Hash,
-			leafHash,
-			parsed.ExtraBytes1,
-		)
+		mmrIndex, err = mc.AddIndexedEntry(leafHash)
 		if errors.Is(err, massifs.ErrMassifFull) {
 			// Commit the current massif; all items up to and including i are now
 			// durably recorded. lastCommit tracks the ByLogID index of the first
@@ -265,14 +234,8 @@ func (c *Committer) ProcessBatch(
 			if err != nil {
 				return lastCommit, fmt.Errorf("failed to get append context after rollover: %w", err)
 			}
-			_, err = mc.AddHashedLeaf(
-				sha256.New(),
-				idTimestamp,
-				idTimestampBytes,
-				parsed.LogID,
-				parsed.Hash,
-				leafHash,
-			)
+
+			mmrIndex, err = mc.AddIndexedEntry(leafHash)
 			// fall through to handle err below
 		}
 		if err != nil {
@@ -282,6 +245,19 @@ func (c *Committer) ProcessBatch(
 			// message
 			continue
 		}
+
+		// Update the v2 index structures (Urkle + Bloom) corresponding to the leaf we just appended.
+		// Note: IndexLeaf stores parsed.Hash (content-hash) directly in the trie valueBytes,
+		// not the MMR leaf hash H(idtimestamp || content-hash). This enables direct verification
+		// of (idtimestamp, content) pair exclusion without needing to check the MMR structure.
+		if err := mc.IndexLeaf(idTimestamp, parsed.Hash, parsed.ExtraBytes0, parsed.ExtraBytes1); err != nil {
+			leafErr := fmt.Errorf("failed to update v2 index: %w", err)
+			batch.Errs[msgIdx] = leafErr
+			return lastCommit, leafErr
+		}
+
+		// Update the massif header's last id timestamp.
+		mc.SetLastIDTimestamp(idTimestamp)
 	}
 
 	// Final commit of any remaining uncommitted items in this range.

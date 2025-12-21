@@ -167,7 +167,7 @@ func CheckpointLog(
 		}
 
 		// Reject legacy massif formats.
-		if mc.Start.Version != 1 {
+		if mc.Start.Version != massifs.MassifCurrentVersion {
 			return fmt.Errorf("legacy massif version %d detected (no backward compatibility)", mc.Start.Version)
 		}
 		if mc.Start.MassifHeight != massifHeight {

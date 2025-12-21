@@ -54,3 +54,10 @@ func TestMassifCommitter_threemassifs(t *testing.T) {
 	factory := NewBuilderFactory(tc)
 	providers.StorageMassifCommitterThreeMassifsTest(tc, factory)
 }
+
+func TestMassifIndexV2_roundtrip(t *testing.T) {
+	logger.New("TEST")
+	tc := NewTestContext(t, mmrtesting.WithTestLabelPrefix("ranger_r2_indexv2_roundtrip"))
+	factory := NewBuilderFactory(tc)
+	providers.StorageMassifV2IndexRoundTripTest(tc, factory)
+}
