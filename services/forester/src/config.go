@@ -26,16 +26,20 @@ type Config struct {
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 
-	// R2 Access Configuration (for reading committed massifs from R2_MMRS via S3 API)
-	R2WriteURL    string
-	R2WriterToken string
+	// R2 access configuration (read-only; Forester never writes R2 objects).
+	//
+	// R2PublicReadURL is the HTTPS endpoint used to read massif data and
+	// checkpoints via the S3-compatible API and must be derived from
+	// R2_PUBLIC_URL.
+	R2PublicReadURL string
 
-	// AWS Credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
+	// AWS credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2).
+	// These are used for authenticated *read* access only.
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSRegion          string // Defaults to "auto" for Cloudflare R2
 
-	// Cloudflare KV configuration (wired for future use; not required yet)
+	// Cloudflare KV configuration (for writing receipt cache entries).
 	CloudflareAccountID         string
 	RangerMMRIndexNamespaceID   string
 	RangerMMRMassifsNamespaceID string
@@ -116,31 +120,32 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
-	cfg := Config{
-		Port:                        getEnvOrDefault("PORT", "9090"),
-		LogLevel:                    getEnvOrDefault("LOG_LEVEL", "info"),
-		ShutdownTimeout:             getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:                    os.Getenv("FORESTER_QUEUE_URL"),
-		QueueAPIToken:               os.Getenv("FORESTER_QUEUE_API_TOKEN"),
-		QueueBatchSize:              getInt("FORESTER_QUEUE_BATCH_SIZE", 1),
-		PollInterval:                getDuration("POLL_INTERVAL", 5*time.Second),
-		VisibilityTimeout:           getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
-		R2WriteURL:                  os.Getenv("R2_WRITE_URL"),
-		R2WriterToken:               os.Getenv("R2_WRITER_TOKEN"),
-		AWSAccessKeyID:              os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey:          getEnvOrDefault("AWS_SECRET_ACCESS_KEY", ""),
-		AWSRegion:                   getEnvOrDefault("AWS_REGION", "auto"),
-		CloudflareAccountID:         os.Getenv("CLOUDFLARE_ACCOUNT_ID"),
-		RangerMMRIndexNamespaceID:   os.Getenv("RANGER_MMR_INDEX_NAMESPACE_ID"),
-		RangerMMRMassifsNamespaceID: os.Getenv("RANGER_MMR_MASSIFS_NAMESPACE_ID"),
-		KVAPIToken:                  os.Getenv("FORESTER_KV_API_TOKEN"),
-		ReceiptKVExpirationTTLSeconds: getInt("FORESTER_RECEIPT_KV_TTL_SECONDS", 0),
-	}
+	// Forester only reads existing massif and checkpoint objects from R2 via the
+	// S3-compatible API; it never writes them. R2_PUBLIC_URL must be set to the
+	// public HTTPS endpoint for the massif bucket.
+	r2PublicURL := os.Getenv("R2_PUBLIC_URL")
 
-	// Automatically derive AWS_SECRET_ACCESS_KEY from R2_WRITER_TOKEN if not explicitly set.
-	if cfg.AWSSecretAccessKey == "" && cfg.R2WriterToken != "" {
-		sum := sha256.Sum256([]byte(cfg.R2WriterToken))
-		cfg.AWSSecretAccessKey = hex.EncodeToString(sum[:])
+	// Forester uses FORESTER_KV_API_TOKEN as its Cloudflare KV writer token.
+	kvAPIToken := os.Getenv("FORESTER_KV_API_TOKEN")
+
+	cfg := Config{
+		Port:                          getEnvOrDefault("PORT", "9090"),
+		LogLevel:                      getEnvOrDefault("LOG_LEVEL", "info"),
+		ShutdownTimeout:               getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		QueueURL:                      os.Getenv("FORESTER_QUEUE_URL"),
+		QueueAPIToken:                 os.Getenv("FORESTER_QUEUE_API_TOKEN"),
+		QueueBatchSize:                getInt("FORESTER_QUEUE_BATCH_SIZE", 1),
+		PollInterval:                  getDuration("POLL_INTERVAL", 5*time.Second),
+		VisibilityTimeout:             getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
+		R2PublicReadURL:               r2PublicURL,
+		AWSAccessKeyID:                os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:            getEnvOrDefault("AWS_SECRET_ACCESS_KEY", ""),
+		AWSRegion:                     getEnvOrDefault("AWS_REGION", "auto"),
+		CloudflareAccountID:           os.Getenv("CLOUDFLARE_ACCOUNT_ID"),
+		RangerMMRIndexNamespaceID:     os.Getenv("RANGER_MMR_INDEX_NAMESPACE_ID"),
+		RangerMMRMassifsNamespaceID:   os.Getenv("RANGER_MMR_MASSIFS_NAMESPACE_ID"),
+		KVAPIToken:                    kvAPIToken,
+		ReceiptKVExpirationTTLSeconds: getInt("FORESTER_RECEIPT_KV_TTL_SECONDS", 0),
 	}
 
 	return cfg
@@ -153,8 +158,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 
-	logConfigValue(logger, "R2_WRITE_URL", c.R2WriteURL)
-	logSecretDigest(logger, "R2_WRITER_TOKEN", c.R2WriterToken)
+	logConfigValue(logger, "R2_PUBLIC_URL", c.R2PublicReadURL)
 	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
 	logSecretDigest(logger, "AWS_SECRET_ACCESS_KEY", c.AWSSecretAccessKey)
 	logConfigValue(logger, "AWS_REGION", c.AWSRegion)
@@ -181,11 +185,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("FORESTER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
 
-	if c.R2WriteURL == "" {
-		return fmt.Errorf("R2_WRITE_URL is required")
-	}
-	if c.R2WriterToken == "" {
-		return fmt.Errorf("R2_WRITER_TOKEN is required")
+	if c.R2PublicReadURL == "" {
+		return fmt.Errorf("R2_PUBLIC_URL is required for reading massifs")
 	}
 	if c.AWSAccessKeyID == "" {
 		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")

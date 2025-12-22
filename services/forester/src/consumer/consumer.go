@@ -234,8 +234,8 @@ func (q *QueueConsumer) collectReceiptsFromMassif(ctx context.Context, objectKey
 
 	// Build an object reader for this massifHeight.
 	factory, err := merklelog.NewS3FactoryWithCredentials(
-		q.cfg.R2WriteURL,
-		q.cfg.R2WriterToken,
+		q.cfg.R2PublicReadURL,
+		"", // no bearer token; Forester uses AWS credentials for authenticated reads
 		q.cfg.AWSAccessKeyID,
 		q.cfg.AWSSecretAccessKey,
 		q.cfg.AWSRegion,
