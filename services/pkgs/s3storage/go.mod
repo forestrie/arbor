@@ -5,7 +5,9 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
+	github.com/forestrie/go-merklelog/bloom v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
+	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000
 )
 
@@ -23,7 +25,9 @@ require (
 )
 
 replace (
+	github.com/forestrie/go-merklelog/bloom => ../../_deps/go-merklelog/bloom
 	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs
 	github.com/forestrie/go-merklelog/mmr => ../../_deps/go-merklelog/mmr
+	github.com/forestrie/go-merklelog/urkle => ../../_deps/go-merklelog/urkle
 	github.com/forestrie/go-sigv4 => ../../_deps/go-sigv4
 )
