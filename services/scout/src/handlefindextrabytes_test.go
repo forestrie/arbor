@@ -29,7 +29,7 @@ func TestHandleFindExtraBytes_Success(t *testing.T) {
 	)
 
 	// Test successful request with all parameters
-	url := ts.URL + "/api/logs/" + logID + "/find-extrabytes/" + extraBytes + "?massif-range=3&fence-index=50&idtimestamp=0x123456789abcdef0"
+	url := ts.URL + "/api/logs/" + logID + "/find-extrabytes/" + extraBytes + "?massif-range=3&mmr-index=50&idtimestamp=0x123456789abcdef0"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatalf("NewRequest failed: %v", err)
@@ -83,7 +83,7 @@ func TestHandleFindExtraBytes_Success(t *testing.T) {
 	}
 
 	if out.MassifIndex != 0 {
-		t.Errorf("expected massifIndex 0 (computed from fence-index 50), got %d", out.MassifIndex)
+		t.Errorf("expected massifIndex 0 (computed from mmr-index 50), got %d", out.MassifIndex)
 	}
 
 	expectedTimestamp := uint64(0x123456789abcdef0)
@@ -151,7 +151,7 @@ func TestHandleFindExtraBytes_WithoutOptionalParams(t *testing.T) {
 	}
 
 	if out.MassifIndex != 0 {
-		t.Errorf("expected massifIndex 0 (no fence index), got %d", out.MassifIndex)
+		t.Errorf("expected massifIndex 0 (no mmr-index), got %d", out.MassifIndex)
 	}
 }
 

@@ -250,7 +250,7 @@ func (c *Committer) ProcessBatch(
 		// Note: IndexLeaf stores parsed.Hash (content-hash) directly in the trie valueBytes,
 		// not the MMR leaf hash H(idtimestamp || content-hash). This enables direct verification
 		// of (idtimestamp, content) pair exclusion without needing to check the MMR structure.
-		if err := mc.IndexLeaf(idTimestamp, parsed.Hash, parsed.ExtraBytes0, parsed.ExtraBytes1); err != nil {
+		if err := mc.IndexLeaf(idTimestamp, parsed.Hash); err != nil {
 			leafErr := fmt.Errorf("failed to update v2 index: %w", err)
 			batch.Errs[msgIdx] = leafErr
 			return lastCommit, leafErr

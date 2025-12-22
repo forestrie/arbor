@@ -4,6 +4,7 @@
 package tests
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
@@ -62,7 +63,7 @@ func Test_QueueConsumer_singleMessage(t *testing.T) {
 		},
 		httpClient, log, comm)
 
-	m1 := makeQueueMessage1(tc, logID, 0, []byte("hello ranger"))
+	m1 := makeQueueMessage1(tc, logID, []byte("hello ranger"))
 	qbatch := consumer.QueuePullResult{
 		Messages: []consumer.QueueMessage{
 			m1,
@@ -277,7 +278,7 @@ func Test_QueueConsumer_batchSizes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			messages := make([]consumer.QueueMessage, 0, tt.messageCount)
 			for i := 0; i < tt.messageCount; i++ {
-				messages = append(messages, makeQueueMessage1(tc, logID, uint64(i), []byte("hello ranger")))
+				messages = append(messages, makeQueueMessage1(tc, logID, []byte(fmt.Sprintf("hello ranger %d", i))))
 			}
 
 			qbatch := consumer.QueuePullResult{
@@ -500,12 +501,12 @@ func Test_QueueConsumer_massifBoundaries(t *testing.T) {
 				},
 				httpClient, log, comm)
 
-			var fenceIndex uint64
+			var seq uint64
 			for batchIdx, count := range tt.batches {
 				messages := make([]consumer.QueueMessage, 0, count)
 				for i := 0; i < count; i++ {
-					messages = append(messages, makeQueueMessage1(tc, logID, fenceIndex, []byte("hello ranger")))
-					fenceIndex++
+					messages = append(messages, makeQueueMessage1(tc, logID, []byte(fmt.Sprintf("hello ranger %d", seq))))
+					seq++
 				}
 
 				qbatch := consumer.QueuePullResult{Messages: messages}
@@ -569,7 +570,7 @@ func makeMessagesForLog(tc *TestContext, logID massifstorage.LogID, count int) [
 	messages := make([]consumer.QueueMessage, 0, count)
 	for i := 0; i < count; i++ {
 		content := []byte(g.MultiWordString(4))
-		messages = append(messages, makeQueueMessage1(tc, logID, uint64(i), content))
+		messages = append(messages, makeQueueMessage1(tc, logID, content))
 	}
 
 	return messages

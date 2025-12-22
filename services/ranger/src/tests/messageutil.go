@@ -23,7 +23,6 @@ import (
 func makeQueueMessage1(
 	tc *TestContext,
 	logID massifstorage.LogID,
-	fenceIndex uint64,
 	content []byte,
 ) consumer.QueueMessage {
 	var err error
@@ -57,7 +56,7 @@ func makeQueueMessage1(
 		Bucket:    "canopy-dev-1-leaves",
 		EventTime: g.SinceLastJitter().UTC().Truncate(time.Millisecond).Format(time.RFC3339),
 		Object: consumer.R2Object{
-			Key:  fmt.Sprintf("logs/%s/leaves/%d/%s", logIDStr, fenceIndex, contentHashStr),
+			Key:  fmt.Sprintf("logs/%s/leaves/%s", logIDStr, contentHashStr),
 			Size: int64(len(content)),
 			ETag: etagStr,
 		},

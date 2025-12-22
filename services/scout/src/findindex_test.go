@@ -97,9 +97,9 @@ func TestParseQueryParams(t *testing.T) {
 	}{
 		{
 			name:  "all parameters",
-			query: "fence-index=100&massif-range=5&idtimestamp=0x123456789abcdef0",
+			query: "mmr-index=100&massif-range=5&idtimestamp=0x123456789abcdef0",
 			expected: FindIndexParams{
-				FenceIndex:   uintPtr(100),
+				MinMMRIndex:  uintPtr(100),
 				MassifRange:  5,
 				IDTimestamp:  uintPtr(0x123456789abcdef0),
 			},
@@ -112,16 +112,16 @@ func TestParseQueryParams(t *testing.T) {
 			},
 		},
 		{
-			name:  "with fence index only",
-			query: "massif-range=1&fence-index=50",
+			name:  "with mmr index only",
+			query: "massif-range=1&mmr-index=50",
 			expected: FindIndexParams{
-				FenceIndex:  uintPtr(50),
+				MinMMRIndex: uintPtr(50),
 				MassifRange: 1,
 			},
 		},
 		{
 			name:        "missing massif-range",
-			query:       "fence-index=100",
+			query:       "mmr-index=100",
 			expectError: true,
 		},
 		{
@@ -130,8 +130,8 @@ func TestParseQueryParams(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "invalid fence-index",
-			query:       "massif-range=1&fence-index=invalid",
+			name:        "invalid mmr-index",
+			query:       "massif-range=1&mmr-index=invalid",
 			expectError: true,
 		},
 		{
@@ -170,8 +170,8 @@ func TestParseQueryParams(t *testing.T) {
 				t.Errorf("expected MassifRange %d, got %d", tc.expected.MassifRange, params.MassifRange)
 			}
 
-			if !equalUintPtr(params.FenceIndex, tc.expected.FenceIndex) {
-				t.Errorf("expected FenceIndex %v, got %v", tc.expected.FenceIndex, params.FenceIndex)
+			if !equalUintPtr(params.MinMMRIndex, tc.expected.MinMMRIndex) {
+				t.Errorf("expected MinMMRIndex %v, got %v", tc.expected.MinMMRIndex, params.MinMMRIndex)
 			}
 
 			if !equalUintPtr(params.IDTimestamp, tc.expected.IDTimestamp) {
@@ -410,33 +410,33 @@ func TestParseHexUint64(t *testing.T) {
 func TestComputeStartMassifIndex(t *testing.T) {
 	testCases := []struct {
 		name        string
-		fenceIndex  *uint64
+		minMMRIndex *uint64
 		expected    uint64
 	}{
 		{
-			name:     "nil fence index",
+			name:     "nil mmr index",
 			expected: 0,
 		},
 		{
-			name:       "zero fence index",
-			fenceIndex: uintPtr(0),
+			name:        "zero mmr index",
+			minMMRIndex: uintPtr(0),
 			expected:   0,
 		},
 		{
-			name:       "small fence index",
-			fenceIndex: uintPtr(100),
+			name:        "small mmr index",
+			minMMRIndex: uintPtr(100),
 			expected:   0, // 100 / 1024 = 0
 		},
 		{
-			name:       "large fence index",
-			fenceIndex: uintPtr(2048),
+			name:        "large mmr index",
+			minMMRIndex: uintPtr(2048),
 			expected:   2, // 2048 / 1024 = 2
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := computeStartMassifIndex(tc.fenceIndex)
+			result := computeStartMassifIndex(tc.minMMRIndex)
 			if result != tc.expected {
 				t.Errorf("expected %d, got %d", tc.expected, result)
 			}

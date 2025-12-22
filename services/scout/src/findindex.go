@@ -12,7 +12,7 @@ import (
 // FindIndexParams holds common parameters for find operations.
 type FindIndexParams struct {
 	LogID       []byte  // Decoded log ID bytes
-	FenceIndex  *uint64 // Optional minimum mmrIndex to start search from
+	MinMMRIndex *uint64 // Optional minimum mmrIndex to start search from
 	MassifRange uint64  // Minimum number of massifs to search
 	IDTimestamp *uint64 // Optional timestamp for find operations
 }
@@ -63,13 +63,13 @@ func decodeLogID(logIDHex string) ([]byte, error) {
 func parseQueryParams(values url.Values) (FindIndexParams, error) {
 	var params FindIndexParams
 
-	// Parse optional fence-index
-	if fenceStr := values.Get("fence-index"); fenceStr != "" {
-		fence, err := strconv.ParseUint(fenceStr, 10, 64)
+	// Parse optional mmr-index
+	if mmrIndexStr := values.Get("mmr-index"); mmrIndexStr != "" {
+		min, err := strconv.ParseUint(mmrIndexStr, 10, 64)
 		if err != nil {
-			return params, fmt.Errorf("invalid fence-index: %w", err)
+			return params, fmt.Errorf("invalid mmr-index: %w", err)
 		}
-		params.FenceIndex = &fence
+		params.MinMMRIndex = &min
 	}
 
 	// Parse massif-range (required)
@@ -133,14 +133,14 @@ func decodeAndValidateExtraBytes(extraBytes string) ([]byte, error) {
 }
 
 // computeStartMassifIndex computes the first massif index to start the search from
-// based on the fence index. This is a placeholder implementation.
-func computeStartMassifIndex(fenceIndex *uint64) uint64 {
-	if fenceIndex == nil {
+// based on the provided minimum MMR index. This is a placeholder implementation.
+func computeStartMassifIndex(minMMRIndex *uint64) uint64 {
+	if minMMRIndex == nil {
 		return 0
 	}
-	// TODO: Implement actual massif index computation based on fence index
+	// TODO: Implement actual massif index computation based on the minimum MMR index
 	// For now, assume each massif contains 1024 entries
-	return *fenceIndex / 1024
+	return *minMMRIndex / 1024
 }
 
 // setCacheControlHeaders sets cache control headers indicating the response

@@ -19,7 +19,6 @@ type R2Object struct {
 // ProcessedNotification contains extracted data from R2 notification.
 type ProcessedNotification struct {
 	LogID       []byte
-	FenceIndex  uint64
 	ExtraBytes0 []byte
 	ExtraBytes1 []byte
 	Hash        []byte

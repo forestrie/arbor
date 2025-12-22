@@ -267,7 +267,7 @@ func (q *QueueConsumer) ProcessBatchWithCommitter(ctx context.Context, qbatch *Q
 		if cmp := bytes.Compare(qbatch.Decoded[li].LogID, qbatch.Decoded[lj].LogID); cmp != 0 {
 			return cmp < 0
 		}
-		return qbatch.Decoded[li].FenceIndex < qbatch.Decoded[lj].FenceIndex
+		return bytes.Compare(qbatch.Decoded[li].Hash, qbatch.Decoded[lj].Hash) < 0
 	})
 
 	var (
@@ -378,7 +378,7 @@ func (q *QueueConsumer) ackBatch(ctx context.Context, qbatch *QueuePullResult, s
 	q.logger.Info("ackBatch", "acked", end-start)
 }
 
-// processObjectPath extracts logId, fenceIndex, and hash from R2 object path.
+// processObjectPath extracts logId and content hash from R2 object path.
 func processObjectPath(note *ProcessedNotification, path string) error {
 	var err error
 
@@ -386,8 +386,8 @@ func processObjectPath(note *ProcessedNotification, path string) error {
 	note.Path = cleanPath
 	parts := strings.Split(cleanPath, "/")
 
-	if len(parts) < 5 {
-		return fmt.Errorf("invalid path format: expected logs/{logId}/leaves/{fenceIndex}/{hash}, got %d segments", len(parts))
+	if len(parts) < 4 {
+		return fmt.Errorf("invalid path format: expected logs/{logId}/leaves/{hash}, got %d segments", len(parts))
 	}
 
 	if parts[0] != "logs" {
@@ -403,8 +403,7 @@ func processObjectPath(note *ProcessedNotification, path string) error {
 	}
 	note.LogID = uid[:]
 
-	// fenceIndexStr := parts[3]
-	hash := parts[4]
+	hash := parts[3]
 
 	if len(hash) != 64 {
 		return fmt.Errorf("invalid hash length: expected 64 hex characters, got %d", len(hash))
@@ -412,17 +411,6 @@ func processObjectPath(note *ProcessedNotification, path string) error {
 	if note.Hash, err = hex.DecodeString(hash); err != nil {
 		return fmt.Errorf("invalid hash format: not hex-encoded: %w", err)
 	}
-
-	// i, err := strconv.ParseInt(fenceIndexStr, 10, 64)
-	// if err != nil {
-	// 	return fmt.Errorf("invalid fenceIndex %q: %w", fenceIndexStr, err)
-	// }
-	// note.FenceIndex = uint64(i)
-
-	// Compute extraBytes0 and extraBytes1 to match TypeScript encoding:
-	// extraBytes0 = 32 bytes: 16 bytes zeros + 8 bytes (fenceIndex as big-endian uint64)
-	// extraBytes1 = 32 bytes (full hash)
-	copy(note.ExtraBytes0, note.Hash)
 
 	return nil
 }

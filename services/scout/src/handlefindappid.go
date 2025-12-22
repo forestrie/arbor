@@ -16,18 +16,18 @@ type FindAppIDResponse struct {
 // handleFindAppID implements the FindAppID endpoint.
 //
 // The endpoint searches for entries with a specific application ID within a log.
-// URL pattern: /api/logs/{logId}/find-appid/{appId}?fence-index={fenceIndex}&massif-range={range}
+// URL pattern: /api/logs/{logId}/find-appid/{appId}?mmr-index={minMmrIndex}&massif-range={range}
 //
 // Parameters:
 //   - logId: The identifier of the log to search in
 //   - appId: A 32-byte hex-encoded application identifier to search for
-//   - fence-index (optional): Minimum mmrIndex to start the search from
+//   - mmr-index (optional): Minimum mmrIndex to start the search from
 //   - massif-range: Minimum number of massifs to search (must be >= 1)
 //
-// The handler computes the starting massif index based on the fence index and
-// ensures at least the specified number of massifs are searched. If the fence
-// index is greater than the first index in the implied start massif, at least
-// two massifs will be read.
+// The handler computes the starting massif index based on the provided
+// `mmr-index` and ensures at least the specified number of massifs are searched.
+// If the `mmr-index` is greater than the first index in the implied start
+// massif, at least two massifs will be read.
 //
 // Response includes cache control headers indicating the response can be cached
 // indefinitely since log entries are immutable.
@@ -72,8 +72,8 @@ func (a API) handleFindAppID(w http.ResponseWriter, r *http.Request) {
 	}
 	params.LogID = logIDBytes
 
-	// Compute the starting massif index based on fence index
-	startMassifIndex := computeStartMassifIndex(params.FenceIndex)
+	// Compute the starting massif index based on the optional mmr-index
+	startMassifIndex := computeStartMassifIndex(params.MinMMRIndex)
 
 	// TODO: Implement actual search logic
 	// For now, return a stub response indicating not found

@@ -26,11 +26,23 @@ type Config struct {
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 
+	// R2 Access Configuration (for reading committed massifs from R2_MMRS via S3 API)
+	R2WriteURL    string
+	R2WriterToken string
+
+	// AWS Credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
+	AWSAccessKeyID     string
+	AWSSecretAccessKey string
+	AWSRegion          string // Defaults to "auto" for Cloudflare R2
+
 	// Cloudflare KV configuration (wired for future use; not required yet)
 	CloudflareAccountID         string
 	RangerMMRIndexNamespaceID   string
 	RangerMMRMassifsNamespaceID string
 	KVAPIToken                  string
+
+	// Receipt cache behavior
+	ReceiptKVExpirationTTLSeconds int // 0 => no TTL
 }
 
 // LevelNotice is a custom log level between INFO (0) and WARN (4).
@@ -113,10 +125,22 @@ func LoadConfig() Config {
 		QueueBatchSize:              getInt("FORESTER_QUEUE_BATCH_SIZE", 1),
 		PollInterval:                getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout:           getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
+		R2WriteURL:                  os.Getenv("R2_WRITE_URL"),
+		R2WriterToken:               os.Getenv("R2_WRITER_TOKEN"),
+		AWSAccessKeyID:              os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:          getEnvOrDefault("AWS_SECRET_ACCESS_KEY", ""),
+		AWSRegion:                   getEnvOrDefault("AWS_REGION", "auto"),
 		CloudflareAccountID:         os.Getenv("CLOUDFLARE_ACCOUNT_ID"),
 		RangerMMRIndexNamespaceID:   os.Getenv("RANGER_MMR_INDEX_NAMESPACE_ID"),
 		RangerMMRMassifsNamespaceID: os.Getenv("RANGER_MMR_MASSIFS_NAMESPACE_ID"),
 		KVAPIToken:                  os.Getenv("FORESTER_KV_API_TOKEN"),
+		ReceiptKVExpirationTTLSeconds: getInt("FORESTER_RECEIPT_KV_TTL_SECONDS", 0),
+	}
+
+	// Automatically derive AWS_SECRET_ACCESS_KEY from R2_WRITER_TOKEN if not explicitly set.
+	if cfg.AWSSecretAccessKey == "" && cfg.R2WriterToken != "" {
+		sum := sha256.Sum256([]byte(cfg.R2WriterToken))
+		cfg.AWSSecretAccessKey = hex.EncodeToString(sum[:])
 	}
 
 	return cfg
@@ -129,10 +153,17 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 
+	logConfigValue(logger, "R2_WRITE_URL", c.R2WriteURL)
+	logSecretDigest(logger, "R2_WRITER_TOKEN", c.R2WriterToken)
+	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
+	logSecretDigest(logger, "AWS_SECRET_ACCESS_KEY", c.AWSSecretAccessKey)
+	logConfigValue(logger, "AWS_REGION", c.AWSRegion)
+
 	logConfigValue(logger, "CLOUDFLARE_ACCOUNT_ID", c.CloudflareAccountID)
 	logConfigValue(logger, "RANGER_MMR_INDEX_NAMESPACE_ID", c.RangerMMRIndexNamespaceID)
 	logConfigValue(logger, "RANGER_MMR_MASSIFS_NAMESPACE_ID", c.RangerMMRMassifsNamespaceID)
 	logSecretDigest(logger, "FORESTER_KV_API_TOKEN", c.KVAPIToken)
+	logConfigValue(logger, "FORESTER_RECEIPT_KV_TTL_SECONDS", c.ReceiptKVExpirationTTLSeconds)
 }
 
 // Validate checks that all required configuration is present.
@@ -150,7 +181,28 @@ func (c Config) Validate() error {
 		return fmt.Errorf("FORESTER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
 
-	// KV configuration is intentionally not required yet (future work).
+	if c.R2WriteURL == "" {
+		return fmt.Errorf("R2_WRITE_URL is required")
+	}
+	if c.R2WriterToken == "" {
+		return fmt.Errorf("R2_WRITER_TOKEN is required")
+	}
+	if c.AWSAccessKeyID == "" {
+		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")
+	}
+	if c.AWSSecretAccessKey == "" {
+		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing")
+	}
+	if c.CloudflareAccountID == "" {
+		return fmt.Errorf("CLOUDFLARE_ACCOUNT_ID is required")
+	}
+	if c.RangerMMRIndexNamespaceID == "" {
+		return fmt.Errorf("RANGER_MMR_INDEX_NAMESPACE_ID is required")
+	}
+	if c.KVAPIToken == "" {
+		return fmt.Errorf("FORESTER_KV_API_TOKEN is required")
+	}
+
 	return nil
 }
 

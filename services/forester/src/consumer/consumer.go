@@ -3,16 +3,23 @@ package consumer
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/forestrie/arbor/services/forester"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
+	"github.com/forestrie/go-merklelog/massifs"
+	"github.com/forestrie/go-merklelog/mmr"
+	"github.com/forestrie/go-merklelog/urkle"
 )
 
 // QueueConsumer coordinates Cloudflare Queue message consumption.
@@ -20,6 +27,32 @@ type QueueConsumer struct {
 	cfg        forester.Config
 	httpClient *forester.HTTPClient
 	logger     *slog.Logger
+}
+
+type kvBulkEntry struct {
+	Key           string `json:"key"`
+	Value         string `json:"value"`
+	ExpirationTTL *int   `json:"expiration_ttl,omitempty"`
+}
+
+// receiptCacheEntryV1 is the in-memory representation of a KV cache value
+// for ranger/v1/{logId}/latest/{contentHash}.
+//
+// Note: we keep numeric types here for easy comparison (latest-wins), but we
+// serialize uint64 values as decimal strings when writing to KV to avoid
+// consumers accidentally parsing them as IEEE-754 numbers.
+type receiptCacheEntryV1 struct {
+	MassifHeight uint8
+	MMRIndex     uint64
+	IDTimestamp  uint64
+}
+
+// receiptCacheValueV1 is the on-wire KV JSON schema written by Forester.
+type receiptCacheValueV1 struct {
+	V            int    `json:"v"`
+	MassifHeight uint8  `json:"massifHeight"`
+	MMRIndex     string `json:"mmrIndex"`
+	IDTimestamp  string `json:"idtimestamp"`
 }
 
 // NewQueueConsumer constructs a QueueConsumer with a config copy and shared HTTP client.
@@ -116,6 +149,14 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 // ProcessAndAcknowledge decodes notifications and acknowledges all messages.
 // The goal is to avoid poisoning the queue even if a message is malformed.
 func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *QueuePullResult) {
+	// Collect receipt cache updates for any massif notifications in this batch.
+	//
+	// We intentionally implement "latest registration wins" for a content hash by
+	// always writing the most recent idtimestamp value for a given contentHash key.
+	// This matches Forestrie's design: content-hash is a transient SCRAPI id that
+	// may be reused after ingress expiry.
+	receiptMax := make(map[string]receiptCacheEntryV1)
+
 	for _, msg := range qbatch.Messages {
 		note, ok := decodeR2Notification(q.logger, msg)
 		if ok && note.Action == "PutObject" {
@@ -129,6 +170,16 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				"eTag", note.Object.ETag,
 				"eventTime", note.EventTime,
 			)
+
+			// If this is a massif data object update, scan its Urkle leaf table and
+			// derive receipt cache entries:
+			//   ranger/v1/{logId}/latest/{contentHashHex} -> {massifHeight,mmrIndex,idtimestamp}.
+			if err := q.collectReceiptsFromMassif(ctx, note.Object.Key, receiptMax); err != nil {
+				q.logger.Error("failed to collect receipts from massif",
+					"key", note.Object.Key,
+					"error", err,
+				)
+			}
 		} else if ok {
 			q.logger.Debug("skipping non-PutObject notification",
 				"messageID", msg.ID,
@@ -136,6 +187,15 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				"bucket", note.Bucket,
 				"key", note.Object.Key,
 			)
+		}
+	}
+
+	// Bulk write any derived receipt mappings.
+	if len(receiptMax) > 0 {
+		if err := q.bulkWriteReceiptCache(ctx, receiptMax); err != nil {
+			q.logger.Error("failed to bulk write receipt cache", "error", err)
+		} else {
+			q.logger.Info("wrote receipt cache entries", "count", len(receiptMax))
 		}
 	}
 
@@ -156,6 +216,201 @@ func decodeR2Notification(logger *slog.Logger, msg QueueMessage) (R2Notification
 	}
 
 	return note, true
+}
+
+func (q *QueueConsumer) isMassifDataObjectKey(key string) bool {
+	_, _, _, ok, err := parseV2MassifDataObjectKey(key)
+	return ok && err == nil
+}
+
+func (q *QueueConsumer) collectReceiptsFromMassif(ctx context.Context, objectKey string, out map[string]receiptCacheEntryV1) error {
+	massifHeight, logID, massifIndex, ok, err := parseV2MassifDataObjectKey(objectKey)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+
+	// Build an object reader for this massifHeight.
+	factory, err := merklelog.NewS3FactoryWithCredentials(
+		q.cfg.R2WriteURL,
+		q.cfg.R2WriterToken,
+		q.cfg.AWSAccessKeyID,
+		q.cfg.AWSSecretAccessKey,
+		q.cfg.AWSRegion,
+		massifHeight,
+		q.httpClient,
+		q.logger,
+		s3.WithContentSHA256(true),
+	)
+	if err != nil {
+		return fmt.Errorf("build s3 factory: %w", err)
+	}
+	store, err := factory.NewStore(logID)
+	if err != nil {
+		return fmt.Errorf("build store: %w", err)
+	}
+
+	mc, err := massifs.GetMassifContext(ctx, store, massifIndex)
+	if err != nil {
+		return fmt.Errorf("read massif context: %w", err)
+	}
+	leafTable, err := mc.UrkleLeafTableRegion()
+	if err != nil {
+		return fmt.Errorf("read urkle leaf table: %w", err)
+	}
+
+	leafCount := mc.MassifLeafCount()
+	if leafCount > uint64(^uint32(0)) {
+		return fmt.Errorf("leafCount too large: %d", leafCount)
+	}
+
+	// Derive the global leaf index for each ordinal in this massif.
+	// For massifHeight H (1..64), each massif contains 2^(H-1) leaves.
+	if massifHeight == 0 || massifHeight > 64 {
+		return fmt.Errorf("invalid massifHeight %d (expected 1..64)", massifHeight)
+	}
+	leavesPerMassif := uint64(1) << (massifHeight - 1)
+	if leafCount > leavesPerMassif {
+		return fmt.Errorf(
+			"leafCount too large for massifHeight: leafCount=%d leavesPerMassif=%d height=%d",
+			leafCount,
+			leavesPerMassif,
+			massifHeight,
+		)
+	}
+
+	mi := uint64(massifIndex)
+	if mi > 0 && leavesPerMassif > ^uint64(0)/mi {
+		return fmt.Errorf(
+			"leafIndex overflow computing base: leavesPerMassif=%d massifIndex=%d",
+			leavesPerMassif,
+			massifIndex,
+		)
+	}
+	baseLeafIndex := leavesPerMassif * mi
+
+	for ord := uint32(0); ord < uint32(leafCount); ord++ {
+		idts := urkle.LeafKey(leafTable, ord)
+		val := urkle.LeafValue(leafTable, ord)
+		contentHex := hex.EncodeToString(val[:])
+		cacheKey, err := receiptCacheKeyV1(logID, contentHex)
+		if err != nil {
+			return err
+		}
+
+		// Compute mmrIndex from the massif/chunk context + leaf ordinal.
+		leafOrd := uint64(ord)
+		if baseLeafIndex > ^uint64(0)-leafOrd {
+			return fmt.Errorf("leafIndex overflow: base=%d ord=%d", baseLeafIndex, ord)
+		}
+		leafIndex := baseLeafIndex + leafOrd
+		mmrIndex := mmr.MMRIndex(leafIndex)
+
+		entry := receiptCacheEntryV1{
+			MassifHeight: massifHeight,
+			MMRIndex:     mmrIndex,
+			IDTimestamp:  idts,
+		}
+
+		// Keep the maximum idtimestamp per content hash (latest wins).
+		if prev, ok := out[cacheKey]; !ok || idts > prev.IDTimestamp {
+			out[cacheKey] = entry
+		}
+	}
+
+	return nil
+}
+
+func (q *QueueConsumer) bulkWriteReceiptCache(ctx context.Context, entries map[string]receiptCacheEntryV1) error {
+	ttl := q.cfg.ReceiptKVExpirationTTLSeconds
+	var ttlPtr *int
+	if ttl > 0 {
+		ttlPtr = &ttl
+	}
+
+	// Flatten map -> slice.
+	payload := make([]kvBulkEntry, 0, len(entries))
+	for k, e := range entries {
+		value := receiptCacheValueV1{
+			V:            1,
+			MassifHeight: e.MassifHeight,
+			MMRIndex:     strconv.FormatUint(e.MMRIndex, 10),
+			IDTimestamp:  strconv.FormatUint(e.IDTimestamp, 10),
+		}
+		b, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("marshal receipt cache value for key %q: %w", k, err)
+		}
+
+		payload = append(payload, kvBulkEntry{
+			Key:           k,
+			Value:         string(b),
+			ExpirationTTL: ttlPtr,
+		})
+	}
+
+	// Cloudflare bulk API has request size limits; use conservative chunking.
+	const chunkSize = 5000
+	for i := 0; i < len(payload); i += chunkSize {
+		j := i + chunkSize
+		if j > len(payload) {
+			j = len(payload)
+		}
+		if err := q.putKVBatch(ctx, payload[i:j]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (q *QueueConsumer) putKVBatch(ctx context.Context, entries []kvBulkEntry) error {
+	url := fmt.Sprintf(
+		"https://api.cloudflare.com/client/v4/accounts/%s/storage/kv/namespaces/%s/bulk",
+		q.cfg.CloudflareAccountID,
+		q.cfg.RangerMMRIndexNamespaceID,
+	)
+
+	body, err := json.Marshal(entries)
+	if err != nil {
+		return fmt.Errorf("marshal kv entries: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build kv request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+q.cfg.KVAPIToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := q.httpClient.Do(ctx, req)
+	if err != nil {
+		return fmt.Errorf("kv bulk write request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("kv bulk write failed: status=%d body=%s", resp.StatusCode, string(respBytes))
+	}
+
+	// Best-effort parse Cloudflare API response success flag.
+	var parsed struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+			Code    int    `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(respBytes, &parsed); err == nil {
+		if !parsed.Success {
+			return fmt.Errorf("kv bulk write failed: %v", parsed.Errors)
+		}
+	}
+
+	return nil
 }
 
 // AcknowledgeMessage acknowledges a message to remove it from the queue.

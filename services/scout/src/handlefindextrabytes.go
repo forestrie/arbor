@@ -17,23 +17,23 @@ type FindExtraBytesResponse struct {
 // handleFindExtraBytes implements the FindExtraBytes endpoint.
 //
 // The endpoint searches for entries with specific extra bytes within a log.
-// URL pattern: /api/logs/{logId}/find-extrabytes/{extraBytes}?fence-index={fenceIndex}&massif-range={range}&idtimestamp={idTimestamp}
+// URL pattern: /api/logs/{logId}/find-extrabytes/{extraBytes}?mmr-index={minMmrIndex}&massif-range={range}&idtimestamp={idTimestamp}
 //
 // Parameters:
 //   - logId: The identifier of the log to search in
 //   - extraBytes: A 24-byte hex-encoded extra bytes value to search for
-//   - fence-index (optional): Minimum mmrIndex to start the search from
+//   - mmr-index (optional): Minimum mmrIndex to start the search from
 //   - massif-range: Minimum number of massifs to search (must be >= 1)
 //   - idtimestamp (optional): 64-bit integer encoded as hex string, optionally prefixed by epoch
 //
 // The idtimestamp parameter can be a 64-bit integer encoded as a hex string.
 // If no epoch is specified, the default epoch is taken from the massif header
-// implied by the fence index.
+// implied by the `mmr-index`.
 //
-// The handler computes the starting massif index based on the fence index and
-// ensures at least the specified number of massifs are searched. If the fence
-// index is greater than the first index in the implied start massif, at least
-// two massifs will be read.
+// The handler computes the starting massif index based on the provided
+// `mmr-index` and ensures at least the specified number of massifs are searched.
+// If the `mmr-index` is greater than the first index in the implied start
+// massif, at least two massifs will be read.
 //
 // Response includes cache control headers indicating the response can be cached
 // indefinitely since log entries are immutable.
@@ -78,8 +78,8 @@ func (a API) handleFindExtraBytes(w http.ResponseWriter, r *http.Request) {
 	}
 	params.LogID = logIDBytes
 
-	// Compute the starting massif index based on fence index
-	startMassifIndex := computeStartMassifIndex(params.FenceIndex)
+	// Compute the starting massif index based on the optional mmr-index
+	startMassifIndex := computeStartMassifIndex(params.MinMMRIndex)
 
 	// TODO: Implement actual search logic
 	// For now, return a stub response indicating not found

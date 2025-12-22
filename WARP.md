@@ -68,7 +68,7 @@ This file provides guidance to WARP (warp.dev) when working with code in this re
   - `ProcessMessage`:
     - Unwraps Cloudflare Queue body into an R2 notification payload.
     - Filters to `PutObject` events.
-    - Parses object key paths (e.g., `logs/{logId}/leaves/{fenceIndex}/{hash}`) via `parseObjectPath`, validating structure and hex hash.
+    - Parses object key paths (e.g., `logs/{logId}/leaves/{hash}`) via `parseObjectPath`, validating structure and hex hash.
     - When `TRUST_CANOPY` is false, currently exits early (no verification); when true, calls `VerifyObjectHash` to read from R2 and verify the hash, logging failures but consuming messages regardless.
 
 - **R2 client and storage integration:**

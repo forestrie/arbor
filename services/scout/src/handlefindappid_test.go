@@ -29,7 +29,7 @@ func TestHandleFindAppID_Success(t *testing.T) {
 	)
 
 	// Test successful request with all parameters
-	url := ts.URL + "/api/logs/" + logID + "/find-appid/" + appID + "?massif-range=5&fence-index=100"
+	url := ts.URL + "/api/logs/" + logID + "/find-appid/" + appID + "?massif-range=5&mmr-index=100"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		t.Fatalf("NewRequest failed: %v", err)
@@ -83,7 +83,7 @@ func TestHandleFindAppID_Success(t *testing.T) {
 	}
 
 	if out.MassifIndex != 0 {
-		t.Errorf("expected massifIndex 0 (computed from fence-index 100), got %d", out.MassifIndex)
+		t.Errorf("expected massifIndex 0 (computed from mmr-index 100), got %d", out.MassifIndex)
 	}
 }
 

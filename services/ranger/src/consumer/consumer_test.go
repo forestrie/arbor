@@ -1,11 +1,15 @@
 package consumer
 
 import (
+	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 func TestQueuePullResponseUnmarshal(t *testing.T) {
@@ -15,7 +19,7 @@ func TestQueuePullResponseUnmarshal(t *testing.T) {
 		Bucket:    "bucket",
 		EventTime: "2025-11-09T17:39:43Z",
 		Object: R2Object{
-			Key:  "logs/de305d54-75b4-431b-adb2-eb6b9e546014/leaves/0/" + strings.Repeat("b", 64),
+			Key:  "logs/de305d54-75b4-431b-adb2-eb6b9e546014/leaves/" + strings.Repeat("b", 64),
 			Size: 99,
 			ETag: "etag",
 		},
@@ -60,5 +64,33 @@ func TestQueuePullResponseUnmarshal(t *testing.T) {
 
 	if parsed.Object.Key != r2.Object.Key {
 		t.Fatalf("expected key %q, got %q", r2.Object.Key, parsed.Object.Key)
+	}
+}
+
+func TestProcessObjectPath_ParsesLogIDAndHash(t *testing.T) {
+	var note ProcessedNotification
+
+	logID := "de305d54-75b4-431b-adb2-eb6b9e546014"
+	hashHex := strings.Repeat("b", 64)
+	path := fmt.Sprintf("logs/%s/leaves/%s", logID, hashHex)
+
+	if err := processObjectPath(&note, path); err != nil {
+		t.Fatalf("processObjectPath: %v", err)
+	}
+
+	wantHash, err := hex.DecodeString(hashHex)
+	if err != nil {
+		t.Fatalf("decode wantHash: %v", err)
+	}
+	if !bytes.Equal(note.Hash, wantHash) {
+		t.Fatalf("hash mismatch: got=%x want=%x", note.Hash, wantHash)
+	}
+
+	uid, err := uuid.Parse(logID)
+	if err != nil {
+		t.Fatalf("parse logID: %v", err)
+	}
+	if !bytes.Equal(note.LogID, uid[:]) {
+		t.Fatalf("logID mismatch: got=%x want=%x", note.LogID, uid[:])
 	}
 }
