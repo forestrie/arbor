@@ -11,6 +11,7 @@ require (
 	github.com/forestrie/go-merklelog-provider-testing v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
 	github.com/forestrie/go-merklelog/mmr v0.4.0
+	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
@@ -40,7 +41,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace (
+	replace (
 	github.com/datatrails/go-datatrails-common => ../../_deps/go-datatrails-common
 	github.com/datatrails/go-datatrails-serialization/eventsv1 => ../../_deps/go-datatrails-serialization/eventsv1
 	github.com/datatrails/go-datatrails-simplehash => ../../_deps/go-datatrails-simplehash
@@ -51,5 +52,6 @@ replace (
 	github.com/forestrie/go-merklelog-provider-testing => ../../_deps/go-merklelog-provider-testing
 	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs
 	github.com/forestrie/go-merklelog/mmr => ../../_deps/go-merklelog/mmr
+	github.com/forestrie/go-merklelog/urkle => ../../_deps/go-merklelog/urkle
 	github.com/forestrie/go-sigv4 => ../../_deps/go-sigv4
 )
