@@ -20,10 +20,11 @@ type Config struct {
 	LogLevel        string
 	ShutdownTimeout time.Duration
 
-	// Cloudflare Queue configuration
-	QueueURL          string
-	QueueAPIToken     string
-	QueueBatchSize    int
+	// Cloudflare Queue configuration (HTTP consumer pattern)
+	QueueURL       string
+	QueueToken     string
+	QueueBatchSize int
+
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 
@@ -33,12 +34,8 @@ type Config struct {
 	DelegationLogIDPrefix               string
 	DelegationKeyCurve                  string
 
-	// R2 Access Configuration
-	R2BucketName  string
-	R2AccountID   string
-	R2PublicURL   string
-	R2WriteURL    string
-	R2WriterToken string
+	// R2 access configuration (S3-compatible endpoint)
+	R2URL string
 
 	// AWS Credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
 	AWSAccessKeyID     string
@@ -117,45 +114,22 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
-	accountID := os.Getenv("R2_ACCOUNT_ID")
-	bucketName := os.Getenv("R2_BUCKET_NAME")
-
-	// Build R2 public URL if not explicitly provided
-	r2PublicURL := os.Getenv("R2_PUBLIC_URL")
-	if r2PublicURL == "" && accountID != "" && bucketName != "" {
-		r2PublicURL = fmt.Sprintf("https://%s.r2.cloudflarestorage.com/%s", accountID, bucketName)
-	}
-
-	r2WriterToken := os.Getenv("R2_WRITER_TOKEN")
-	awsAccessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
-	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
-
-	// Automatically derive AWS_SECRET_ACCESS_KEY from R2_WRITER_TOKEN if not explicitly set
-	if awsSecretAccessKey == "" && r2WriterToken != "" {
-		sum := sha256.Sum256([]byte(r2WriterToken))
-		awsSecretAccessKey = hex.EncodeToString(sum[:])
-	}
-
 	cfg := Config{
 		Port:                                getEnvOrDefault("PORT", "9090"),
 		LogLevel:                            getEnvOrDefault("LOG_LEVEL", "info"),
 		ShutdownTimeout:                     getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:                            os.Getenv("SEALER_QUEUE_URL"),
-		QueueAPIToken:                       os.Getenv("SEALER_QUEUE_API_TOKEN"),
-		QueueBatchSize:                      getInt("SEALER_QUEUE_BATCH_SIZE", 1),
+		QueueURL:                            os.Getenv("QUEUE_URL"),
+		QueueToken:                          os.Getenv("QUEUE_TOKEN"),
+		QueueBatchSize:                      getInt("QUEUE_BATCH_SIZE", 1),
 		PollInterval:                        getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout:                   getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		DelegationSignerServiceAccountEmail: os.Getenv("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL"),
 		DelegationSignerURL:                 os.Getenv("DELEGATION_SIGNER_URL"),
 		DelegationLogIDPrefix:               os.Getenv("DELEGATION_LOG_ID_PREFIX"),
 		DelegationKeyCurve:                  getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256k1"),
-		R2BucketName:                        bucketName,
-		R2AccountID:                         accountID,
-		R2PublicURL:                         r2PublicURL,
-		R2WriteURL:                          os.Getenv("R2_WRITE_URL"),
-		R2WriterToken:                       r2WriterToken,
-		AWSAccessKeyID:                      awsAccessKeyID,
-		AWSSecretAccessKey:                  awsSecretAccessKey,
+		R2URL:                               os.Getenv("R2_URL"),
+		AWSAccessKeyID:                      os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:                  getEnvOrDefault("AWS_SECRET_ACCESS_KEY", ""),
 		AWSRegion:                           getEnvOrDefault("AWS_REGION", "auto"),
 	}
 
@@ -163,18 +137,16 @@ func LoadConfig() Config {
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {
-	logConfigValue(logger, "SEALER_QUEUE_URL", c.QueueURL)
-	logSecretDigest(logger, "SEALER_QUEUE_API_TOKEN", c.QueueAPIToken)
-	logConfigValue(logger, "SEALER_QUEUE_BATCH_SIZE", c.QueueBatchSize)
+	logConfigValue(logger, "QUEUE_URL", c.QueueURL)
+	logSecretDigest(logger, "QUEUE_TOKEN", c.QueueToken)
+	logConfigValue(logger, "QUEUE_BATCH_SIZE", c.QueueBatchSize)
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 	logConfigValue(logger, "DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL", c.DelegationSignerServiceAccountEmail)
 	logConfigValue(logger, "DELEGATION_SIGNER_URL", c.DelegationSignerURL)
 	logConfigValue(logger, "DELEGATION_LOG_ID_PREFIX", c.DelegationLogIDPrefix)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
-	logConfigValue(logger, "R2_PUBLIC_URL", c.R2PublicURL)
-	logConfigValue(logger, "R2_WRITE_URL", c.R2WriteURL)
-	logSecretDigest(logger, "R2_WRITER_TOKEN", c.R2WriterToken)
+	logConfigValue(logger, "R2_URL", c.R2URL)
 	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
 	logSecretDigest(logger, "AWS_SECRET_ACCESS_KEY", c.AWSSecretAccessKey)
 	logConfigValue(logger, "AWS_REGION", c.AWSRegion)
@@ -183,16 +155,16 @@ func (c Config) LogConfig(logger *slog.Logger) {
 // Validate checks that all required configuration is present.
 func (c Config) Validate() error {
 	if c.QueueURL == "" {
-		return fmt.Errorf("SEALER_QUEUE_URL is required")
+		return fmt.Errorf("QUEUE_URL is required")
 	}
-	if c.QueueAPIToken == "" {
-		return fmt.Errorf("SEALER_QUEUE_API_TOKEN is required")
+	if c.QueueToken == "" {
+		return fmt.Errorf("QUEUE_TOKEN is required")
 	}
 	if c.QueueBatchSize <= 0 {
-		return fmt.Errorf("SEALER_QUEUE_BATCH_SIZE must be greater than zero")
+		return fmt.Errorf("QUEUE_BATCH_SIZE must be greater than zero")
 	}
 	if c.QueueBatchSize > 32 {
-		return fmt.Errorf("SEALER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
+		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
 
 	if c.DelegationSignerServiceAccountEmail == "" {
@@ -208,12 +180,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)
 	}
 
-	// Required now (strict parity for future checkpoint work)
-	if c.R2WriteURL == "" {
-		return fmt.Errorf("R2_WRITE_URL is required")
-	}
-	if c.R2WriterToken == "" {
-		return fmt.Errorf("R2_WRITER_TOKEN is required")
+	if c.R2URL == "" {
+		return fmt.Errorf("R2_URL is required")
 	}
 	if c.AWSAccessKeyID == "" {
 		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")

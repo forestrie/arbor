@@ -72,8 +72,7 @@ func Test_SealerCheckpointLog_racingCheckpointLogs_minio(t *testing.T) {
 		DelegationSignerURL:                 delegationSigner.URL,
 		DelegationKeyCurve:                  "secp256r1",
 
-		R2WriteURL:    baseURL,
-		R2WriterToken: minio.BearerToken,
+		R2URL: baseURL,
 
 		AWSAccessKeyID:     minio.AccessKeyID,
 		AWSSecretAccessKey: minio.SecretAccessKey,

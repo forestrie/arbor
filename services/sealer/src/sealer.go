@@ -95,8 +95,8 @@ func CheckpointLog(
 
 	// Build shared clients.
 	s3Client, err := s3.NewClientWithCredentials(
-		svc.Cfg.R2WriteURL,
-		svc.Cfg.R2WriterToken,
+		svc.Cfg.R2URL,
+		"", // no bearer token; Sealer uses AWS credentials for authenticated writes
 		svc.Cfg.AWSAccessKeyID,
 		svc.Cfg.AWSSecretAccessKey,
 		svc.Cfg.AWSRegion,
