@@ -19,31 +19,27 @@ type Config struct {
 	LogLevel        string
 	ShutdownTimeout time.Duration
 
-	// Cloudflare Queue configuration
-	QueueURL          string
-	QueueAPIToken     string
-	QueueBatchSize    int
+	// Cloudflare Queue configuration (HTTP consumer pattern)
+	QueueURL       string
+	QueueToken     string
+	QueueBatchSize int
+
 	PollInterval      time.Duration
 	VisibilityTimeout time.Duration
 
-	// R2 access configuration (read-only; Forester never writes R2 objects).
-	//
-	// R2PublicReadURL is the HTTPS endpoint used to read massif data and
-	// checkpoints via the S3-compatible API and must be derived from
-	// R2_PUBLIC_URL.
-	R2PublicReadURL string
+	// R2 access configuration (S3-compatible endpoint; Forester reads massifs)
+	R2URL string
 
-	// AWS credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2).
-	// These are used for authenticated *read* access only.
+	// AWS credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSRegion          string // Defaults to "auto" for Cloudflare R2
 
-	// Cloudflare KV configuration (for writing receipt cache entries).
+	// Cloudflare KV configuration (for writing receipt cache entries)
 	CloudflareAccountID         string
 	RangerMMRIndexNamespaceID   string
 	RangerMMRMassifsNamespaceID string
-	KVAPIToken                  string
+	KVToken                     string
 
 	// Receipt cache behavior
 	ReceiptKVExpirationTTLSeconds int // 0 => no TTL
@@ -120,31 +116,23 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
-	// Forester only reads existing massif and checkpoint objects from R2 via the
-	// S3-compatible API; it never writes them. R2_PUBLIC_URL must be set to the
-	// public HTTPS endpoint for the massif bucket.
-	r2PublicURL := os.Getenv("R2_PUBLIC_URL")
-
-	// Forester uses FORESTER_KV_API_TOKEN as its Cloudflare KV writer token.
-	kvAPIToken := os.Getenv("FORESTER_KV_API_TOKEN")
-
 	cfg := Config{
 		Port:                          getEnvOrDefault("PORT", "9090"),
 		LogLevel:                      getEnvOrDefault("LOG_LEVEL", "info"),
 		ShutdownTimeout:               getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:                      os.Getenv("FORESTER_QUEUE_URL"),
-		QueueAPIToken:                 os.Getenv("FORESTER_QUEUE_API_TOKEN"),
-		QueueBatchSize:                getInt("FORESTER_QUEUE_BATCH_SIZE", 1),
+		QueueURL:                      os.Getenv("QUEUE_URL"),
+		QueueToken:                    os.Getenv("QUEUE_TOKEN"),
+		QueueBatchSize:                getInt("QUEUE_BATCH_SIZE", 1),
 		PollInterval:                  getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout:             getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
-		R2PublicReadURL:               r2PublicURL,
+		R2URL:                         os.Getenv("R2_URL"),
 		AWSAccessKeyID:                os.Getenv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey:            getEnvOrDefault("AWS_SECRET_ACCESS_KEY", ""),
 		AWSRegion:                     getEnvOrDefault("AWS_REGION", "auto"),
 		CloudflareAccountID:           os.Getenv("CLOUDFLARE_ACCOUNT_ID"),
 		RangerMMRIndexNamespaceID:     os.Getenv("RANGER_MMR_INDEX_NAMESPACE_ID"),
 		RangerMMRMassifsNamespaceID:   os.Getenv("RANGER_MMR_MASSIFS_NAMESPACE_ID"),
-		KVAPIToken:                    kvAPIToken,
+		KVToken:                       os.Getenv("KV_TOKEN"),
 		ReceiptKVExpirationTTLSeconds: getInt("FORESTER_RECEIPT_KV_TTL_SECONDS", 0),
 	}
 
@@ -152,13 +140,13 @@ func LoadConfig() Config {
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {
-	logConfigValue(logger, "FORESTER_QUEUE_URL", c.QueueURL)
-	logSecretDigest(logger, "FORESTER_QUEUE_API_TOKEN", c.QueueAPIToken)
-	logConfigValue(logger, "FORESTER_QUEUE_BATCH_SIZE", c.QueueBatchSize)
+	logConfigValue(logger, "QUEUE_URL", c.QueueURL)
+	logSecretDigest(logger, "QUEUE_TOKEN", c.QueueToken)
+	logConfigValue(logger, "QUEUE_BATCH_SIZE", c.QueueBatchSize)
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 
-	logConfigValue(logger, "R2_PUBLIC_URL", c.R2PublicReadURL)
+	logConfigValue(logger, "R2_URL", c.R2URL)
 	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
 	logSecretDigest(logger, "AWS_SECRET_ACCESS_KEY", c.AWSSecretAccessKey)
 	logConfigValue(logger, "AWS_REGION", c.AWSRegion)
@@ -166,27 +154,27 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "CLOUDFLARE_ACCOUNT_ID", c.CloudflareAccountID)
 	logConfigValue(logger, "RANGER_MMR_INDEX_NAMESPACE_ID", c.RangerMMRIndexNamespaceID)
 	logConfigValue(logger, "RANGER_MMR_MASSIFS_NAMESPACE_ID", c.RangerMMRMassifsNamespaceID)
-	logSecretDigest(logger, "FORESTER_KV_API_TOKEN", c.KVAPIToken)
+	logSecretDigest(logger, "KV_TOKEN", c.KVToken)
 	logConfigValue(logger, "FORESTER_RECEIPT_KV_TTL_SECONDS", c.ReceiptKVExpirationTTLSeconds)
 }
 
 // Validate checks that all required configuration is present.
 func (c Config) Validate() error {
 	if c.QueueURL == "" {
-		return fmt.Errorf("FORESTER_QUEUE_URL is required")
+		return fmt.Errorf("QUEUE_URL is required")
 	}
-	if c.QueueAPIToken == "" {
-		return fmt.Errorf("FORESTER_QUEUE_API_TOKEN is required")
+	if c.QueueToken == "" {
+		return fmt.Errorf("QUEUE_TOKEN is required")
 	}
 	if c.QueueBatchSize <= 0 {
-		return fmt.Errorf("FORESTER_QUEUE_BATCH_SIZE must be greater than zero")
+		return fmt.Errorf("QUEUE_BATCH_SIZE must be greater than zero")
 	}
 	if c.QueueBatchSize > 32 {
-		return fmt.Errorf("FORESTER_QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
+		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
 
-	if c.R2PublicReadURL == "" {
-		return fmt.Errorf("R2_PUBLIC_URL is required for reading massifs")
+	if c.R2URL == "" {
+		return fmt.Errorf("R2_URL is required")
 	}
 	if c.AWSAccessKeyID == "" {
 		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")
@@ -194,14 +182,15 @@ func (c Config) Validate() error {
 	if c.AWSSecretAccessKey == "" {
 		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing")
 	}
+
 	if c.CloudflareAccountID == "" {
 		return fmt.Errorf("CLOUDFLARE_ACCOUNT_ID is required")
 	}
 	if c.RangerMMRIndexNamespaceID == "" {
 		return fmt.Errorf("RANGER_MMR_INDEX_NAMESPACE_ID is required")
 	}
-	if c.KVAPIToken == "" {
-		return fmt.Errorf("FORESTER_KV_API_TOKEN is required")
+	if c.KVToken == "" {
+		return fmt.Errorf("KV_TOKEN is required")
 	}
 
 	return nil

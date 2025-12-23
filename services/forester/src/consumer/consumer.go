@@ -113,7 +113,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueAPIToken)
+	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := q.httpClient.Do(ctx, req)
@@ -234,7 +234,7 @@ func (q *QueueConsumer) collectReceiptsFromMassif(ctx context.Context, objectKey
 
 	// Build an object reader for this massifHeight.
 	factory, err := merklelog.NewS3FactoryWithCredentials(
-		q.cfg.R2PublicReadURL,
+		q.cfg.R2URL,
 		"", // no bearer token; Forester uses AWS credentials for authenticated reads
 		q.cfg.AWSAccessKeyID,
 		q.cfg.AWSSecretAccessKey,
@@ -382,7 +382,7 @@ func (q *QueueConsumer) putKVBatch(ctx context.Context, entries []kvBulkEntry) e
 	if err != nil {
 		return fmt.Errorf("build kv request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+q.cfg.KVAPIToken)
+	req.Header.Set("Authorization", "Bearer "+q.cfg.KVToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := q.httpClient.Do(ctx, req)
@@ -450,7 +450,7 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 		return fmt.Errorf("failed to create ack request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueAPIToken)
+	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := q.httpClient.Do(ctx, req)
