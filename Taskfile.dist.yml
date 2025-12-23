@@ -65,11 +65,13 @@ tasks:
           ../_deps/go-datatrails-serialization/eventsv1
           ../_deps/go-datatrails-simplehash
           ../_deps/go-merklelog-azure
+          ../_deps/go-merklelog/bloom
           ../_deps/go-merklelog-datatrails
           ../_deps/go-merklelog-fs
           ../_deps/go-merklelog-provider-testing
           ../_deps/go-merklelog/massifs
           ../_deps/go-merklelog/mmr
+          ../_deps/go-merklelog/urkle
           ../_deps/go-sigv4
         )
         EOF
@@ -113,11 +115,13 @@ tasks:
           ../_deps/go-datatrails-serialization/eventsv1
           ../_deps/go-datatrails-simplehash
           ../_deps/go-merklelog-azure
+          ../_deps/go-merklelog/bloom
           ../_deps/go-merklelog-datatrails
           ../_deps/go-merklelog-fs
           ../_deps/go-merklelog-provider-testing
           ../_deps/go-merklelog/massifs
           ../_deps/go-merklelog/mmr
+          ../_deps/go-merklelog/urkle
           ../_deps/go-sigv4
         )
         EOF

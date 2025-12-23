@@ -160,7 +160,7 @@ jobs:
       #
       #    echo "Updated scout chart to version $NEW_VERSION with image tag ${IMAGE_TAG}"
 
-      - name: Trigger arbor-flux to sync ranger secrets
+      - name: Trigger arbor-flux to sync service secrets
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -169,7 +169,7 @@ jobs:
           # Create the complete request body as JSON to avoid quotation/encoding issues
           cat > /tmp/dispatch_request.json << EOF
           {
-            "event_type": "sync-ranger-secrets",
+            "event_type": "sync-services-secrets",
             "client_payload": {
               "source": "arbor",
               "workflow": "build-deploy",
@@ -179,7 +179,7 @@ jobs:
           }
           EOF
 
-          # Trigger arbor-flux workflow to sync ranger secrets after build
+          # Trigger arbor-flux workflow to sync service secrets after build
           gh api repos/forestrie/arbor-flux/dispatches \
             --method POST \
             --input /tmp/dispatch_request.json
