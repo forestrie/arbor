@@ -105,7 +105,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueAPIToken)
+	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := q.httpClient.Do(ctx, req)
@@ -182,7 +182,7 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 		return fmt.Errorf("failed to create ack request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueAPIToken)
+	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueToken)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := q.httpClient.Do(ctx, req)

@@ -12,23 +12,25 @@ func newTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 }
 
-func TestNewR2Committer_Success(t *testing.T) {
+func TestNewCommitter_Success(t *testing.T) {
 	cfg := ranger.Config{
-		R2WriteURL:      "https://example.com/bucket",
-		R2WriterToken:   "token",
-		WorkerCIDR:      "10.0.0.0/24",
-		PodIP:           "10.0.0.1",
-		CommitmentEpoch: 1,
-		MassifHeight:    0,
-		TrustCanopy:     true,
+		R2URL:              "https://example.com/bucket",
+		AWSAccessKeyID:     "AKIA_TEST",
+		AWSSecretAccessKey: "secret",
+		AWSRegion:          "auto",
+		WorkerCIDR:         "10.0.0.0/24",
+		PodIP:              "10.0.0.1",
+		CommitmentEpoch:    1,
+		MassifHeight:       0,
+		TrustCanopy:        true,
 	}
 
 	httpClient := ranger.NewHTTPClient(newTestLogger())
 	defer httpClient.Close()
 
-	c, err := NewR2Committer(cfg, httpClient, newTestLogger())
+	c, err := NewCommitter(cfg, httpClient, newTestLogger())
 	if err != nil {
-		t.Fatalf("NewR2Committer: %v", err)
+		t.Fatalf("NewCommitter: %v", err)
 	}
 	if c == nil {
 		t.Fatal("expected non-nil committer")

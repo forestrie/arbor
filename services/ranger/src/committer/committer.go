@@ -11,7 +11,6 @@ import (
 	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/consumer"
-	"github.com/forestrie/arbor/services/ranger/r2"
 	"github.com/forestrie/go-merklelog/massifs"
 	"github.com/forestrie/go-merklelog/massifs/snowflakeid"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
@@ -45,10 +44,10 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		massifHeight = 14 // Default
 	}
 
-	// Use S3 factory with SigV4 signing enabled (required for Cloudflare R2 S3-compatible API)
+	// Use S3 factory with SigV4 signing enabled (required for Cloudflare R2 S3-compatible API).
 	factory, err := merklelog.NewS3FactoryWithCredentials(
-		cfg.R2WriteURL,
-		cfg.R2WriterToken,
+		cfg.R2URL,
+		"", // no bearer token; use SigV4
 		cfg.AWSAccessKeyID,
 		cfg.AWSSecretAccessKey,
 		cfg.AWSRegion,
@@ -80,49 +79,6 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 	}, nil
 }
 
-// NewR2Committer creates a new Committer instance backed by the native R2
-// HTTP/JSON backend. This is used by the ranger service in production.
-func NewR2Committer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger) (*Committer, error) {
-	if httpClient == nil {
-		return nil, fmt.Errorf("http client is required")
-	}
-	if logger == nil {
-		logger = slog.Default()
-	}
-
-	massifHeight := cfg.MassifHeight
-	if massifHeight == 0 {
-		massifHeight = 14 // Default
-	}
-
-	r2Client, err := r2.NewClient(cfg.R2WriteURL, cfg.R2WriterToken, httpClient, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create r2 client: %w", err)
-	}
-	factory, err := merklelog.NewFactory(r2Client, massifHeight, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create merklelog storage factory: %w", err)
-	}
-
-	idState, err := snowflakeid.NewIDState(snowflakeid.Config{
-		CommitmentEpoch: uint8(cfg.CommitmentEpoch),
-		WorkerCIDR:      cfg.WorkerCIDR,
-		PodIP:           cfg.PodIP,
-		AllowSpins:      snowflakeid.MaxSpins,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize ID state: %w", err)
-	}
-
-	return &Committer{
-		factory:         factory,
-		idState:         idState,
-		logger:          logger,
-		massifHeight:    massifHeight,
-		commitmentEpoch: cfg.CommitmentEpoch,
-		trustCanopy:     cfg.TrustCanopy,
-	}, nil
-}
 
 // logNotice logs a message at the NOTICE level (between INFO and WARN).
 // When the logger level is set to NOTICE, it excludes INFO and below, but includes WARN and ERROR.

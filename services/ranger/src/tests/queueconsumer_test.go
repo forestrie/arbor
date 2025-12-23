@@ -33,16 +33,15 @@ func Test_QueueConsumer_singleMessage(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	httpClient := ranger.NewHTTPClient(log)
 
-	// Derive an R2 write URL from the MinIO-backed test configuration
+	// Derive an R2 URL from the MinIO-backed test configuration
 	endpoint := strings.TrimRight(tc.cfg.Endpoint, "/")
 	bucket := strings.Trim(tc.cfg.Bucket, "/")
-	r2WriteURL, err := url.JoinPath(endpoint, bucket)
+	r2URL, err := url.JoinPath(endpoint, bucket)
 	require.NoError(t, err)
 
 	// Committer writes leaves into the MinIO-backed merklelog store
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:         r2WriteURL,
-		R2WriterToken:      tc.cfg.BearerToken,
+		R2URL:              r2URL,
 		AWSAccessKeyID:     tc.cfg.AccessKeyID,
 		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
 		AWSRegion:          tc.cfg.Region,
@@ -82,18 +81,17 @@ func Test_QueueConsumer_multiLogBatches(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	httpClient := ranger.NewHTTPClient(log)
 
-	// Derive an R2 write URL from the MinIO-backed test configuration.
+	// Derive an R2 URL from the MinIO-backed test configuration.
 	endpoint := strings.TrimRight(tc.cfg.Endpoint, "/")
 	bucket := strings.Trim(tc.cfg.Bucket, "/")
-	r2WriteURL, err := url.JoinPath(endpoint, bucket)
+	r2URL, err := url.JoinPath(endpoint, bucket)
 	require.NoError(t, err)
 
 	massifHeight := uint8(14)
 
 	// Committer writes leaves into the MinIO-backed merklelog store.
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:         r2WriteURL,
-		R2WriterToken:      tc.cfg.BearerToken,
+		R2URL:              r2URL,
 		AWSAccessKeyID:     tc.cfg.AccessKeyID,
 		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
 		AWSRegion:          tc.cfg.Region,
@@ -216,7 +214,7 @@ func Test_QueueConsumer_multiLogBatches(t *testing.T) {
 				// add 1 to obtain the expected massif count for this log.
 				lastLeafIndex := uint64(li.leaves - 1)
 				expectedMassifs := uint32(massifs.MassifFromLeaf(massifHeight, lastLeafIndex) + 1)
-				assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, massifHeight, httpClient, log, li.id, expectedMassifs)
+				assertMassifCount(t, r2URL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, massifHeight, httpClient, log, li.id, expectedMassifs)
 			}
 		})
 	}
@@ -234,16 +232,15 @@ func Test_QueueConsumer_batchSizes(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	httpClient := ranger.NewHTTPClient(log)
 
-	// Derive an R2 write URL from the MinIO-backed test configuration
+	// Derive an R2 URL from the MinIO-backed test configuration
 	endpoint := strings.TrimRight(tc.cfg.Endpoint, "/")
 	bucket := strings.Trim(tc.cfg.Bucket, "/")
-	r2WriteURL, err := url.JoinPath(endpoint, bucket)
+	r2URL, err := url.JoinPath(endpoint, bucket)
 	require.NoError(t, err)
 
 	// Committer writes leaves into the MinIO-backed merklelog store
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:         r2WriteURL,
-		R2WriterToken:      tc.cfg.BearerToken,
+		R2URL:              r2URL,
 		AWSAccessKeyID:     tc.cfg.AccessKeyID,
 		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
 		AWSRegion:          tc.cfg.Region,
@@ -303,10 +300,10 @@ func Test_QueueConsumer_multiLogBatches_massifBoundaries(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 	httpClient := ranger.NewHTTPClient(log)
 
-	// Derive an R2 write URL from the MinIO-backed test configuration.
+	// Derive an R2 URL from the MinIO-backed test configuration.
 	endpoint := strings.TrimRight(tc.cfg.Endpoint, "/")
 	bucket := strings.Trim(tc.cfg.Bucket, "/")
-	r2WriteURL, err := url.JoinPath(endpoint, bucket)
+	r2URL, err := url.JoinPath(endpoint, bucket)
 	require.NoError(t, err)
 
 	massifHeight := uint8(4)
@@ -320,8 +317,7 @@ func Test_QueueConsumer_multiLogBatches_massifBoundaries(t *testing.T) {
 
 	// Committer writes leaves into the MinIO-backed merklelog store.
 	comm, err := committer.NewCommitter(ranger.Config{
-		R2WriteURL:         r2WriteURL,
-		R2WriterToken:      tc.cfg.BearerToken,
+		R2URL:              r2URL,
 		AWSAccessKeyID:     tc.cfg.AccessKeyID,
 		AWSSecretAccessKey: tc.cfg.SecretAccessKey,
 		AWSRegion:          tc.cfg.Region,
@@ -415,7 +411,7 @@ func Test_QueueConsumer_multiLogBatches_massifBoundaries(t *testing.T) {
 				}
 				lastLeafIndex := uint64(li.leaves - 1)
 				expectedMassifs := uint32(massifs.MassifFromLeaf(massifHeight, lastLeafIndex) + 1)
-				assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, massifHeight, httpClient, log, li.id, expectedMassifs)
+				assertMassifCount(t, r2URL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, massifHeight, httpClient, log, li.id, expectedMassifs)
 			}
 		})
 	}
@@ -471,16 +467,15 @@ func Test_QueueConsumer_massifBoundaries(t *testing.T) {
 			log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{}))
 			httpClient := ranger.NewHTTPClient(log)
 
-			// Derive an R2 write URL from the MinIO-backed test configuration
+			// Derive an R2 URL from the MinIO-backed test configuration
 			endpoint := strings.TrimRight(tc.cfg.Endpoint, "/")
 			bucket := strings.Trim(tc.cfg.Bucket, "/")
-			r2WriteURL, err := url.JoinPath(endpoint, bucket)
+			r2URL, err := url.JoinPath(endpoint, bucket)
 			require.NoError(t, err)
 
 			// Committer writes leaves into the MinIO-backed merklelog store
 			comm, err := committer.NewCommitter(ranger.Config{
-				R2WriteURL:         r2WriteURL,
-				R2WriterToken:      tc.cfg.BearerToken,
+				R2URL:              r2URL,
 				AWSAccessKeyID:     tc.cfg.AccessKeyID,
 				AWSSecretAccessKey: tc.cfg.SecretAccessKey,
 				AWSRegion:          tc.cfg.Region,
@@ -526,7 +521,7 @@ func Test_QueueConsumer_massifBoundaries(t *testing.T) {
 			// massifHeight=3 => capacity 7 mmr nodes per massif. We derived the
 			// corresponding leaf count for those nodes above as leavesPerMassif.
 			expectedMassifs := uint32((totalLeaves + leavesPerMassif - 1) / leavesPerMassif)
-			assertMassifCount(t, r2WriteURL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, 3, httpClient, log, logID, expectedMassifs)
+			assertMassifCount(t, r2URL, tc.cfg.BearerToken, tc.cfg.AccessKeyID, tc.cfg.SecretAccessKey, tc.cfg.Region, 3, httpClient, log, logID, expectedMassifs)
 		})
 	}
 }
