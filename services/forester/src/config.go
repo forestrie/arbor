@@ -28,7 +28,8 @@ type Config struct {
 	VisibilityTimeout time.Duration
 
 	// R2 access configuration (S3-compatible endpoint; Forester reads massifs)
-	R2URL string
+	R2URL   string
+	R2Token string // Used to derive AWSSecretAccessKey when AWS_SECRET_ACCESS_KEY is not set.
 
 	// AWS credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
 	AWSAccessKeyID     string
@@ -116,6 +117,14 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
+	r2Token := getEnvOrDefault("R2_TOKEN", "")
+	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
+	if awsSecretAccessKey == "" && r2Token != "" {
+		// Automatically derive AWS_SECRET_ACCESS_KEY from R2_TOKEN when not explicitly set.
+		sum := sha256.Sum256([]byte(r2Token))
+		awsSecretAccessKey = hex.EncodeToString(sum[:])
+	}
+
 	cfg := Config{
 		Port:                          getEnvOrDefault("PORT", "9090"),
 		LogLevel:                      getEnvOrDefault("LOG_LEVEL", "info"),
@@ -126,8 +135,9 @@ func LoadConfig() Config {
 		PollInterval:                  getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout:             getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		R2URL:                         os.Getenv("R2_URL"),
+		R2Token:                       r2Token,
 		AWSAccessKeyID:                os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey:            getEnvOrDefault("AWS_SECRET_ACCESS_KEY", ""),
+		AWSSecretAccessKey:            awsSecretAccessKey,
 		AWSRegion:                     getEnvOrDefault("AWS_REGION", "auto"),
 		CloudflareAccountID:           os.Getenv("CLOUDFLARE_ACCOUNT_ID"),
 		RangerMMRIndexNamespaceID:     os.Getenv("RANGER_MMR_INDEX_NAMESPACE_ID"),
@@ -147,6 +157,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 
 	logConfigValue(logger, "R2_URL", c.R2URL)
+	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
 	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
 	logSecretDigest(logger, "AWS_SECRET_ACCESS_KEY", c.AWSSecretAccessKey)
 	logConfigValue(logger, "AWS_REGION", c.AWSRegion)
@@ -180,7 +191,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")
 	}
 	if c.AWSSecretAccessKey == "" {
-		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing")
+		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing (set AWS_SECRET_ACCESS_KEY or set R2_TOKEN to derive it)")
 	}
 
 	if c.CloudflareAccountID == "" {

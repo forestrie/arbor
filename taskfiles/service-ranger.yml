@@ -17,19 +17,19 @@ tasks:
         source .secret.env.ranger
         set +a
 
-        if [ -z "$RANGER_QUEUE_URL" ]; then
-          echo "Error: RANGER_QUEUE_URL must be set in .secret.env.ranger"
+        if [ -z "QUEUE_URL" ]; then
+          echo "Error: QUEUE_URL must be set in .secret.env.ranger"
           exit 1
         fi
 
-        if [ -z "$RANGER_QUEUE_API_TOKEN" ]; then
-          echo "Error: RANGER_QUEUE_API_TOKEN must be set in .secret.env.ranger"
+        if [ -z "$QUEUE_TOKEN" ]; then
+          echo "Error: QUEUE_TOKEN must be set in .secret.env.ranger"
           exit 1
         fi
 
         echo "Setting GitHub Actions secrets..."
-        gh secret set RANGER_QUEUE_URL --body "$RANGER_QUEUE_URL"
-        gh secret set RANGER_QUEUE_API_TOKEN --body "$RANGER_QUEUE_API_TOKEN"
+        gh secret set QUEUE_URL --body "$QUEUE_URL"
+        gh secret set QUEUE_TOKEN --body "$QUEUE_TOKEN"
         echo "Secrets updated successfully"
 
   build:
@@ -88,10 +88,10 @@ tasks:
         # https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/5b0ba7f4ce3e4c688d4094d448e48edc
         echo curl -v -X POST \
           "$QUEUE_URL/messages/peek" \
-            -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d "{\"batch_size\":1}"
+            -H "Authorization: Bearer $QUEUE_TOKEN" -H "Content-Type: application/json" -d "{\"batch_size\":1}"
         curl -v -X POST \
           "$QUEUE_URL/messages/peek" \
-            -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d '{"batch_size":1}'
+            -H "Authorization: Bearer $QUEUE_TOKEN" -H "Content-Type: application/json" -d '{"batch_size":1}'
 
   pull:msg:
     dir: "{{.ROOT_DIR}}"
@@ -101,10 +101,10 @@ tasks:
         # https://api.cloudflare.com/client/v4/accounts/68f25af297c4235c3f1c47b2f73925b0/queues/5b0ba7f4ce3e4c688d4094d448e48edc
         echo curl -v -X POST \
           "$QUEUE_URL/messages/pull" \
-            -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d "{\"batch_size\":1}"
+            -H "Authorization: Bearer $QUEUE_TOKEN" -H "Content-Type: application/json" -d "{\"batch_size\":1}"
         curl -v -X POST \
           "$QUEUE_URL/messages/pull" \
-        -H "Authorization: Bearer $QUEUE_API_TOKEN" -H "Content-Type: application/json" -d '{"batch_size":1, "visibility_timeout_ms": 1000}'
+        -H "Authorization: Bearer $QUEUE_TOKEN" -H "Content-Type: application/json" -d '{"batch_size":1, "visibility_timeout_ms": 1000}'
 
   push:
     desc: Push ranger Docker image
