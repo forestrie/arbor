@@ -337,7 +337,7 @@ func (q *QueueConsumer) bulkWriteReceiptCache(ctx context.Context, entries map[s
 			V:            1,
 			MassifHeight: e.MassifHeight,
 			MMRIndex:     strconv.FormatUint(e.MMRIndex, 10),
-			IDTimestamp:  strconv.FormatUint(e.IDTimestamp, 10),
+			IDTimestamp:  fmt.Sprintf("0x%x", e.IDTimestamp),
 		}
 		b, err := json.Marshal(value)
 		if err != nil {
