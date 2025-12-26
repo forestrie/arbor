@@ -337,7 +337,10 @@ func (q *QueueConsumer) bulkWriteReceiptCache(ctx context.Context, entries map[s
 			V:            1,
 			MassifHeight: e.MassifHeight,
 			MMRIndex:     strconv.FormatUint(e.MMRIndex, 10),
-			IDTimestamp:  fmt.Sprintf("0x%x", e.IDTimestamp),
+			// Store idtimestamp as lowercase hex digits without a 0x prefix so that
+			// Canopy can treat it as a hex string and reconstruct the original
+			// uint64 value.
+			IDTimestamp: fmt.Sprintf("%x", e.IDTimestamp),
 		}
 		b, err := json.Marshal(value)
 		if err != nil {
