@@ -73,19 +73,30 @@ UrkleIndexRegion (within a preallocated massif index budget)
   +----------------------+
 ```
 
+**Alignment note**: All record sizes are multiples of 32 bytes (`LeafRecordBytes=128`,
+`NodeRecordBytes=64`, `FrontierStateV1Bytes=544`), so region boundaries naturally
+align when base offsets are 32-byte aligned.
+
 The `leaf table` is required because node records do not store full leaf payloads.
 
 ## Leaf table encoding (fixed-size records)
 
-Each `leafOrdinal` maps to `(key, valueBytes[32])`:
+Each `leafOrdinal` maps to `(key, valueBytes[32])` plus auxiliary storage:
 
 ```text
-LeafRecord (LeafRecordBytes = 40), big-endian integers
+LeafRecord (LeafRecordBytes = 128), big-endian integers
 
 offset  size  meaning
 0       8     key_be8 (uint64 idtimestamp)
-8       32    valueBytes (content-hash, 32 bytes)
+8       32    valueBytes (content-hash, 32 bytes) [committed by trie hash]
+40      24    extra1 (auxiliary; NOT committed by trie hash)
+64      32    extra2 (auxiliary; NOT committed by trie hash)
+96      32    extra3 (auxiliary; NOT committed by trie hash)
 ```
+
+The record size is intentionally a multiple of 32 bytes. To achieve this without
+truncating `valueBytes` (which is committed by the trie hash), 8 bytes are
+sacrificed from the first extra field (24 bytes instead of 32).
 
 **Semantics of valueBytes**: The `valueBytes` field stores the **content-hash**
 directly (not the MMR leaf hash `H(idtimestamp || content-hash)`). This enables
@@ -93,12 +104,19 @@ direct verification of `(idtimestamp, content)` pair exclusion without needing
 to check the MMR structure. The MMR tree stores `H(idtimestamp || content-hash)`
 as its leaf values, while the trie commits to content hashes directly.
 
+**Semantics of extra fields**: The `extra1`, `extra2`, and `extra3` fields
+provide auxiliary storage for Forestrie v2 index needs. These are NOT committed
+by the trie hash and can be used for application-specific metadata without
+affecting trie integrity.
+
 Rationale:
 
 - Keeps node records small and fixed-size.
 - Allows proof generation and verification to recover leaf payload by ordinal.
 - Storing content-hash directly enables efficient exclusion proofs for specific
   content under a given idtimestamp.
+- Auxiliary fields support extended index use cases without altering the
+  cryptographic commitment.
 
 ## Node store encoding (B′: postorder + spans, no child refs)
 
@@ -229,19 +247,22 @@ Proof wire formats are module-internal Go structs. External CBOR/COSE formats ar
 
 ### Inclusion proof
 
-An inclusion proof must allow a verifier to recompute the root and recover `(valueBytes, leafOrdinal)`.
+An inclusion proof must allow a verifier to recompute the root and recover
+`(valueBytes, leafOrdinal)`.
 
 ```text
 InclusionProof
 
-- targetKey (uint64)
-- leafOrdinal (uint32)
-- valueBytes [32]byte
-- steps[] where each step includes:
-  - bit (uint8)          // the crit-bit index for this branch
-  - siblingHash [32]byte // hash of the sibling subtree root
-  - dir (uint8)          // 0=went left, 1=went right (may be derived from targetKey and bit)
+- Key (uint64)           // the key being proven
+- LeafOrdinal (uint32)
+- Value [32]byte         // valueBytes for this leaf
+- Steps[] where each step includes:
+  - Bit (uint8)          // the crit-bit index for this branch
+  - Dir (uint8)          // 0=went left, 1=went right
+  - SiblingHash [32]byte // hash of the sibling subtree root
 ```
+
+**Step ordering**: Steps are ordered from **leaf to root**.
 
 Verification recomputes:
 
@@ -253,18 +274,20 @@ The verifier should return `leafOrdinal` and `valueBytes` as the “natural side
 
 ### Exclusion proof
 
-For absence, we return a proof of membership for the **encountered leaf** reached by trie traversal
-and show it is not the target key.
+For absence, we return a proof of membership for the **encountered leaf** reached
+by trie traversal and show it is not the target key.
 
 ```text
 ExclusionProof
 
-- targetKey (uint64)
-- encounteredKey (uint64)
-- leafOrdinal (uint32)
-- valueBytes [32]byte
-- steps[] (same shape as inclusion proof, for encounteredKey)
+- TargetKey (uint64)      // the key being proven absent
+- EncounteredKey (uint64) // the leaf key reached by traversal
+- LeafOrdinal (uint32)
+- Value [32]byte          // valueBytes for the encountered leaf
+- Steps[] (same shape as inclusion proof)
 ```
+
+**Step ordering**: Steps are ordered from **leaf to root** (same as inclusion).
 
 Verification checks:
 
@@ -279,9 +302,9 @@ Given `leafCount = N`:
 ```text
 maxNodes = 2*N - 1
 
-leafTableBytes = N * LeafRecordBytes
-nodeStoreBytes = maxNodes * NodeRecordBytes
-frontierBytes  = FrontierStateV1Bytes
+leafTableBytes  = N * LeafRecordBytes        (N * 128)
+nodeStoreBytes  = maxNodes * NodeRecordBytes ((2N-1) * 64)
+frontierBytes   = FrontierStateV1Bytes       (544)
 ```
 
 Implementations MUST check that:
