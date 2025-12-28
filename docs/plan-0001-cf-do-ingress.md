@@ -34,6 +34,8 @@ latency by 100-500ms and simplifying the architecture.
   Fixed visibility timeout
 - [adr-0005-cf-do-ingress-pull-encoding.md](adr-0005-cf-do-ingress-pull-encoding.md):
   CBOR encoding for pull interface
+- [adr-0006-cf-do-ingress-hash-function.md](adr-0006-cf-do-ingress-hash-function.md):
+  Non-cryptographic hash function for poller assignment
 
 ---
 

@@ -18,6 +18,8 @@ Key architectural decisions are documented separately:
   visibility timeout per pull
 - [ADR-0005](adr-0005-cf-do-ingress-pull-encoding.md): CBOR encoding for
   HTTP pull interface
+- [ADR-0006](adr-0006-cf-do-ingress-hash-function.md): Non-cryptographic
+  hash function (djb2) for poller assignment
 
 ## Document structure
 
