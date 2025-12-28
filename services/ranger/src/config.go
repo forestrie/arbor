@@ -19,10 +19,10 @@ type Config struct {
 	LogLevel        string
 	ShutdownTimeout time.Duration
 
-	// DO Ingress configuration
+	// DO Ingress queue configuration
 	// See: arbor/docs/arc-cloudflare-do-ingress.md
-	IngressBaseURL    string        // forestrie-ingress worker URL
-	IngressToken      string        // Bearer token for pull/ack endpoints
+	QueueURL          string        // forestrie-ingress worker URL
+	QueueToken        string        // Bearer token for pull/ack endpoints
 	PollerId          string        // Unique identifier for this poller (auto-generated if empty)
 	QueueBatchSize    int           // Maximum entries per pull request
 	PollInterval      time.Duration // Interval between poll requests
@@ -152,8 +152,8 @@ func LoadConfig() Config {
 		Port:               getEnvOrDefault("PORT", "9090"),
 		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
 		ShutdownTimeout:    getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		IngressBaseURL:     os.Getenv("INGRESS_BASE_URL"),
-		IngressToken:       os.Getenv("INGRESS_TOKEN"),
+		QueueURL:           os.Getenv("QUEUE_URL"),
+		QueueToken:         os.Getenv("QUEUE_TOKEN"),
 		PollerId:           os.Getenv("POLLER_ID"),
 		QueueBatchSize:     getInt("QUEUE_BATCH_SIZE", 100),
 		PollInterval:       getDuration("POLL_INTERVAL", 5*time.Second),
@@ -173,8 +173,8 @@ func LoadConfig() Config {
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {
-	logConfigValue(logger, "INGRESS_BASE_URL", c.IngressBaseURL)
-	logSecretDigest(logger, "INGRESS_TOKEN", c.IngressToken)
+	logConfigValue(logger, "QUEUE_URL", c.QueueURL)
+	logSecretDigest(logger, "QUEUE_TOKEN", c.QueueToken)
 	logConfigValue(logger, "POLLER_ID", c.PollerId)
 	logConfigValue(logger, "QUEUE_BATCH_SIZE", c.QueueBatchSize)
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
@@ -192,11 +192,11 @@ func (c Config) LogConfig(logger *slog.Logger) {
 
 // Validate checks that all required configuration is present.
 func (c Config) Validate() error {
-	if c.IngressBaseURL == "" {
-		return fmt.Errorf("INGRESS_BASE_URL is required")
+	if c.QueueURL == "" {
+		return fmt.Errorf("QUEUE_URL is required")
 	}
-	if c.IngressToken == "" {
-		return fmt.Errorf("INGRESS_TOKEN is required")
+	if c.QueueToken == "" {
+		return fmt.Errorf("QUEUE_TOKEN is required")
 	}
 	if c.QueueBatchSize <= 0 {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be greater than zero")

@@ -56,7 +56,7 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 	defer ticker.Stop()
 
 	c.logger.Info("starting ingress consumer",
-		"ingressURL", c.cfg.IngressBaseURL,
+		"queueURL", c.cfg.QueueURL,
 		"pollerId", c.pollerId,
 		"pollInterval", c.cfg.PollInterval,
 		"batchSize", c.cfg.QueueBatchSize,
@@ -164,12 +164,12 @@ func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 		return nil, fmt.Errorf("encode pull request: %w", err)
 	}
 
-	url := strings.TrimSuffix(c.cfg.IngressBaseURL, "/") + "/queue/pull"
+	url := strings.TrimSuffix(c.cfg.QueueURL, "/") + "/queue/pull"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.cfg.IngressToken)
+	httpReq.Header.Set("Authorization", "Bearer "+c.cfg.QueueToken)
 	httpReq.Header.Set("Content-Type", "application/cbor")
 
 	httpResp, err := c.httpClient.Do(ctx, httpReq)
@@ -208,12 +208,12 @@ func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, lim
 		return fmt.Errorf("encode ack request: %w", err)
 	}
 
-	url := strings.TrimSuffix(c.cfg.IngressBaseURL, "/") + "/queue/ack"
+	url := strings.TrimSuffix(c.cfg.QueueURL, "/") + "/queue/ack"
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create ack request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+c.cfg.IngressToken)
+	httpReq.Header.Set("Authorization", "Bearer "+c.cfg.QueueToken)
 	httpReq.Header.Set("Content-Type", "application/cbor")
 
 	httpResp, err := c.httpClient.Do(ctx, httpReq)
