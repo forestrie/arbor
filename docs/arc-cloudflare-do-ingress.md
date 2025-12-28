@@ -22,6 +22,8 @@ Key architectural decisions are documented separately:
   hash function (djb2) for poller assignment
 - [ADR-0007](adr-0007-cf-do-ingress-poller-limits.md): Poller scaling
   limits (500 max with graceful degradation)
+- [ADR-0008](adr-0008-cf-do-ingress-sequence-space.md): Sequence number
+  space and rollover (theoretical limit, no mitigation needed)
 
 ## Document structure
 

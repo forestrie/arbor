@@ -38,6 +38,8 @@ latency by 100-500ms and simplifying the architecture.
   Non-cryptographic hash function for poller assignment
 - [adr-0007-cf-do-ingress-poller-limits.md](adr-0007-cf-do-ingress-poller-limits.md):
   Poller scaling limits
+- [adr-0008-cf-do-ingress-sequence-space.md](adr-0008-cf-do-ingress-sequence-space.md):
+  Sequence number space and rollover
 
 ---
 
