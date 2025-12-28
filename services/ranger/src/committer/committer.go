@@ -20,6 +20,7 @@ import (
 	"github.com/forestrie/go-merklelog/massifs"
 	"github.com/forestrie/go-merklelog/massifs/snowflakeid"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
+	"github.com/forestrie/go-merklelog/mmr"
 )
 
 // Committer commits batches of entries into the merklelog.
@@ -80,7 +81,8 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 }
 
 // CommitLogGroup commits entries from the DO ingress queue for a single log.
-// Returns the count of successfully committed entries.
+// Returns a CommitResult with the count of successfully committed entries
+// and the sequencing metadata (firstLeafIndex, massifIndex) needed for ack.
 //
 // This method is called by the ingress consumer for each log group in parallel.
 // See: arbor/docs/arc-cloudflare-do-ingress.md
@@ -95,9 +97,9 @@ func (c *Committer) CommitLogGroup(
 	ctx context.Context,
 	logId []byte,
 	entries []ingress.Entry,
-) (int, error) {
+) (*ingress.CommitResult, error) {
 	if len(entries) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 
 	logID := massifstorage.LogID(logId)
@@ -105,21 +107,22 @@ func (c *Committer) CommitLogGroup(
 
 	store, err := c.factory.NewStore(logID)
 	if err != nil {
-		return 0, fmt.Errorf("create store for log %s: %w", logIDHex, err)
+		return nil, fmt.Errorf("create store for log %s: %w", logIDHex, err)
 	}
 
 	if err := store.SelectLog(ctx, logID); err != nil {
-		return 0, fmt.Errorf("select log %s: %w", logIDHex, err)
+		return nil, fmt.Errorf("select log %s: %w", logIDHex, err)
 	}
 
 	mc, err := massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 	if err != nil {
-		return 0, fmt.Errorf("get append context: %w", err)
+		return nil, fmt.Errorf("get append context: %w", err)
 	}
 
 	var (
-		mmrIndex   uint64
-		lastCommit int
+		mmrIndex       uint64
+		lastCommit     int
+		firstLeafIndex uint64 = ^uint64(0) // sentinel: max uint64
 	)
 
 	for i, entry := range entries {
@@ -162,7 +165,10 @@ func (c *Committer) CommitLogGroup(
 		mmrIndex, err = mc.AddIndexedEntry(leafHash)
 		if errors.Is(err, massifs.ErrMassifFull) {
 			if err = massifs.CommitContext(ctx, store, &mc); err != nil {
-				return lastCommit, fmt.Errorf("commit on massif full: %w", err)
+				return &ingress.CommitResult{
+					Committed:      lastCommit,
+					FirstLeafIndex: firstLeafIndex,
+				}, fmt.Errorf("commit on massif full: %w", err)
 			}
 			c.logNotice(ctx,
 				"committed (massif full)",
@@ -174,7 +180,10 @@ func (c *Committer) CommitLogGroup(
 			lastCommit = i
 			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 			if err != nil {
-				return lastCommit, fmt.Errorf("get append context after rollover: %w", err)
+				return &ingress.CommitResult{
+					Committed:      lastCommit,
+					FirstLeafIndex: firstLeafIndex,
+				}, fmt.Errorf("get append context after rollover: %w", err)
 			}
 
 			mmrIndex, err = mc.AddIndexedEntry(leafHash)
@@ -188,24 +197,40 @@ func (c *Committer) CommitLogGroup(
 			continue
 		}
 
+		// Track first leaf index for the batch
+		leafIndex := mmr.LeafIndex(mmrIndex)
+		if firstLeafIndex == ^uint64(0) {
+			firstLeafIndex = leafIndex
+		}
+
 		if err := mc.IndexLeaf(idTimestamp, entry.ContentHash); err != nil {
-			return lastCommit, fmt.Errorf("update v2 index: %w", err)
+			return &ingress.CommitResult{
+				Committed:      lastCommit,
+				FirstLeafIndex: firstLeafIndex,
+			}, fmt.Errorf("update v2 index: %w", err)
 		}
 
 		mc.SetLastIDTimestamp(idTimestamp)
 	}
 
 	if err := massifs.CommitContext(ctx, store, &mc); err != nil {
-		return lastCommit, fmt.Errorf("final commit: %w", err)
+		return &ingress.CommitResult{
+			Committed:      lastCommit,
+			FirstLeafIndex: firstLeafIndex,
+		}, fmt.Errorf("final commit: %w", err)
 	}
 	c.logNotice(ctx,
 		"committed",
 		"logId", logIDHex,
 		"index", mmrIndex,
 		"count", len(entries)-lastCommit,
+		"firstLeafIndex", firstLeafIndex,
 	)
 
-	return len(entries), nil
+	return &ingress.CommitResult{
+		Committed:      len(entries),
+		FirstLeafIndex: firstLeafIndex,
+	}, nil
 }
 
 func (c *Committer) logNotice(ctx context.Context, msg string, args ...any) {

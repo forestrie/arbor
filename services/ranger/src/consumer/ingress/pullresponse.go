@@ -1,10 +1,3 @@
-// Package ingress provides types and functions for consuming entries from the
-// forestrie-ingress Durable Object queue.
-//
-// The DO queue replaces the Cloudflare Queue-based ingress path, providing
-// domain-aware batching by logId and limit-based acknowledgement.
-//
-// See: arbor/docs/arc-cloudflare-do-ingress.md
 package ingress
 
 import (
@@ -12,13 +5,6 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 )
-
-// PullRequest is sent to POST /queue/pull.
-type PullRequest struct {
-	PollerId     string `cbor:"pollerId"`
-	BatchSize    int    `cbor:"batchSize"`
-	VisibilityMs int    `cbor:"visibilityMs"`
-}
 
 // PullResponse is returned from POST /queue/pull.
 // Wire format is a positional CBOR array: [version, leaseExpiry, logGroups].
@@ -45,20 +31,6 @@ type Entry struct {
 	Extra1      []byte
 	Extra2      []byte
 	Extra3      []byte
-}
-
-// AckRequest is sent to POST /queue/ack.
-// Uses limit-based ack because seq values are non-contiguous per-log.
-// See: arbor/docs/arc-cloudflare-do-ingress.md section 2.3
-type AckRequest struct {
-	LogId []byte `cbor:"logId"`
-	SeqLo uint64 `cbor:"seqLo"`
-	Limit uint64 `cbor:"limit"`
-}
-
-// AckResponse is returned from POST /queue/ack.
-type AckResponse struct {
-	Deleted int `cbor:"deleted"`
 }
 
 // DecodePullResponse decodes a CBOR pull response from the DO.
@@ -208,23 +180,4 @@ func toBytesOrNil(v any) []byte {
 		return nil
 	}
 	return toBytes(v)
-}
-
-// EncodePullRequest encodes a pull request to CBOR.
-func EncodePullRequest(req PullRequest) ([]byte, error) {
-	return cbor.Marshal(req)
-}
-
-// EncodeAckRequest encodes an ack request to CBOR.
-func EncodeAckRequest(req AckRequest) ([]byte, error) {
-	return cbor.Marshal(req)
-}
-
-// DecodeAckResponse decodes a CBOR ack response.
-func DecodeAckResponse(data []byte) (*AckResponse, error) {
-	var resp AckResponse
-	if err := cbor.Unmarshal(data, &resp); err != nil {
-		return nil, fmt.Errorf("unmarshal ack response: %w", err)
-	}
-	return &resp, nil
 }

@@ -19,7 +19,7 @@ import (
 
 // LogGroupCommitter processes a batch of entries for a single log.
 type LogGroupCommitter interface {
-	CommitLogGroup(ctx context.Context, logId []byte, entries []Entry) (int, error)
+	CommitLogGroup(ctx context.Context, logId []byte, entries []Entry) (*CommitResult, error)
 }
 
 // Consumer polls the forestrie-ingress Durable Object for entries.
@@ -139,7 +139,7 @@ func (c *Consumer) pollCycle(ctx context.Context) (bool, error) {
 func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 	logIdHex := hex.EncodeToString(group.LogId)
 
-	committed, err := c.committer.CommitLogGroup(ctx, group.LogId, group.Entries)
+	result, err := c.committer.CommitLogGroup(ctx, group.LogId, group.Entries)
 	if err != nil {
 		c.logger.Warn("commit failed",
 			"logId", logIdHex,
@@ -150,7 +150,7 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 		return
 	}
 
-	if committed == 0 {
+	if result == nil || result.Committed == 0 {
 		c.logger.Debug("no entries committed",
 			"logId", logIdHex,
 		)
@@ -159,13 +159,14 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 
 	c.logger.Info("committed entries",
 		"logId", logIdHex,
-		"committed", committed,
+		"committed", result.Committed,
 		"total", len(group.Entries),
+		"firstLeafIndex", result.FirstLeafIndex,
 	)
 
-	// Ack using limit-based ack.
-	// See: arbor/docs/arc-cloudflare-do-ingress.md section 2.3
-	if err := c.ackFirst(ctx, group.LogId, group.SeqLo, committed); err != nil {
+	// Ack using limit-based ack with sequencing metadata.
+	// See: arbor/docs/arc-cloudflare-do-ingress.md section 2.3 and 3.12
+	if err := c.ackFirst(ctx, group.LogId, group.SeqLo, result); err != nil {
 		// IMPORTANT: Entries were committed but ack failed.
 		// They will redeliver and may cause duplicate commits.
 		// See arc-cloudflare-do-ingress.md section 3.8 and 3.10 for
@@ -173,7 +174,7 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 		c.logger.Warn("ack failed after commit",
 			"logId", logIdHex,
 			"seqLo", group.SeqLo,
-			"committed", committed,
+			"committed", result.Committed,
 			"error", err,
 		)
 	}
@@ -220,15 +221,18 @@ func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 }
 
 // ackFirst acknowledges committed entries using limit-based ack.
-func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, limit int) error {
+// Includes sequencing metadata (firstLeafIndex, massifIndex) for return path unification.
+func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, result *CommitResult) error {
 	if c.cfg.SuppressAcknowledge {
 		return nil
 	}
 
 	req := AckRequest{
-		LogId: logId,
-		SeqLo: seqLo,
-		Limit: uint64(limit),
+		LogId:          logId,
+		SeqLo:          seqLo,
+		Limit:          uint64(result.Committed),
+		FirstLeafIndex: result.FirstLeafIndex,
+		MassifHeight:   uint64(c.cfg.MassifHeight),
 	}
 
 	body, err := EncodeAckRequest(req)

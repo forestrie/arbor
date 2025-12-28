@@ -1906,28 +1906,30 @@ ALTER TABLE queue_entries ADD COLUMN leaf_index INTEGER DEFAULT NULL;
 ALTER TABLE queue_entries ADD COLUMN massif_index INTEGER DEFAULT NULL;
 ```
 
-These columns are NULL on enqueue and populated on ack. After ack completes,
-the row is deleted, but between the UPDATE and DELETE there is a window where
-the sequencing result is available for query.
+These columns are NULL on enqueue and populated on ack. The key insight is
+that **entries are retained after sequencing** (not deleted) to serve as
+the sequencing result cache. This unifies the pending queue and result cache
+into a single table.
 
-Also add a new table to persist sequencing results after ack:
+- `leaf_index IS NULL` → entry is pending/unsequenced
+- `leaf_index IS NOT NULL` → entry is sequenced (available for lookup)
+
+Add indexes for the new query patterns:
 
 ```sql
-CREATE TABLE IF NOT EXISTS sequenced_entries (
-  content_hash BLOB PRIMARY KEY,
-  log_id BLOB NOT NULL,
-  leaf_index INTEGER NOT NULL,
-  massif_index INTEGER NOT NULL,
-  sequenced_at INTEGER NOT NULL
-);
+-- For resolveContent lookups by content hash
+CREATE INDEX IF NOT EXISTS idx_content_hash
+  ON queue_entries (content_hash);
 
-CREATE INDEX IF NOT EXISTS idx_sequenced_log
-  ON sequenced_entries (log_id, leaf_index);
+-- For cleanup queries (sequenced entries per log)
+CREATE INDEX IF NOT EXISTS idx_log_leaf
+  ON queue_entries (log_id, leaf_index) WHERE leaf_index IS NOT NULL;
 ```
 
 ### 3.12.3 Updated ackFirst signature
 
-The `ackFirst` method now requires sequencing metadata from ranger:
+The `ackFirst` method now requires sequencing metadata from ranger, including
+`massifHeight` for cleanup calculations:
 
 ```typescript
 async ackFirst(
@@ -1936,15 +1938,12 @@ async ackFirst(
   limit: number,
   firstLeafIndex: number,
   massifIndex: number,
-): Promise<{ deleted: number }>
+  massifHeight: number,
+): Promise<{ acked: number }>
 ```
 
-The implementation:
-
-1. Select the first N entries for logId starting from seqLo (existing logic)
-2. For each entry at position i, compute `leafIndex = firstLeafIndex + i`
-3. Insert into `sequenced_entries` with the computed leaf_index and massifIndex
-4. Delete from `queue_entries` (existing logic)
+The implementation uses `UPDATE FROM` with a window function to compute
+leaf indices efficiently, then cleans up old sequenced entries:
 
 ```typescript
 async ackFirst(
@@ -1953,49 +1952,72 @@ async ackFirst(
   limit: number,
   firstLeafIndex: number,
   massifIndex: number,
-): Promise<{ deleted: number }> {
-  // Find entries to ack (existing logic)
-  const toAck = this.ctx.storage.sql
-    .exec<{ seq: number; content_hash: ArrayBuffer }>(
-      `SELECT seq, content_hash FROM queue_entries
-       WHERE log_id = ? AND seq >= ?
+  massifHeight: number,
+): Promise<{ acked: number }> {
+  this.ensureSchema();
+
+  if (limit <= 0) {
+    return { acked: 0 };
+  }
+
+  // Update entries with sequencing results using UPDATE FROM + window function
+  const result = this.ctx.storage.sql.exec(
+    `UPDATE queue_entries
+     SET 
+       leaf_index = ? + ranked.offset,
+       massif_index = ?,
+       visible_after = NULL
+     FROM (
+       SELECT 
+         seq,
+         ROW_NUMBER() OVER (ORDER BY seq ASC) - 1 as offset
+       FROM queue_entries
+       WHERE log_id = ? AND seq >= ? AND leaf_index IS NULL
        ORDER BY seq ASC
-       LIMIT ?`,
-      logId, seqLo, limit,
-    )
-    .toArray();
+       LIMIT ?
+     ) as ranked
+     WHERE queue_entries.seq = ranked.seq`,
+    firstLeafIndex,
+    massifIndex,
+    logId,
+    seqLo,
+    limit,
+  );
 
-  if (toAck.length === 0) return { deleted: 0 };
+  const acked = result.rowsWritten;
 
-  const now = Date.now();
+  if (acked > 0) {
+    this.pendingCount = Math.max(0, this.pendingCount - acked);
 
-  // Insert sequencing results
-  for (let i = 0; i < toAck.length; i++) {
-    const leafIndex = firstLeafIndex + i;
+    // Cleanup: retain ~2 massifs worth of sequenced entries per log
+    const leavesPerMassif = 1 << massifHeight;
+    const retainCount = leavesPerMassif * 2;
+
     this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO sequenced_entries
-       (content_hash, log_id, leaf_index, massif_index, sequenced_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      toAck[i].content_hash,
+      `DELETE FROM queue_entries
+       WHERE log_id = ?
+         AND leaf_index IS NOT NULL
+         AND leaf_index < (
+           SELECT COALESCE(MAX(leaf_index), 0) - ?
+           FROM queue_entries
+           WHERE log_id = ? AND leaf_index IS NOT NULL
+         )`,
       logId,
-      leafIndex,
-      massifIndex,
-      now,
+      retainCount,
+      logId,
     );
   }
 
-  // Delete from queue (existing logic)
-  const seqs = toAck.map((r) => r.seq);
-  const result = this.ctx.storage.sql.exec(
-    `DELETE FROM queue_entries
-     WHERE seq IN (${seqs.map(() => "?").join(",")})`,
-    ...seqs,
-  );
-
-  this.pendingCount -= result.rowsWritten;
-  return { deleted: result.rowsWritten };
+  return { acked };
 }
 ```
+
+Key implementation details:
+
+- `ROW_NUMBER() OVER (ORDER BY seq ASC) - 1` produces 0-based offsets
+- `UPDATE FROM` with derived table is SQLite 3.33+ syntax
+- Cleanup retains `2 * 2^massifHeight` entries (~32K for height 14)
+- Entries are updated in-place, not deleted then re-inserted
 
 ### 3.12.4 Ranger ack update
 
@@ -2006,8 +2028,9 @@ type AckRequest struct {
     LogId          []byte
     SeqLo          uint64
     Limit          uint64
-    FirstLeafIndex uint64  // NEW: leaf index of first entry
-    MassifIndex    uint64  // NEW: massif index for all entries
+    FirstLeafIndex uint64  // leaf index of first entry in batch
+    MassifIndex    uint64  // massif containing all entries
+    MassifHeight   uint64  // for cleanup calculation
 }
 
 func (r *Ranger) ackFirst(
@@ -2017,6 +2040,7 @@ func (r *Ranger) ackFirst(
     limit int,
     firstLeafIndex uint64,
     massifIndex uint64,
+    massifHeight uint64,
 ) error {
     req := AckRequest{
         LogId:          logId,
@@ -2024,6 +2048,7 @@ func (r *Ranger) ackFirst(
         Limit:          uint64(limit),
         FirstLeafIndex: firstLeafIndex,
         MassifIndex:    massifIndex,
+        MassifHeight:   massifHeight,
     }
     // ... send request ...
 }
@@ -2153,20 +2178,26 @@ export async function getIdtimestampFromMassif(
 
 ### 3.12.8 Garbage collection
 
-The `sequenced_entries` table will grow unboundedly. Implement periodic
-cleanup of old entries:
+Cleanup is integrated into `ackFirst` and runs on every ack. Each log
+retains approximately `2 * 2^massifHeight` sequenced entries (about 2
+massifs worth for typical queries). This provides:
 
-```typescript
-private async cleanupOldSequencedEntries(): void {
-  const cutoff = Date.now() - SEQUENCED_RETENTION_MS; // e.g., 24 hours
-  this.ctx.storage.sql.exec(
-    `DELETE FROM sequenced_entries WHERE sequenced_at < ?`,
-    cutoff,
-  );
-}
+- Bounded storage per log (~32K entries for height 14)
+- Recent entries always available for status queries
+- No separate cleanup job or alarm needed
+
+The cleanup query in ackFirst:
+
+```sql
+DELETE FROM queue_entries
+WHERE log_id = ?
+  AND leaf_index IS NOT NULL
+  AND leaf_index < (
+    SELECT COALESCE(MAX(leaf_index), 0) - ?
+    FROM queue_entries
+    WHERE log_id = ? AND leaf_index IS NOT NULL
+  )
 ```
-
-Call this periodically (e.g., on every 1000th ack or via alarm).
 
 ### 3.12.9 Benefits
 
@@ -2179,10 +2210,48 @@ Call this periodically (e.g., on every 1000th ack or via alarm).
 
 ### 3.12.10 Trade-offs
 
-- **Storage growth**: `sequenced_entries` table requires periodic cleanup.
-- **R2 read on status query**: Reading the massif adds latency, but this is
-  only on the final redirect (not during polling).
-- **Ack wire format change**: Requires ranger update to send leaf/massif info.
+- **Storage growth**: Bounded per-log (~32K entries for height 14), cleaned
+  up on each ack.
+- **R2 read on status query**: Reading the massif adds latency (~50-100ms),
+  but this is only on the final redirect (not during polling).
+- **Ack wire format change**: Requires ranger update to send leaf/massif/height.
+
+### 3.12.11 Latency analysis
+
+The unified design eliminates ~350-750ms from the return path:
+
+| Component | Current (ranger-cache) | Unified DO |
+|-----------|----------------------|------------|
+| Checkpoint write | ~200ms | Not on critical path |
+| R2 notification | ~100-500ms | Eliminated |
+| ranger-cache query | ~50ms | Eliminated |
+| DO resolveContent | N/A | ~20ms |
+
+The remaining latency bottlenecks (not addressed here) are:
+- Ranger poll interval (50ms-2s with backoff)
+- R2 commit latency (~500-800ms)
+
+### 3.12.12 Future latency improvements
+
+Two approaches could further reduce end-to-end latency:
+
+**1. Push-based ranger notification**
+
+Replace polling with WebSocket or Server-Sent Events from the DO to ranger.
+When entries are enqueued, the DO pushes a notification to connected rangers.
+This eliminates poll interval latency entirely.
+
+Complexity: Medium. Requires WebSocket support in DO (available) and
+connection management in ranger. Must handle reconnection and missed messages.
+
+**2. Cross-log commit batching**
+
+Batch R2 writes across multiple logs to amortize per-request overhead.
+Ranger accumulates entries from multiple logs and commits them in a single
+R2 write operation.
+
+Complexity: Medium-high. Requires careful handling of partial failures
+and per-log ack granularity. May conflict with per-log massif isolation.
 
 ---
 
