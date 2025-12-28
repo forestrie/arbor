@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -49,43 +50,70 @@ func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.
 }
 
 // ConsumeQueue starts the poll loop that consumes entries from the DO queue.
+// Uses exponential backoff: resets to min interval on success, doubles on empty.
 func (c *Consumer) ConsumeQueue(ctx context.Context) {
 	defer c.httpClient.Close()
-
-	ticker := time.NewTicker(c.cfg.PollInterval)
-	defer ticker.Stop()
 
 	c.logger.Info("starting ingress consumer",
 		"queueURL", c.cfg.QueueURL,
 		"pollerId", c.pollerId,
-		"pollInterval", c.cfg.PollInterval,
+		"pollIntervalMin", c.cfg.PollIntervalMin,
+		"pollIntervalMax", c.cfg.PollIntervalMax,
 		"batchSize", c.cfg.QueueBatchSize,
 		"visibilityMs", c.cfg.VisibilityTimeout.Milliseconds(),
 	)
+
+	currentInterval := c.cfg.PollIntervalMin
 
 	for {
 		select {
 		case <-ctx.Done():
 			c.logger.Debug("ingress consumer stopping")
 			return
-		case <-ticker.C:
-			if err := c.pollCycle(ctx); err != nil {
-				c.logger.Error("poll cycle failed", "error", err)
+		default:
+		}
+
+		hadEntries, err := c.pollCycle(ctx)
+		if err != nil {
+			c.logger.Error("poll cycle failed", "error", err)
+		}
+
+		if hadEntries {
+			// Reset to minimum interval on success
+			currentInterval = c.cfg.PollIntervalMin
+		} else {
+			// Double interval on empty response (exponential backoff)
+			currentInterval *= 2
+			if currentInterval > c.cfg.PollIntervalMax {
+				currentInterval = c.cfg.PollIntervalMax
 			}
+		}
+
+		// Add jitter: ±10% of current interval
+		jitter := time.Duration(rand.Int63n(int64(currentInterval) / 5))
+		jitter -= currentInterval / 10 // center the jitter around zero
+		sleepDuration := currentInterval + jitter
+
+		select {
+		case <-ctx.Done():
+			c.logger.Debug("ingress consumer stopping")
+			return
+		case <-time.After(sleepDuration):
 		}
 	}
 }
 
 // pollCycle pulls entries from the DO and processes them.
-func (c *Consumer) pollCycle(ctx context.Context) error {
+// Returns true if entries were processed, false if queue was empty.
+func (c *Consumer) pollCycle(ctx context.Context) (bool, error) {
 	resp, err := c.pull(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	if len(resp.LogGroups) == 0 {
 		c.logger.Debug("no entries to process")
-		return nil
+		return false, nil
 	}
 
 	c.logger.Info("pulled entries",
@@ -104,7 +132,7 @@ func (c *Consumer) pollCycle(ctx context.Context) error {
 	}
 	wg.Wait()
 
-	return nil
+	return true, nil
 }
 
 // processLogGroup commits entries for a single log and acks them.

@@ -25,7 +25,8 @@ type Config struct {
 	QueueToken        string        // Bearer token for pull/ack endpoints
 	PollerId          string        // Unique identifier for this poller (auto-generated if empty)
 	QueueBatchSize    int           // Maximum entries per pull request
-	PollInterval      time.Duration // Interval between poll requests
+	PollIntervalMin   time.Duration // Minimum (initial) poll interval
+	PollIntervalMax   time.Duration // Maximum poll interval (backoff ceiling)
 	VisibilityTimeout time.Duration // Lease duration for pulled entries
 
 	// R2 storage configuration (S3-compatible endpoint)
@@ -156,7 +157,8 @@ func LoadConfig() Config {
 		QueueToken:         os.Getenv("QUEUE_TOKEN"),
 		PollerId:           os.Getenv("POLLER_ID"),
 		QueueBatchSize:     getInt("QUEUE_BATCH_SIZE", 100),
-		PollInterval:       getDuration("POLL_INTERVAL", 5*time.Second),
+		PollIntervalMin:    getDuration("POLL_INTERVAL_MIN", 50*time.Millisecond),
+		PollIntervalMax:    getDuration("POLL_INTERVAL_MAX", 2*time.Second),
 		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		R2URL:              os.Getenv("R2_URL"),
 		R2Token:            r2Token,
@@ -177,7 +179,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logSecretDigest(logger, "QUEUE_TOKEN", c.QueueToken)
 	logConfigValue(logger, "POLLER_ID", c.PollerId)
 	logConfigValue(logger, "QUEUE_BATCH_SIZE", c.QueueBatchSize)
-	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
+	logConfigValue(logger, "POLL_INTERVAL_MIN", c.PollIntervalMin)
+	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
