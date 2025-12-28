@@ -36,6 +36,8 @@ latency by 100-500ms and simplifying the architecture.
   CBOR encoding for pull interface
 - [adr-0006-cf-do-ingress-hash-function.md](adr-0006-cf-do-ingress-hash-function.md):
   Non-cryptographic hash function for poller assignment
+- [adr-0007-cf-do-ingress-poller-limits.md](adr-0007-cf-do-ingress-poller-limits.md):
+  Poller scaling limits
 
 ---
 

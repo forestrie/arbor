@@ -20,6 +20,8 @@ Key architectural decisions are documented separately:
   HTTP pull interface
 - [ADR-0006](adr-0006-cf-do-ingress-hash-function.md): Non-cryptographic
   hash function (djb2) for poller assignment
+- [ADR-0007](adr-0007-cf-do-ingress-poller-limits.md): Poller scaling
+  limits (500 max with graceful degradation)
 
 ## Document structure
 
