@@ -1866,6 +1866,19 @@ Consider index on `content_hash` for efficient lookup.
 sequenced entry lookup), but reduces its criticality and simplifies the
 pre-sequence flow.
 
+## 3.11 Authentication
+
+_This section is a placeholder for future authentication design._
+
+The pull and ack HTTP endpoints currently have no authentication. Ranger
+sends an `Authorization: Bearer <token>` header which forestrie-ingress
+does not validate.
+
+Future work should add bearer token validation:
+- Add `QUEUE_AUTH_TOKEN` secret to forestrie-ingress worker environment
+- Validate `Authorization` header against secret in pull/ack handlers
+- Return 401 Unauthorized for invalid or missing tokens
+
 ---
 
 # Appendix: Full schema

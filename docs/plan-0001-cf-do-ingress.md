@@ -891,9 +891,13 @@ This structure keeps test files focused and easier to navigate. See
 
 ### Authentication
 
-The pull/ack endpoints should require the same bearer token currently used
-for queue authentication. This is configured via environment variable and
-validated in the HTTP handlers.
+**Status**: Not implemented in initial release.
+
+The pull/ack endpoints currently have no authentication. Ranger sends a
+bearer token but forestrie-ingress does not validate it.
+
+See `arc-cloudflare-do-ingress.md` section 3.11 for future authentication
+design.
 
 ### Monitoring
 
