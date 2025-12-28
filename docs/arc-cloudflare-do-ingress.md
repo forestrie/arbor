@@ -1180,10 +1180,19 @@ Each entry:
 
 **Content types:**
 
-- Pull request: `application/cbor`
+Non-observability endpoints (pull, ack) use CBOR exclusively. This simplifies
+implementation by avoiding base64/hex encoding of binary fields and provides
+a consistent wire format for both request and response bodies.
+
+- Pull request: `application/cbor` (required)
 - Pull response: `application/cbor`
-- Ack request: `application/cbor` or `application/json`
+- Ack request: `application/cbor` (required)
+- Ack response: `application/cbor`
+- Stats request: no body
+- Stats response: `application/json`
 - Error responses: `application/problem+json` (RFC 9457)
+
+Requests with incorrect `Content-Type` receive 415 Unsupported Media Type.
 
 ### Error responses
 

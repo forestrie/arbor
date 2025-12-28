@@ -424,21 +424,23 @@ if (url.pathname === "/queue/stats" && method === "GET") {
 
 ### 4.2 Implement pull handler
 
-- Parse CBOR or JSON request body
+- Require `Content-Type: application/cbor` (return 415 if not)
+- Parse CBOR request body
 - Get DO stub via `env.SEQUENCING_QUEUE.idFromName("global")`
 - Call `stub.pull(request)`
 - Return CBOR response with `Content-Type: application/cbor`
 
 ### 4.3 Implement ack handler
 
-- Parse CBOR or JSON request body
+- Require `Content-Type: application/cbor` (return 415 if not)
+- Parse CBOR request body (logId is ArrayBuffer directly, no base64)
 - Call `stub.ackRange(logId, fromSeq, toSeq)`
-- Return JSON response
+- Return CBOR response with `Content-Type: application/cbor`
 
-### 4.4 Implement stats handler
+### 4.4 Implement stats handler (observability endpoint)
 
 - Call `stub.stats()`
-- Return JSON response
+- Return JSON response (observability endpoints use JSON for easy tooling)
 
 ### 4.5 Implement error handling
 
