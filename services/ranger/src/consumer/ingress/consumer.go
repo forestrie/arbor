@@ -89,16 +89,21 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 			}
 		}
 
-		// Add jitter: ±10% of current interval
-		jitter := time.Duration(rand.Int63n(int64(currentInterval) / 5))
-		jitter -= currentInterval / 10 // center the jitter around zero
-		sleepDuration := currentInterval + jitter
+		// Add jitter: ±10% of current interval (skip if interval is 0)
+		sleepDuration := currentInterval
+		if currentInterval > 0 {
+			jitter := time.Duration(rand.Int63n(int64(currentInterval) / 5))
+			jitter -= currentInterval / 10 // center the jitter around zero
+			sleepDuration += jitter
+		}
 
-		select {
-		case <-ctx.Done():
-			c.logger.Debug("ingress consumer stopping")
-			return
-		case <-time.After(sleepDuration):
+		if sleepDuration > 0 {
+			select {
+			case <-ctx.Done():
+				c.logger.Debug("ingress consumer stopping")
+				return
+			case <-time.After(sleepDuration):
+			}
 		}
 	}
 }
