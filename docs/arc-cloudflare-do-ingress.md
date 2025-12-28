@@ -32,7 +32,9 @@ Key architectural decisions are documented separately:
 2. **Forestrie specifics** — optimisations and semantics tailored to
    how ranger processes and commits log entries, using a single global
    DO with consistent hashing for ranger assignment.
-3. **Integrated design** — the complete design synthesising all parts.
+3. **Integrated design** — the complete design synthesising all parts,
+   including ack-on-commit reliability analysis (section 3.8) and
+   future directions for deduplication improvements (section 3.10).
 
 ---
 
@@ -379,7 +381,10 @@ The caller (canopy-api) can convert this into an HTTP 503 with
 ## 1.7 Acknowledgement
 
 Acknowledgement deletes entries from the queue, signalling successful
-processing.
+processing. This section describes common ack patterns; the actual
+implemented approach for Forestrie is in section 2.3.
+
+### Conceptual patterns (not implemented)
 
 Simple per-entry ack:
 
@@ -403,7 +408,7 @@ async ack(seqs: number[]): Promise<{ deleted: number }> {
 }
 ```
 
-Range-based ack (for ordered processing):
+Range-based ack (assumes contiguous seq values per-log):
 
 ```typescript path=null start=null
 async ackRange(
@@ -433,13 +438,17 @@ The `logId` parameter ensures that only entries for the specified log
 are deleted. This is critical when using a single DO for multiple logs
 (see [ADR-0001](adr-0001-cf-do-ingress-single-do-architecture.md)).
 
-The deleted rows are exactly those that ranger committed to verifiable
-storage for that log. If ranger commits entries with seq 5, 6, 7 for
-logId X, it calls `ackRange(X, 5, 7)` and only those three rows are
-removed.
-
 Range ack is efficient when the consumer processes entries in order
-and commits a contiguous batch.
+and the seq values are contiguous within each log. However, **this
+approach does not work when seq values are allocated globally** because
+entries for a single log will have non-contiguous seq values.
+
+### Implemented approach: limit-based ack
+
+For Forestrie, seq is allocated globally across all logs, making per-log
+seq values non-contiguous. The implemented solution is `ackFirst` which
+deletes the first N entries by seq order for a given log. See section 2.3
+for the full design and rationale.
 
 ## 1.8 Operational tooling
 
@@ -723,66 +732,126 @@ function getQueueStub(env: Env) {
 With a single DO, fairness is centralised. The DO's pull method
 implements fair distribution across logs.
 
-## 2.3 Batch commit and range ack
+## 2.3 Batch commit and limit-based ack
 
 ranger's natural processing unit is a contiguous batch of entries for
 a single log, committed together to a massif. See
-[ADR-0003](adr-0003-cf-do-ingress-range-ack.md) for the full rationale.
+[ADR-0003](adr-0003-cf-do-ingress-range-ack.md) for the original range-based
+ack rationale.
 
-With the single DO design, ranger:
+### Non-contiguous sequence numbers
 
-1. Pulls a batch of entries (may include multiple logs).
-2. Groups entries by `logId`.
-3. For each log: commits entries to massif, acks the committed range.
+The DO allocates sequence numbers globally across all logs. When ranger
+pulls entries for a specific log, those entries have **non-contiguous**
+seq values because entries for other logs were interleaved:
 
-The DO's `ackRange(logId, fromSeq, toSeq)` method deletes exactly the
-committed entries:
+```
+Global sequence:  1   2   3   4   5   6   7   8   9  10  11  12
+Log A entries:    *           *       *               *
+Log B entries:        *   *       *       *   *   *       *
+```
+
+A pull for Log A might return entries with seq [1, 4, 6, 10], not [1, 2, 3, 4].
+
+### Why range-based ack doesn't work for partial commits
+
+The pull response provides `seqLo` and `seqHi` (first and last seq values)
+but not per-entry seq. If ranger commits only some entries, it cannot
+compute the exact seq value to ack up to:
+
+- Pull returns: `seqLo=1, seqHi=10, entries=[e0, e1, e2, e3]`
+- Actual seq values: e0=1, e1=4, e2=6, e3=10 (not known to ranger)
+- Ranger commits e0, e1 (2 entries) but fails on e2
+- Cannot compute ackHi: `seqLo + 2 - 1 = 2` is wrong (should be 4)
+
+### Solution: limit-based ack
+
+Instead of `ackRange(logId, fromSeq, toSeq)`, use `ackFirst(logId, seqLo, limit)`:
 
 ```typescript path=null start=null
-async ackRange(
+async ackFirst(
   logId: ArrayBuffer,
-  fromSeq: number,
-  toSeq: number,
+  seqLo: number,
+  limit: number,
 ): Promise<{ deleted: number }> {
-  // ... as shown in Part 1 ...
+  this.ensureSchema();
+  await this.loadState();
+
+  // Find the first N entries for this log starting from seqLo.
+  const toDelete = this.ctx.storage.sql
+    .exec<{ seq: number }>(
+      `SELECT seq FROM queue_entries
+       WHERE log_id = ? AND seq >= ?
+       ORDER BY seq ASC
+       LIMIT ?`,
+      logId,
+      seqLo,
+      limit,
+    )
+    .toArray()
+    .map((r) => r.seq);
+
+  if (toDelete.length === 0) {
+    return { deleted: 0 };
+  }
+
+  const result = this.ctx.storage.sql.exec(
+    `DELETE FROM queue_entries
+     WHERE seq IN (${toDelete.map(() => "?").join(",")})`,
+    ...toDelete,
+  );
+
+  this.pendingCount! -= result.rowsWritten;
+  return { deleted: result.rowsWritten };
 }
 ```
 
-ranger call:
+Ranger call:
 
 ```go path=null start=null
-func (r *Ranger) processLog(ctx context.Context, logID string) error {
-    entries, err := r.pullFromDO(ctx, logID, r.batchSize, r.visibility)
-    if err != nil {
-        return err
-    }
-    if len(entries) == 0 {
-        return nil
-    }
-
-    // entries are ordered by seq.
-    firstSeq := entries[0].Seq
-    lastSeq := entries[len(entries)-1].Seq
-
-    committed, err := r.commitBatch(ctx, logID, entries)
+func (r *Ranger) processLogGroup(ctx context.Context, group LogGroup) {
+    committed, err := r.commitBatch(ctx, group.LogId, group.Entries)
     if err != nil {
         // Don't ack; entries will redeliver after visibility timeout.
-        return err
+        return
     }
 
-    // Ack the committed range for this specific log.
-    // If committed < len(entries), only ack up to the last committed.
-    ackTo := entries[committed-1].Seq
-    logIdBytes, _ := hex.DecodeString(logID)
-    return r.ackRange(ctx, logIdBytes, firstSeq, ackTo)
+    if committed == 0 {
+        return
+    }
+
+    // Ack the first N committed entries starting from seqLo.
+    // The DO will delete exactly the entries that were pulled and committed.
+    if err := r.ackFirst(ctx, group.LogId, group.SeqLo, committed); err != nil {
+        r.logger.Warn("ack failed", "error", err)
+    }
 }
+```
+
+### Correctness guarantee
+
+The limit-based ack is correct because:
+
+1. Pull returns entries ordered by seq ASC for that log.
+2. Ranger commits entries in the same order.
+3. Ack deletes the first N entries (by seq order) for that log starting
+   from seqLo.
+4. These are exactly the same entries that were pulled and committed.
+
+### Wire format update
+
+The ack request body changes from `{logId, fromSeq, toSeq}` to
+`{logId, seqLo, limit}`:
+
+```
+AckRequest: [logId (bytes), seqLo (uint64), limit (uint64)]
 ```
 
 Benefits:
 
 - Single HTTP call to ack an entire batch.
-- Atomic from ranger's perspective: either the batch is committed and
-  acked, or neither.
+- Works correctly with non-contiguous seq values.
+- No per-entry seq needed in pull response (wire format remains compact).
 - If ranger crashes mid-batch, unacked entries redeliver.
 
 ## 2.4 Extra bytes fields
@@ -843,8 +912,9 @@ Endpoints exposed by `canopy-api` or a dedicated worker:
   - Response: `{ entries: [...], leaseExpiry: number, assignedLogs: [...] }`
 
 - `POST /queue/ack`
-  - Body: `{ logId: string, fromSeq: number, toSeq: number }`
+  - Body: `{ logId: bytes, seqLo: number, limit: number }`
   - Response: `{ deleted: number }`
+  - See section 2.3 for limit-based ack rationale.
 
 - `GET /queue/stats`
   - Response: `{ pending, deadLetters, oldestEntryAge, activePollers, ... }`
@@ -954,9 +1024,13 @@ Key points:
 - At any moment, it's unlikely two rangers receive entries for the
   same log (maximises throughput by avoiding optimistic concurrency
   conflicts).
-- If rangers do conflict, ranger's ETag-based writes ensure
-  correctness; the "losing" entries redeliver after visibility
-  timeout.
+- If rangers do conflict (concurrent writes to same massif), ranger's
+  ETag-based writes ensure one succeeds atomically; the "losing"
+  ranger's entries redeliver after visibility timeout.
+
+**Note**: ETag-based writes only protect against concurrent write
+conflicts, not against duplicate entries from missed acks. See section
+3.8 for ack-on-commit reliability analysis.
 
 ### Poller-aware pull
 
@@ -1172,8 +1246,10 @@ Each entry:
 
 - **Grouped by logId**: Ranger processes per-log; eliminates client-side
   grouping.
-- **seqLo/seqHi**: Ranger only needs these for `ackRange(logId, from, to)`.
-  Individual seq values are redundant since entries are contiguous.
+- **seqLo/seqHi**: Ranger uses seqLo as the starting point for limit-based ack.
+  seqHi is informational (last seq pulled). Individual seq values are not
+  needed because entries are processed in order. See section 2.3 for why
+  limit-based ack is required (non-contiguous global seq allocation).
 - **No `attempts`**: Internal to DO for poison detection; ranger doesn't
   need it.
 - **Version field**: Enables future format evolution.
@@ -1334,16 +1410,10 @@ func (r *Ranger) pollCycle(ctx context.Context) error {
             continue
         }
 
-        // Ack the committed range using seqLo/seqHi from response.
-        if committed == len(group.Entries) {
-            // Full batch committed.
-            if err := r.ackRange(ctx, group.LogId, group.SeqLo, group.SeqHi); err != nil {
-                r.logger.Warn("ack failed", "error", err)
-            }
-        } else if committed > 0 {
-            // Partial commit: ack seqLo to seqLo + committed - 1.
-            ackHi := group.SeqLo + uint64(committed) - 1
-            if err := r.ackRange(ctx, group.LogId, group.SeqLo, ackHi); err != nil {
+        // Ack committed entries using limit-based ack.
+        // See section 2.3 for why limit-based ack is required.
+        if committed > 0 {
+            if err := r.ackFirst(ctx, group.LogId, group.SeqLo, committed); err != nil {
                 r.logger.Warn("ack failed", "error", err)
             }
         }
@@ -1362,7 +1432,7 @@ the related ADRs:
 
 - Single global DO ([ADR-0001](adr-0001-cf-do-ingress-single-do-architecture.md))
 - Consistent hashing for log assignment ([ADR-0002](adr-0002-cf-do-ingress-consistent-hashing.md))
-- Range-based acknowledgement ([ADR-0003](adr-0003-cf-do-ingress-range-ack.md))
+- Limit-based acknowledgement ([ADR-0003](adr-0003-cf-do-ingress-range-ack.md))
 - Fixed visibility timeout ([ADR-0004](adr-0004-cf-do-ingress-fixed-visibility-timeout.md))
 - CBOR encoding for pull interface ([ADR-0005](adr-0005-cf-do-ingress-pull-encoding.md))
 
@@ -1389,7 +1459,7 @@ the related ADRs:
 │                                                                 │
 │  • Single global DO (ADR-0001)                                  │
 │  • SQLite: queue_entries, dead_letters                          │
-│  • Methods: enqueue, pull, ackRange, stats                      │
+│  • Methods: enqueue, pull, ackFirst, stats                      │
 │  • Tracks active pollers for horizontal scaling                 │
 │  • Assigns logs via consistent hashing (ADR-0002)               │
 └─────────────────────────────────────────────────────────────────┘
@@ -1402,7 +1472,7 @@ the related ADRs:
 │  • Stateless; each instance has a pollerId                      │
 │  • Polls SequencingQueue with pollerId, batchSize, visibilityMs │
 │  • Receives entries for assigned logs                          │
-│  • For each log batch: commit to massif, ackRange (ADR-0003)    │
+│  • For each log batch: commit to massif, ackFirst (ADR-0003)    │
 │  • Scales horizontally via K8s HPA                              │
 └─────────────────────────────────────────────────────────────────┘
                                  │
@@ -1549,7 +1619,8 @@ Response:
    d. Group entries by `logId`.
    e. For each log:
       - Call `commitBatch(logId, entries)` → writes to R2_MMRS.
-      - On success, POST `/queue/ack` with `logId`, `fromSeq`, `toSeq`.
+      - On success, POST `/queue/ack` with `logId`, `seqLo`, `limit`
+        (see section 2.3 for limit-based ack).
       - On failure, log error; entries will redeliver.
 3. On shutdown, stop polling; leased entries redeliver after timeout.
 
@@ -1602,7 +1673,80 @@ async enqueue(logId: ArrayBuffer, ...): Promise<{ seq: number }> {
 5. Delete `R2_LEAVES` bucket and `{CANOPY_ID}-ranger` queue.
 6. Remove scheduled cleanup cron for expired leaves.
 
-## 3.8 Open questions
+## 3.8 Ack-on-commit reliability
+
+Ranger's natural processing model is: pull entries, commit to massif, ack
+the committed range. This section analyses the reliability implications.
+
+### Position-based acknowledgement
+
+The pull response groups entries by logId with `seqLo` and `seqHi`:
+
+```
+LogGroup {
+  logId: bytes
+  seqLo: uint64   // seq of first entry
+  seqHi: uint64   // seq of last entry
+  entries: [...]  // no per-entry seq
+}
+```
+
+Entries within a LogGroup are ordered by seq ASC (guaranteed by the DO's
+query) but **not contiguous** because seq is allocated globally across all
+logs (see section 2.3). This requires limit-based ack:
+
+```go
+committedCount := r.commitBatch(group.Entries)
+if committedCount > 0 {
+    r.ackFirst(group.LogId, group.SeqLo, committedCount)
+}
+```
+
+### Failure modes
+
+**Ack succeeds after commit**: Normal path. Entries are deleted from the
+queue. No duplicates.
+
+**Ack fails after commit (network error, ranger crash)**: Entries remain in
+the queue and redeliver after visibility timeout. Ranger will re-process
+entries that were already committed to the massif.
+
+**Partial commit**: If ranger commits entries 0-2 of a batch but fails on
+entry 3, it acks with `limit=3`. Entries 3+ remain and redeliver.
+
+### Duplicate commit risk
+
+Unlike the previous Cloudflare Queue model where each message had its own
+ack, the DO queue uses limit-based batch ack (see section 2.3). A single
+missed ack can cause an entire batch of already-committed entries to
+redeliver and be re-committed.
+
+**Important**: Ranger's ETag-based conditional writes do **not** prevent
+duplicate commits in this scenario. ETags ensure atomic massif updates but
+do not deduplicate individual entries within a commit.
+
+**Accepted risk**: A missed ack after successful commit will cause duplicate
+entries in the massif. This is accepted for the initial implementation
+because:
+
+1. The probability is low (requires crash/failure in narrow window between
+   commit completion and ack completion).
+2. Duplicates are detectable (same content hash appears multiple times).
+3. Multiple viable mitigation paths exist (see section 3.10).
+
+### Comparison with previous model
+
+| Aspect | CF Queue (per-message ack) | DO Queue (limit ack) |
+|--------|---------------------------|---------------------|
+| Normal path | Message deleted | Batch deleted |
+| Missed ack | Single entry redelivers | Entire batch redelivers |
+| Duplicate risk | One entry | Batch of entries |
+| Recovery | Re-process one entry | Re-process batch |
+
+The DO queue trades slightly higher duplicate risk for simpler semantics
+and better performance (one ack call per log group vs one per entry).
+
+## 3.9 Open questions
 
 1. **Backpressure threshold**: what value for `MAX_PENDING`? Depends on
    expected peak ingress and acceptable latency.
@@ -1619,6 +1763,108 @@ async enqueue(logId: ArrayBuffer, ...): Promise<{ seq: number }> {
 5. **Multi-region**: if rangers run in multiple regions, should there
    be one global DO or one per region? Single global DO is simpler;
    latency from distant rangers is acceptable for polling.
+
+## 3.10 Future directions
+
+This section documents potential enhancements to address the duplicate
+commit risk and improve system robustness. These are not planned for
+initial implementation but provide a clear path forward.
+
+### 3.10.1 Bloom filter deduplication at commit time
+
+The massif format includes a bloom filter over extra fields. This can be
+leveraged to detect likely duplicates before committing.
+
+**Approach**: Before committing an entry, check the massif's bloom filter.
+If the entry's extra fields match, it's *probably* a duplicate. Either skip
+it or perform a full scan to confirm.
+
+**Value**: High. Reduces duplicate commits to near-zero false negatives
+(bloom filter FP rate) without fundamental architecture changes.
+
+**Viability**: High. Bloom filter already exists in massif format. Ranger
+already reads massifs.
+
+**Complexity**: Low-medium. Requires bloom filter query logic in ranger
+commit path. May need to handle edge case where entry crosses massif
+boundary.
+
+### 3.10.2 Attempt-aware deduplication
+
+Only perform deduplication checks on redelivered entries (attempt > 1).
+
+**Approach**: Include `attempts` count in pull response. Ranger skips bloom
+filter check for attempt=1 entries (first delivery, can't be duplicates).
+For attempt > 1, perform bloom filter or full deduplication scan.
+
+**Value**: Medium. Optimises the common case (first delivery) while
+providing protection on redelivery.
+
+**Viability**: High. `attempts` is already tracked in the DO schema.
+
+**Complexity**: Low. Add `attempts` to pull response wire format. Conditional
+logic in ranger.
+
+### 3.10.3 Configurable deduplication mode per log
+
+Allow logs to opt into stronger deduplication guarantees.
+
+**Approach**: Store per-log configuration in massif start record or separate
+config store. Options:
+- `none`: No deduplication (current behavior)
+- `bloom`: Bloom filter check on all entries
+- `strict`: Full scan for entries with matching bloom signature
+
+**Value**: Medium. Allows high-value logs to trade throughput for
+guarantees.
+
+**Viability**: Medium. Requires per-log config infrastructure.
+
+**Complexity**: Medium. Config storage, per-log branching in commit path.
+
+### 3.10.4 DO-allocated pre-sequence identifiers
+
+Have the DO allocate a unique identifier for each pending entry, similar to
+Snowflake IDs.
+
+**Approach**: On enqueue, DO generates a globally unique pre-sequence ID
+(e.g., timestamp + DO instance + counter). This ID is returned in pull
+response. Ranger stores committed pre-sequence IDs in massif metadata or
+separate index. On redelivery, ranger checks if pre-sequence ID was already
+committed.
+
+**Value**: High. Provides definitive duplicate detection without bloom
+filter false positives.
+
+**Viability**: High. DO already assigns seq numbers; extending to include
+timestamp component is straightforward.
+
+**Complexity**: Medium. Requires:
+- Schema change to store pre-sequence ID
+- Pull response format change
+- Committed ID tracking in ranger (new storage requirement)
+
+### 3.10.5 Direct registration status from DO
+
+Allow `query-registration-status` to check the SequencingQueue DO directly
+for pending entries, making `ranger-cache` redundant for this use case.
+
+**Approach**: canopy-api queries the DO to check if a contentHash is still
+pending sequencing. If found in queue, return "pending". If not in queue,
+fall back to R2_MMRS lookup for sequenced entries.
+
+**Value**: High. Simplifies architecture by removing ranger-cache
+dependency for pre-sequence status. Provides real-time visibility into
+queue state.
+
+**Viability**: High. DO already has the data. Query is a simple lookup.
+
+**Complexity**: Low. Add lookup method to DO. Update canopy-api handler.
+Consider index on `content_hash` for efficient lookup.
+
+**Note**: This doesn't eliminate ranger-cache entirely (it still serves
+sequenced entry lookup), but reduces its criticality and simplifies the
+pre-sequence flow.
 
 ---
 

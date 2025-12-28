@@ -85,10 +85,12 @@ Each entry field:
 per-log). Grouping in the wire format eliminates client-side grouping and
 reduces repeated logId transmission.
 
-**Why seqLo/seqHi instead of per-entry seq**: Ranger only needs sequence
-numbers for the ack call (`ackRange(logId, fromSeq, toSeq)`). Since entries
-are pulled contiguously per-log (SQL `ORDER BY seq ASC LIMIT ?`), seqLo/seqHi
-suffices. This saves 8 bytes per entry.
+**Why seqLo/seqHi instead of per-entry seq**: Ranger uses seqLo as the
+starting point for limit-based ack (`ackFirst(logId, seqLo, limit)`). Since
+entries are pulled ordered by seq ASC per-log, the count of committed entries
+is sufficient to ack. seqHi is informational. This saves 8 bytes per entry.
+See ADR-0003 and arc-cloudflare-do-ingress.md section 2.3 for the evolution
+from range-based to limit-based ack.
 
 **Why no `attempts` field**: The DO uses `attempts` internally for poison
 message detection, but ranger doesn't need it. Ranger's job is to commit
@@ -132,7 +134,7 @@ This keeps errors human-readable while payloads are binary-efficient.
 
 - Pull endpoint returns `Content-Type: application/cbor`.
 - Response is pre-grouped by logId; ranger doesn't need to group.
-- seqLo/seqHi per log group enables direct `ackRange` calls.
+- seqLo per log group enables limit-based `ackFirst` calls (see ADR-0003).
 - Ack endpoint accepts `application/cbor` or `application/json`.
 - Ranger decodes CBOR responses; existing Go CBOR libraries (e.g.,
   `fxamacker/cbor`) support this efficiently.

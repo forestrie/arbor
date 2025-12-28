@@ -11,7 +11,7 @@ import (
 
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/committer"
-	"github.com/forestrie/arbor/services/ranger/consumer"
+	"github.com/forestrie/arbor/services/ranger/consumer/ingress"
 )
 
 // Note: the ci does the right thing with go-releaser automatically, as
@@ -88,9 +88,9 @@ func main() {
 		}
 	}()
 
-	// Start queue consumer
-	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, massifCommitter)
-	go queueConsumer.ConsumeQueue(ctx)
+	// Start ingress consumer (DO queue)
+	ingressConsumer := ingress.NewConsumer(cfg, httpClient, logger, massifCommitter)
+	go ingressConsumer.ConsumeQueue(ctx)
 
 	// Wait for termination signal
 	<-ctx.Done()

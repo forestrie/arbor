@@ -22,7 +22,6 @@ func TestNewCommitter_Success(t *testing.T) {
 		PodIP:              "10.0.0.1",
 		CommitmentEpoch:    1,
 		MassifHeight:       0,
-		TrustCanopy:        true,
 	}
 
 	httpClient := ranger.NewHTTPClient(newTestLogger())
@@ -43,8 +42,5 @@ func TestNewCommitter_Success(t *testing.T) {
 	}
 	if c.massifHeight == 0 {
 		t.Fatal("expected massifHeight to be defaulted from config")
-	}
-	if !c.trustCanopy {
-		t.Fatal("expected trustCanopy to be propagated from config")
 	}
 }

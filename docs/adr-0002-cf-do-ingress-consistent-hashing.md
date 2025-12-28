@@ -68,8 +68,13 @@ Forestrie rangers use optimistic concurrency when writing massifs:
    Failed.
 4. The "losing" ranger's entries redeliver after visibility timeout.
 
-This means occasional assignment overlap is safe—just inefficient. Consistent
-hashing makes overlap uncommon without requiring strong guarantees.
+This means occasional **concurrent write** conflicts are handled gracefully.
+Consistent hashing makes such conflicts uncommon without requiring strong
+guarantees.
+
+**Note**: ETag-based writes protect against concurrent writer conflicts, but
+do not prevent duplicate entries from missed acks after successful commits.
+See arc-cloudflare-do-ingress.md section 3.8 for duplicate commit analysis.
 
 ## Implementation
 

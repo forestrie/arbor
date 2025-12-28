@@ -3,6 +3,20 @@
 ## Status
 Draft
 
+## Rollout Strategy
+
+This is a **flag-day rollout**. The system is pre-production so service
+downtime is immaterial. Delivery efficiency is the key concern—no backwards
+compatibility or gradual migration is required. The cutover will:
+
+1. Deploy forestrie-ingress worker (creates DO and SQLite storage)
+2. Update canopy-api to use DO ingress instead of R2_LEAVES
+3. Update ranger to poll DO instead of Cloudflare Queue
+4. Delete obsolete resources (R2_LEAVES bucket, Cloudflare Queue)
+
+Deploying forestrie-ingress early (after Phase 4) is recommended to establish
+the worker and DO resources before the integration phases.
+
 ## Overview
 
 This plan covers implementation of a Durable Object-based sequencing queue
@@ -284,24 +298,26 @@ async enqueue(
 **Happy path test:** `enqueue()` returns incrementing seq; entry persists
 in SQLite.
 
-### 2.3 Implement ackRange()
+### 2.3 Implement ackFirst()
 
-RPC/HTTP method called by ranger:
+RPC/HTTP method called by ranger. Uses limit-based ack because seq values
+are non-contiguous per-log (see arc-cloudflare-do-ingress.md section 2.3):
 
 ```typescript
-async ackRange(
+async ackFirst(
   logId: ArrayBuffer,
-  fromSeq: number,
-  toSeq: number
+  seqLo: number,
+  limit: number
 ): Promise<{ deleted: number }>
 ```
 
-- Delete rows matching `log_id = ? AND seq >= ? AND seq <= ?`
+- Select first N entries for logId where `seq >= seqLo ORDER BY seq ASC LIMIT N`
+- Delete those specific entries by seq
 - Update in-memory `pendingCount`
 - Return count of deleted rows
 
-**Happy path test:** `ackRange()` deletes enqueued entries; returns correct
-count.
+**Happy path test:** `ackFirst()` deletes first N enqueued entries for log;
+returns correct count.
 
 ### 2.4 Implement stats()
 
@@ -433,8 +449,8 @@ if (url.pathname === "/queue/stats" && method === "GET") {
 ### 4.3 Implement ack handler
 
 - Require `Content-Type: application/cbor` (return 415 if not)
-- Parse CBOR request body (logId is ArrayBuffer directly, no base64)
-- Call `stub.ackRange(logId, fromSeq, toSeq)`
+- Parse CBOR request body: `[logId, seqLo, limit]` (see section 2.3)
+- Call `stub.ackFirst(logId, seqLo, limit)`
 - Return CBOR response with `Content-Type: application/cbor`
 
 ### 4.4 Implement stats handler (observability endpoint)
@@ -465,6 +481,23 @@ function problemResponse(
 }
 ```
 
+### 4.6 Deploy forestrie-ingress (checkpoint)
+
+After Phase 4 is complete and tests pass, deploy forestrie-ingress to
+establish the worker and DO resources:
+
+```bash
+pnpm --filter @canopy/forestrie-ingress deploy
+```
+
+This creates:
+- The `forestrie-ingress` worker in Cloudflare
+- The `SequencingQueue` Durable Object class and SQLite storage
+- The HTTP endpoints at `/queue/pull`, `/queue/ack`, `/queue/stats`
+
+Deploying early allows verification of the worker in isolation before
+integrating with canopy-api and ranger.
+
 ---
 
 ## Phase 5: Test Coverage Review
@@ -488,9 +521,10 @@ Review existing unit tests and add coverage for:
 - Increments attempts counter on each pull
 - Moves entry to dead_letters after MAX_ATTEMPTS
 
-**ackRange() edge cases:**
-- No-op when range doesn't match any entries
+**ackFirst() edge cases:**
+- No-op when no entries match logId and seqLo
 - Only deletes entries for specified logId (not others)
+- Deletes exactly N entries even with non-contiguous seq values
 - Handles ack of already-deleted entries gracefully
 
 **stats() edge cases:**
@@ -517,8 +551,7 @@ Review existing integration tests and add coverage for:
 
 ## Phase 6: Integration with canopy-api
 
-Since the DO is co-located within canopy-api, no additional bindings are
-needed. The DO is already available via `env.SEQUENCING_QUEUE`.
+The DO is accessed via cross-worker RPC binding (`script_name: "forestrie-ingress"`).
 
 ### 6.1 Update statement registration handler
 
@@ -534,17 +567,10 @@ const queue = env.SEQUENCING_QUEUE.get(id);
 await queue.enqueue(logIdBytes, contentHashBytes, { extra0, ... });
 ```
 
-### 6.2 Feature flag for gradual rollout
+### 6.2 Remove R2_LEAVES binding
 
-Add environment variable to toggle between old and new paths:
-
-```typescript
-if (env.USE_DO_INGRESS === "true") {
-  await queue.enqueue(...);
-} else {
-  await env.R2_LEAVES.put(...);
-}
-```
+Remove the `R2_LEAVES` binding from canopy-api's wrangler.jsonc since it is
+no longer used.
 
 ---
 
@@ -557,51 +583,271 @@ canopy monorepo.
 
 Use `github.com/fxamacker/cbor/v2` for CBOR decoding.
 
-### 7.2 Update ranger poll loop
-
-Replace Cloudflare Queue consumer with HTTP poll to DO:
+Define types matching the pull response wire format:
 
 ```go
-func (r *Ranger) pollFromDO(ctx context.Context) (*PullResponse, error) {
+type PullResponse struct {
+    Version     uint
+    LeaseExpiry uint64
+    LogGroups   []LogGroup
+}
+
+type LogGroup struct {
+    LogId   []byte
+    SeqLo   uint64
+    SeqHi   uint64
+    Entries []Entry
+}
+
+type Entry struct {
+    ContentHash []byte
+    Extra0      []byte // may be nil
+    Extra1      []byte
+    Extra2      []byte
+    Extra3      []byte
+}
+```
+
+### 7.2 Update ranger poll loop
+
+Replace Cloudflare Queue consumer with HTTP poll to DO.
+
+**Architecture change**: The pull response is pre-grouped by logId. Each
+LogGroup contains `seqLo`, `seqHi`, and a contiguous list of entries. Ranger
+spawns a goroutine per LogGroup to commit and ack independently.
+
+**Key design point**: Entries within a LogGroup are ordered by seq ASC but
+have **non-contiguous** seq values because seq is allocated globally across
+all logs (see arc-cloudflare-do-ingress.md section 2.3).
+
+This requires limit-based ack: ranger acks N entries starting from seqLo,
+without needing to know the actual seq values.
+
+```go
+func (r *Ranger) pollCycle(ctx context.Context) error {
+    resp, err := r.pullFromDO(ctx)
+    if err != nil {
+        return err
+    }
+    if len(resp.LogGroups) == 0 {
+        return nil // Nothing to process
+    }
+
+    var wg sync.WaitGroup
+    for _, group := range resp.LogGroups {
+        wg.Add(1)
+        go func(g LogGroup) {
+            defer wg.Done()
+            r.processLogGroup(ctx, g)
+        }(group)
+    }
+    wg.Wait()
+    return nil
+}
+
+func (r *Ranger) processLogGroup(ctx context.Context, group LogGroup) {
+    // Commit entries to massif. Returns count of successfully committed.
+    committed, err := r.commitBatch(ctx, group.LogId, group.Entries)
+    if err != nil {
+        r.logger.Warn("batch commit failed",
+            "logId", hex.EncodeToString(group.LogId),
+            "error", err)
+        // Don't ack; entries will redeliver after visibility timeout.
+        return
+    }
+
+    if committed == 0 {
+        return
+    }
+
+    // Limit-based ack: delete the first N entries for this log starting from seqLo.
+    // See arc-cloudflare-do-ingress.md section 2.3 for why limit-based ack is required.
+    if err := r.ackFirst(ctx, group.LogId, group.SeqLo, committed); err != nil {
+        // IMPORTANT: Entries were committed but ack failed.
+        // They will redeliver and may cause duplicate commits.
+        // See arc-cloudflare-do-ingress.md section 3.8 and 3.10 for
+        // accepted risk analysis and future mitigation options.
+        r.logger.Warn("ack failed after commit",
+            "logId", hex.EncodeToString(group.LogId),
+            "seqLo", group.SeqLo,
+            "committed", committed,
+            "error", err)
+    }
+}
+```
+
+**Duplicate commit risk**: If `ackFirst` fails after `commitBatch` succeeds,
+the committed entries will redeliver and be re-committed. This is an accepted
+risk for the initial implementation. See `arc-cloudflare-do-ingress.md`:
+- Section 3.8 for reliability analysis
+- Section 3.10 for future mitigation options (bloom filter deduplication,
+  attempt-aware checks, DO-allocated pre-sequence IDs)
+
+Add a code comment in the commit path referencing future directions:
+
+```go
+// commitBatch commits entries to the massif for this log.
+//
+// DUPLICATE COMMIT NOTE: If ack fails after this returns successfully,
+// entries will redeliver and be re-committed. This is currently accepted.
+// Future options to mitigate:
+// - Bloom filter check before commit (arc-cloudflare-do-ingress.md 3.10.1)
+// - Attempt-aware deduplication (3.10.2)
+// - DO-allocated pre-sequence IDs (3.10.4)
+func (r *Ranger) commitBatch(ctx context.Context, logId []byte, entries []Entry) (int, error) {
+    // ... existing commit logic ...
+}
+```
+
+### 7.3 Implement HTTP pull client
+
+```go
+func (r *Ranger) pullFromDO(ctx context.Context) (*PullResponse, error) {
     req := PullRequest{
         PollerId:     r.pollerId,
         BatchSize:    r.batchSize,
         VisibilityMs: r.visibilityMs,
     }
-    // POST to /queue/pull with CBOR body
-    // Decode CBOR response
+
+    body, err := cbor.Marshal(req)
+    if err != nil {
+        return nil, fmt.Errorf("marshal pull request: %w", err)
+    }
+
+    url := fmt.Sprintf("%s/queue/pull", r.cfg.IngressBaseURL)
+    httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+    if err != nil {
+        return nil, err
+    }
+    httpReq.Header.Set("Authorization", "Bearer "+r.cfg.IngressToken)
+    httpReq.Header.Set("Content-Type", "application/cbor")
+
+    httpResp, err := r.httpClient.Do(httpReq)
+    if err != nil {
+        return nil, fmt.Errorf("pull request failed: %w", err)
+    }
+    defer httpResp.Body.Close()
+
+    if httpResp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("pull returned status %d", httpResp.StatusCode)
+    }
+
+    respBody, err := io.ReadAll(httpResp.Body)
+    if err != nil {
+        return nil, fmt.Errorf("read pull response: %w", err)
+    }
+
+    return decodePullResponse(respBody)
 }
 ```
 
-### 7.3 Update ranger ack logic
+### 7.4 Implement HTTP ack client
 
-Call HTTP ack endpoint after successful massif commit:
+Use limit-based ack (see arc-cloudflare-do-ingress.md section 2.3):
 
 ```go
-func (r *Ranger) ackRange(ctx context.Context, logId []byte, seqLo, seqHi uint64) error {
-    // POST to /queue/ack with JSON body
+// AckRequest wire format: [logId (bytes), seqLo (uint64), limit (uint64)]
+type AckRequest struct {
+    LogId []byte
+    SeqLo uint64
+    Limit uint64
+}
+
+func (r *Ranger) ackFirst(ctx context.Context, logId []byte, seqLo uint64, limit int) error {
+    req := AckRequest{
+        LogId: logId,
+        SeqLo: seqLo,
+        Limit: uint64(limit),
+    }
+
+    body, err := cbor.Marshal(req)
+    if err != nil {
+        return fmt.Errorf("marshal ack request: %w", err)
+    }
+
+    url := fmt.Sprintf("%s/queue/ack", r.cfg.IngressBaseURL)
+    httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+    if err != nil {
+        return err
+    }
+    httpReq.Header.Set("Authorization", "Bearer "+r.cfg.IngressToken)
+    httpReq.Header.Set("Content-Type", "application/cbor")
+
+    httpResp, err := r.httpClient.Do(httpReq)
+    if err != nil {
+        return fmt.Errorf("ack request failed: %w", err)
+    }
+    defer httpResp.Body.Close()
+
+    if httpResp.StatusCode != http.StatusOK {
+        return fmt.Errorf("ack returned status %d", httpResp.StatusCode)
+    }
+
+    return nil
 }
 ```
+
+### 7.5 Configuration changes
+
+Add new configuration for DO ingress endpoint:
+
+```go
+type Config struct {
+    // ... existing fields ...
+
+    // IngressBaseURL is the forestrie-ingress worker URL.
+    // e.g., "https://forestrie-ingress.{account}.workers.dev"
+    IngressBaseURL string `env:"INGRESS_BASE_URL,required"`
+
+    // IngressToken is the bearer token for pull/ack endpoints.
+    IngressToken string `env:"INGRESS_TOKEN,required"`
+}
+```
+
+Remove Cloudflare Queue consumer configuration.
+
+### 7.6 Remove Cloudflare Queue consumer
+
+- Delete queue consumer code and related handlers
+- Remove queue-related configuration
+- Update main.go to use new poll loop
 
 ---
 
-## Phase 8: Cleanup and Migration
+## Phase 8: Resource Cleanup
 
-### 8.1 Disable R2_LEAVES notifications
+This phase deletes obsolete infrastructure. Since this is a flag-day rollout,
+cleanup can happen immediately after verifying the new path works.
 
-Remove R2 event notification configuration that triggers the ranger queue.
+### 8.1 Delete R2_LEAVES bucket
 
-### 8.2 Delete R2_LEAVES bucket
+Remove the R2 bucket and any associated event notifications:
 
-After confirming no traffic to old path.
+```bash
+# List bucket contents (should be empty or stale)
+wrangler r2 object list {CANOPY_ID}-leaves
 
-### 8.3 Delete Cloudflare Queue
+# Delete bucket
+wrangler r2 bucket delete {CANOPY_ID}-leaves
+```
 
-Remove `{CANOPY_ID}-ranger` queue and DLQ.
+### 8.2 Delete Cloudflare Queue
 
-### 8.4 Remove feature flag
+Remove the ranger queue and its dead-letter queue:
 
-Set `USE_DO_INGRESS=true` permanently, then remove flag handling code.
+```bash
+# Delete main queue
+wrangler queues delete {CANOPY_ID}-ranger
+
+# Delete DLQ if it exists
+wrangler queues delete {CANOPY_ID}-ranger-dlq
+```
+
+### 8.3 Remove obsolete code
+
+- Remove R2_LEAVES references from canopy-api
+- Remove Cloudflare Queue consumer code from ranger
+- Remove any queue-related taskfile entries
 
 ---
 
@@ -618,6 +864,30 @@ Follow the file-per-type pattern established in canopy/WARP.md:
 
 This applies to shared type packages (e.g., `@canopy/forestrie-ingress-types`)
 and to implementation code within forestrie-ingress.
+
+### Test Organization
+
+Tests are organized by discrete logical area using a common grouping prefix:
+
+```
+test/unit/
+├── sequencingqueue.test.ts        # Basic DO instantiation and schema tests
+├── sequencingqueue-enqueue.test.ts
+├── sequencingqueue-pull.test.ts
+├── sequencingqueue-ack.test.ts
+├── sequencingqueue-stats.test.ts
+└── sequencingqueue-fixture.ts     # Shared testEnv, getStub helpers
+
+test/integration/handlers/
+├── fixture.ts
+├── pull.test.ts
+├── ack.test.ts
+├── stats.test.ts
+└── roundtrip.test.ts
+```
+
+This structure keeps test files focused and easier to navigate. See
+`canopy/WARP.md` for the full test organization guidelines.
 
 ### Authentication
 

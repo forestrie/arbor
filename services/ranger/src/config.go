@@ -12,35 +12,35 @@ import (
 	"time"
 )
 
-// Config holds all 12-factor environment configuration
+// Config holds all 12-factor environment configuration.
 type Config struct {
 	// Service configuration
 	Port            string
 	LogLevel        string
 	ShutdownTimeout time.Duration
 
-	// Cloudflare Queue configuration (HTTP consumer pattern)
-	QueueURL       string
-	QueueToken     string
-	QueueBatchSize int
+	// DO Ingress configuration
+	// See: arbor/docs/arc-cloudflare-do-ingress.md
+	IngressBaseURL    string        // forestrie-ingress worker URL
+	IngressToken      string        // Bearer token for pull/ack endpoints
+	PollerId          string        // Unique identifier for this poller (auto-generated if empty)
+	QueueBatchSize    int           // Maximum entries per pull request
+	PollInterval      time.Duration // Interval between poll requests
+	VisibilityTimeout time.Duration // Lease duration for pulled entries
 
-	PollInterval      time.Duration
-	VisibilityTimeout time.Duration
-
-	// R2 access configuration (S3-compatible endpoint)
+	// R2 storage configuration (S3-compatible endpoint)
 	R2URL   string
-	R2Token string // Used to derive AWSSecretAccessKey when AWS_SECRET_ACCESS_KEY is not set.
+	R2Token string // Used to derive AWSSecretAccessKey when AWS_SECRET_ACCESS_KEY is not set
 
-	// AWS credentials for SigV4 signing (for S3-compatible APIs like Cloudflare R2)
+	// AWS credentials for SigV4 signing (Cloudflare R2)
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSRegion          string // Defaults to "auto" for Cloudflare R2
 
-	// Deployment configuration (not from messages)
-	TrustCanopy         bool   // If true, verify hash by reading object.
-	SuppressAcknowledge bool   // If true, skip acknowledging messages (primarily for tests).
-	WorkerCIDR          string // Snowflake worker CIDR, required.
-	PodIP               string // Pod IP address, required.
+	// Deployment configuration
+	SuppressAcknowledge bool   // Skip acks (for tests)
+	WorkerCIDR          string // Snowflake worker CIDR, required
+	PodIP               string // Pod IP address, required
 
 	// Merklelog configuration
 	MassifHeight    uint8  // Massif height (default 14)
@@ -138,18 +138,6 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
-	// Parse TRUST_CANOPY: true if "true", "on", or non-zero integer
-	trustCanopy := false
-	trustEnv := strings.ToLower(strings.TrimSpace(os.Getenv("TRUST_CANOPY")))
-	if trustEnv == "true" || trustEnv == "on" {
-		trustCanopy = true
-	} else if trustEnv != "" {
-		// Try parsing as integer
-		if val, err := strconv.Atoi(trustEnv); err == nil && val != 0 {
-			trustCanopy = true
-		}
-	}
-
 	r2Token := getEnvOrDefault("R2_TOKEN", "")
 	// fmt.Printf("R2_TOKEN len %d\n", len(r2Token))
 	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
@@ -164,9 +152,10 @@ func LoadConfig() Config {
 		Port:               getEnvOrDefault("PORT", "9090"),
 		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
 		ShutdownTimeout:    getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:           os.Getenv("QUEUE_URL"),
-		QueueToken:         os.Getenv("QUEUE_TOKEN"),
-		QueueBatchSize:     getInt("QUEUE_BATCH_SIZE", 1),
+		IngressBaseURL:     os.Getenv("INGRESS_BASE_URL"),
+		IngressToken:       os.Getenv("INGRESS_TOKEN"),
+		PollerId:           os.Getenv("POLLER_ID"),
+		QueueBatchSize:     getInt("QUEUE_BATCH_SIZE", 100),
 		PollInterval:       getDuration("POLL_INTERVAL", 5*time.Second),
 		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		R2URL:              os.Getenv("R2_URL"),
@@ -174,7 +163,6 @@ func LoadConfig() Config {
 		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey: awsSecretAccessKey,
 		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
-		TrustCanopy:        trustCanopy,
 		MassifHeight:       getUint8("MASSIF_HEIGHT", 14),
 		CommitmentEpoch:    getUint32("COMMITMENT_EPOCH", 1),
 		WorkerCIDR:         os.Getenv("WORKER_CIDR"),
@@ -185,8 +173,9 @@ func LoadConfig() Config {
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {
-	logConfigValue(logger, "QUEUE_URL", c.QueueURL)
-	logSecretDigest(logger, "QUEUE_TOKEN", c.QueueToken)
+	logConfigValue(logger, "INGRESS_BASE_URL", c.IngressBaseURL)
+	logSecretDigest(logger, "INGRESS_TOKEN", c.IngressToken)
+	logConfigValue(logger, "POLLER_ID", c.PollerId)
 	logConfigValue(logger, "QUEUE_BATCH_SIZE", c.QueueBatchSize)
 	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
@@ -201,21 +190,17 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POD_IP", c.PodIP)
 }
 
-// Validate checks that all required configuration is present
+// Validate checks that all required configuration is present.
 func (c Config) Validate() error {
-	if c.QueueURL == "" {
-		return fmt.Errorf("QUEUE_URL is required")
+	if c.IngressBaseURL == "" {
+		return fmt.Errorf("INGRESS_BASE_URL is required")
 	}
-	if c.QueueToken == "" {
-		return fmt.Errorf("QUEUE_TOKEN is required")
+	if c.IngressToken == "" {
+		return fmt.Errorf("INGRESS_TOKEN is required")
 	}
 	if c.QueueBatchSize <= 0 {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be greater than zero")
 	}
-	if c.QueueBatchSize > 32 {
-		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
-	}
-
 	if c.R2URL == "" {
 		return fmt.Errorf("R2_URL is required")
 	}
@@ -223,9 +208,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")
 	}
 	if c.AWSSecretAccessKey == "" {
-		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing (set AWS_SECRET_ACCESS_KEY or set R2_TOKEN to derive it)")
+		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required (set AWS_SECRET_ACCESS_KEY or R2_TOKEN)")
 	}
-
 	if c.WorkerCIDR == "" {
 		return fmt.Errorf("WORKER_CIDR is required")
 	}

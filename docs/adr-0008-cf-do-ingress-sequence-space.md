@@ -8,7 +8,7 @@ The SequencingQueue DO assigns monotonically increasing sequence numbers to
 each enqueued entry. These sequence numbers are used for:
 
 1. Total ordering of entries within the queue
-2. Range-based acknowledgement (`ackRange(logId, fromSeq, toSeq)`)
+2. Limit-based acknowledgement (`ackFirst(logId, seqLo, limit)`)
 3. Identifying entries in the `LogGroup.seqLo` / `seqHi` response fields
 
 The sequence counter (`nextSeq`) is a JavaScript `number` incremented on each
@@ -54,10 +54,11 @@ The cbor-x library handles large integers transparently, encoding them as
 CBOR bignums when necessary. The ranger (Go) side uses `fxamacker/cbor/v2`
 which also handles bignums. No special handling is needed.
 
-### Range query behavior
-The `ackRange` query uses:
+### Limit-based ack behavior
+The `ackFirst` implementation selects entries by limit then deletes:
 ```sql
-DELETE FROM queue_entries WHERE log_id = ? AND seq >= ? AND seq <= ?
+SELECT seq FROM queue_entries WHERE log_id = ? AND seq >= ? ORDER BY seq LIMIT ?
+DELETE FROM queue_entries WHERE seq IN (...)
 ```
 
 If seq wrapped to negative values, this could behave unexpectedly. However:
