@@ -1870,14 +1870,319 @@ pre-sequence flow.
 
 _This section is a placeholder for future authentication design._
 
-The pull and ack HTTP endpoints currently have no authentication. Ranger
-sends an `Authorization: Bearer <token>` header which forestrie-ingress
-does not validate.
+The pull/ack HTTP endpoints currently have no authentication. Ranger sends
+an `Authorization: Bearer <token>` header which forestrie-ingress does not
+validate.
 
 Future work should add bearer token validation:
 - Add `QUEUE_AUTH_TOKEN` secret to forestrie-ingress worker environment
 - Validate `Authorization` header against secret in pull/ack handlers
 - Return 401 Unauthorized for invalid or missing tokens
+
+## 3.12 Return path unification
+
+This section describes how to eliminate the ranger-cache dependency for
+registration status queries, reducing latency and simplifying the return path.
+
+### 3.12.1 Problem statement
+
+Currently, `query-registration-status` relies on ranger-cache to determine
+when sequencing is complete. This adds latency because:
+
+1. Ranger commits entries to a massif
+2. Ranger writes a checkpoint to R2
+3. R2 notification triggers ranger-cache update
+4. canopy-api polls ranger-cache until the entry appears
+
+The ranger-cache path adds 100-500ms latency after commit. We can eliminate
+this by having the DO track sequencing results directly.
+
+### 3.12.2 Schema changes
+
+Add two nullable columns to `queue_entries` for storing sequencing results:
+
+```sql
+ALTER TABLE queue_entries ADD COLUMN leaf_index INTEGER DEFAULT NULL;
+ALTER TABLE queue_entries ADD COLUMN massif_index INTEGER DEFAULT NULL;
+```
+
+These columns are NULL on enqueue and populated on ack. After ack completes,
+the row is deleted, but between the UPDATE and DELETE there is a window where
+the sequencing result is available for query.
+
+Also add a new table to persist sequencing results after ack:
+
+```sql
+CREATE TABLE IF NOT EXISTS sequenced_entries (
+  content_hash BLOB PRIMARY KEY,
+  log_id BLOB NOT NULL,
+  leaf_index INTEGER NOT NULL,
+  massif_index INTEGER NOT NULL,
+  sequenced_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sequenced_log
+  ON sequenced_entries (log_id, leaf_index);
+```
+
+### 3.12.3 Updated ackFirst signature
+
+The `ackFirst` method now requires sequencing metadata from ranger:
+
+```typescript
+async ackFirst(
+  logId: ArrayBuffer,
+  seqLo: number,
+  limit: number,
+  firstLeafIndex: number,
+  massifIndex: number,
+): Promise<{ deleted: number }>
+```
+
+The implementation:
+
+1. Select the first N entries for logId starting from seqLo (existing logic)
+2. For each entry at position i, compute `leafIndex = firstLeafIndex + i`
+3. Insert into `sequenced_entries` with the computed leaf_index and massifIndex
+4. Delete from `queue_entries` (existing logic)
+
+```typescript
+async ackFirst(
+  logId: ArrayBuffer,
+  seqLo: number,
+  limit: number,
+  firstLeafIndex: number,
+  massifIndex: number,
+): Promise<{ deleted: number }> {
+  // Find entries to ack (existing logic)
+  const toAck = this.ctx.storage.sql
+    .exec<{ seq: number; content_hash: ArrayBuffer }>(
+      `SELECT seq, content_hash FROM queue_entries
+       WHERE log_id = ? AND seq >= ?
+       ORDER BY seq ASC
+       LIMIT ?`,
+      logId, seqLo, limit,
+    )
+    .toArray();
+
+  if (toAck.length === 0) return { deleted: 0 };
+
+  const now = Date.now();
+
+  // Insert sequencing results
+  for (let i = 0; i < toAck.length; i++) {
+    const leafIndex = firstLeafIndex + i;
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO sequenced_entries
+       (content_hash, log_id, leaf_index, massif_index, sequenced_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      toAck[i].content_hash,
+      logId,
+      leafIndex,
+      massifIndex,
+      now,
+    );
+  }
+
+  // Delete from queue (existing logic)
+  const seqs = toAck.map((r) => r.seq);
+  const result = this.ctx.storage.sql.exec(
+    `DELETE FROM queue_entries
+     WHERE seq IN (${seqs.map(() => "?").join(",")})`,
+    ...seqs,
+  );
+
+  this.pendingCount -= result.rowsWritten;
+  return { deleted: result.rowsWritten };
+}
+```
+
+### 3.12.4 Ranger ack update
+
+Ranger's ack call must now include the sequencing results:
+
+```go
+type AckRequest struct {
+    LogId          []byte
+    SeqLo          uint64
+    Limit          uint64
+    FirstLeafIndex uint64  // NEW: leaf index of first entry
+    MassifIndex    uint64  // NEW: massif index for all entries
+}
+
+func (r *Ranger) ackFirst(
+    ctx context.Context,
+    logId []byte,
+    seqLo uint64,
+    limit int,
+    firstLeafIndex uint64,
+    massifIndex uint64,
+) error {
+    req := AckRequest{
+        LogId:          logId,
+        SeqLo:          seqLo,
+        Limit:          uint64(limit),
+        FirstLeafIndex: firstLeafIndex,
+        MassifIndex:    massifIndex,
+    }
+    // ... send request ...
+}
+```
+
+The committer must return the first leaf index and massif index for the
+batch so ranger can pass them to ack.
+
+### 3.12.5 resolveContent method
+
+New DO RPC method for canopy-api to query sequencing status:
+
+```typescript
+interface SequencingResult {
+  leafIndex: number;
+  massifIndex: number;
+}
+
+async resolveContent(
+  contentHash: ArrayBuffer,
+): Promise<SequencingResult | null> {
+  this.ensureSchema();
+
+  // First check sequenced_entries (completed entries)
+  const sequenced = this.ctx.storage.sql
+    .exec<{ leaf_index: number; massif_index: number }>(
+      `SELECT leaf_index, massif_index FROM sequenced_entries
+       WHERE content_hash = ?`,
+      contentHash,
+    )
+    .toArray();
+
+  if (sequenced.length > 0) {
+    return {
+      leafIndex: sequenced[0].leaf_index,
+      massifIndex: sequenced[0].massif_index,
+    };
+  }
+
+  // Entry is either still pending or unknown
+  return null;
+}
+```
+
+This requires an index on `content_hash` in `sequenced_entries` (already
+the PRIMARY KEY).
+
+### 3.12.6 Updated query-registration-status
+
+canopy-api's `queryRegistrationStatus` handler changes:
+
+```typescript
+export async function queryRegistrationStatus(
+  request: Request,
+  entrySegments: string[],
+  sequencingQueueNs: SequencingQueueNamespace,
+  r2Mmrs: R2Bucket,
+  massifHeight: number,
+): Promise<Response> {
+  const [logID, _, contentHashRaw] = entrySegments;
+  const contentHash = contentHashRaw.toLowerCase();
+  const contentHashBytes = hexToBuffer(contentHash);
+
+  // Query the DO for sequencing result
+  const doId = sequencingQueueNs.idFromName("global");
+  const stub = sequencingQueueNs.get(doId);
+  const result = await stub.resolveContent(contentHashBytes);
+
+  if (!result) {
+    // Still pending or unknown - return 303 with retry
+    const requestUrl = new URL(request.url);
+    const currentLocation = `${requestUrl.origin}${requestUrl.pathname}`;
+    return seeOtherResponse(currentLocation, 1); // Short retry for fast polling
+  }
+
+  // Sequencing complete - read massif to get idtimestamp
+  const idtimestamp = await getIdtimestampFromMassif(
+    r2Mmrs,
+    logID,
+    massifHeight,
+    result.massifIndex,
+    result.leafIndex,
+  );
+
+  const entryId = encodeEntryId({
+    idtimestamp,
+    mmrIndex: leafIndexToMmrIndex(result.leafIndex),
+  });
+
+  const requestUrl = new URL(request.url);
+  const permanentLocation = `${requestUrl.origin}/logs/${logID}/${massifHeight}/entries/${entryId}/receipt`;
+  return seeOtherResponse(permanentLocation);
+}
+```
+
+### 3.12.7 Massif reading helper
+
+A helper function in the merklelog package reads the idtimestamp from a
+massif's leaf entry:
+
+```typescript
+// In @canopy/merklelog or similar
+export async function getIdtimestampFromMassif(
+  r2: R2Bucket,
+  logId: string,
+  massifHeight: number,
+  massifIndex: number,
+  leafIndex: number,
+): Promise<bigint> {
+  const objectKey = `v2/merklelog/massifs/${massifHeight}/${logId}/${massifIndex.toString().padStart(16, "0")}.log`;
+
+  const object = await r2.get(objectKey);
+  if (!object) {
+    throw new Error(`Massif not found: ${objectKey}`);
+  }
+
+  const data = await object.arrayBuffer();
+  const massif = parseMassif(data);
+
+  // Get the leaf entry at the given index
+  const leafOffset = massifLeafOffset(massifHeight, leafIndex);
+  const idtimestamp = readIdtimestamp(massif, leafOffset);
+
+  return idtimestamp;
+}
+```
+
+### 3.12.8 Garbage collection
+
+The `sequenced_entries` table will grow unboundedly. Implement periodic
+cleanup of old entries:
+
+```typescript
+private async cleanupOldSequencedEntries(): void {
+  const cutoff = Date.now() - SEQUENCED_RETENTION_MS; // e.g., 24 hours
+  this.ctx.storage.sql.exec(
+    `DELETE FROM sequenced_entries WHERE sequenced_at < ?`,
+    cutoff,
+  );
+}
+```
+
+Call this periodically (e.g., on every 1000th ack or via alarm).
+
+### 3.12.9 Benefits
+
+- **Reduced latency**: Registration status available immediately after commit,
+  without waiting for checkpoint or ranger-cache.
+- **Simplified architecture**: Removes ranger-cache from the critical path for
+  status queries.
+- **Single source of truth**: The DO has complete visibility into both pending
+  and recently-sequenced entries.
+
+### 3.12.10 Trade-offs
+
+- **Storage growth**: `sequenced_entries` table requires periodic cleanup.
+- **R2 read on status query**: Reading the massif adds latency, but this is
+  only on the final redirect (not during polling).
+- **Ack wire format change**: Requires ranger update to send leaf/massif info.
 
 ---
 

@@ -851,6 +851,201 @@ wrangler queues delete {CANOPY_ID}-ranger-dlq
 
 ---
 
+## Phase 9: Return Path Unification
+
+This phase implements direct sequencing status from the DO, eliminating the
+ranger-cache dependency for registration status queries.
+
+See: `arc-cloudflare-do-ingress.md` section 3.12
+
+### 9.1 Schema migration
+
+Add the `sequenced_entries` table to store sequencing results:
+
+```sql
+CREATE TABLE IF NOT EXISTS sequenced_entries (
+  content_hash BLOB PRIMARY KEY,
+  log_id BLOB NOT NULL,
+  leaf_index INTEGER NOT NULL,
+  massif_index INTEGER NOT NULL,
+  sequenced_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sequenced_log
+  ON sequenced_entries (log_id, leaf_index);
+```
+
+Update `ensureSchema()` in SequencingQueue to include this table.
+
+### 9.2 Update ackFirst signature and implementation
+
+Extend `ackFirst` to accept sequencing metadata:
+
+```typescript
+async ackFirst(
+  logId: ArrayBuffer,
+  seqLo: number,
+  limit: number,
+  firstLeafIndex: number,
+  massifIndex: number,
+): Promise<{ deleted: number }>
+```
+
+Update implementation to:
+1. Select entries to ack (existing)
+2. Insert into `sequenced_entries` with computed leaf indices
+3. Delete from `queue_entries` (existing)
+
+### 9.3 Update AckRequest type and encoding
+
+Update `@canopy/forestrie-ingress-types`:
+
+```typescript
+export interface AckRequest {
+  logId: ArrayBuffer;
+  seqLo: number;
+  limit: number;
+  firstLeafIndex: number;  // NEW
+  massifIndex: number;     // NEW
+}
+```
+
+Update CBOR encoding in `encoding.ts` to include new fields.
+
+### 9.4 Update ack handler
+
+Update HTTP ack handler to decode and pass new fields:
+
+```typescript
+const { logId, seqLo, limit, firstLeafIndex, massifIndex } = decodeAckRequest(body);
+await stub.ackFirst(logId, seqLo, limit, firstLeafIndex, massifIndex);
+```
+
+### 9.5 Add resolveContent method
+
+New RPC method on SequencingQueue:
+
+```typescript
+interface SequencingResult {
+  leafIndex: number;
+  massifIndex: number;
+}
+
+async resolveContent(
+  contentHash: ArrayBuffer,
+): Promise<SequencingResult | null>
+```
+
+Queries `sequenced_entries` by content_hash.
+
+### 9.6 Update ranger ackFirst call
+
+Update ranger's `ackFirst` to include sequencing metadata:
+
+```go
+type AckRequest struct {
+    LogId          []byte
+    SeqLo          uint64
+    Limit          uint64
+    FirstLeafIndex uint64
+    MassifIndex    uint64
+}
+```
+
+The committer must return `firstLeafIndex` and `massifIndex` so ranger can
+pass them to ack.
+
+### 9.7 Update committer return values
+
+Modify `CommitLogGroup` to return sequencing metadata:
+
+```go
+type CommitResult struct {
+    Committed      int
+    FirstLeafIndex uint64
+    MassifIndex    uint64
+}
+
+func (c *Committer) CommitLogGroup(
+    ctx context.Context,
+    logId []byte,
+    entries []Entry,
+) (*CommitResult, error)
+```
+
+### 9.8 Add massif reading helper
+
+Create helper in `@canopy/merklelog` or similar:
+
+```typescript
+export async function getIdtimestampFromMassif(
+  r2: R2Bucket,
+  logId: string,
+  massifHeight: number,
+  massifIndex: number,
+  leafIndex: number,
+): Promise<bigint>
+```
+
+Reads the massif from R2 and extracts the idtimestamp at the given leaf offset.
+
+### 9.9 Update query-registration-status
+
+Modify canopy-api handler to query DO instead of ranger-cache:
+
+1. Call `stub.resolveContent(contentHashBytes)`
+2. If null, return 303 with retry (status unchanged)
+3. If result, call `getIdtimestampFromMassif()` to get idtimestamp
+4. Build entryId and return 303 to receipt URL
+
+This requires adding `SEQUENCING_QUEUE` binding to canopy-api's
+`query-registration-status` handler.
+
+### 9.10 Implement garbage collection
+
+Add periodic cleanup of old `sequenced_entries`:
+
+```typescript
+const SEQUENCED_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+private cleanupOldSequencedEntries(): void {
+  const cutoff = Date.now() - SEQUENCED_RETENTION_MS;
+  this.ctx.storage.sql.exec(
+    `DELETE FROM sequenced_entries WHERE sequenced_at < ?`,
+    cutoff,
+  );
+}
+```
+
+Trigger on every Nth ack or via Durable Object alarm.
+
+### 9.11 Update tests
+
+Add tests for:
+- `ackFirst` with sequencing metadata populates `sequenced_entries`
+- `resolveContent` returns correct result for sequenced entries
+- `resolveContent` returns null for pending/unknown entries
+- Garbage collection removes old entries
+- Integration test: enqueue → pull → ack → resolveContent
+
+### 9.12 Update shared types
+
+Add new types to `@canopy/forestrie-ingress-types`:
+
+```typescript
+export interface SequencingResult {
+  leafIndex: number;
+  massifIndex: number;
+}
+
+export interface SequencingQueueStub {
+  // ... existing methods ...
+  resolveContent(contentHash: ArrayBuffer): Promise<SequencingResult | null>;
+}
+```
+
+---
+
 ## Implementation Notes
 
 ### File Organization
