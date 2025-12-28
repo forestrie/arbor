@@ -1483,7 +1483,7 @@ the related ADRs:
 │                                                                 │
 │  • v2/merklelog/massifs/{height}/{logId}/{index}.log            │
 │  • v2/merklelog/checkpoints/{height}/{logId}/{index}.sth        │
-│  • R2 notifications → sealer, ranger-cache, forester queues     │
+│  • R2 notifications → sealer and ranger-cache queues            │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -2252,6 +2252,154 @@ R2 write operation.
 
 Complexity: Medium-high. Requires careful handling of partial failures
 and per-log ack granularity. May conflict with per-log massif isolation.
+
+---
+
+# Part 4: Post-implementation performance testing
+
+This section documents smoke test results from the deployed DO-based ingress
+queue, measuring end-to-end throughput and sequencing latency.
+
+## 4.1 Test methodology
+
+Smoke tests are implemented in `canopy/taskfiles/scrapi.yml` as `smoke:N` tasks
+where N is the number of statements. Each test:
+
+1. POSTs N statements in parallel (background jobs with `wait`)
+2. Polls all status URLs in parallel until sequenced
+3. Reports POST time, total time, and throughput (stmt/s)
+
+**Methodology limitations:**
+
+- **Burst ingress**: All statements are POSTed as fast as possible, creating
+  a burst rather than sustained load. This means ranger batches drain faster
+  than they fill, resulting in smaller batch sizes than would occur under
+  sustained ingress.
+- **Single log**: All statements go to a single log, eliminating parallelism
+  benefits from multiple rangers processing different logs.
+- **Client-side measurement**: Total time includes client→Cloudflare→GCP
+  network latency for each poll, not just system processing time.
+- **Poll overhead**: The parallel polling phase adds ~1s minimum (poll interval
+  + network round trips) even when entries are already sequenced.
+
+## 4.2 Sequencing latency (DO-measured)
+
+The DO records `enqueued_at` and `acked_at` timestamps, enabling precise
+measurement of sequencing latency independent of client polling.
+
+**Results from 500-entry batch (2024-12-28):**
+
+| Metric | Value |
+|--------|-------|
+| Min | 605ms |
+| p50 | 1,077ms |
+| p95 | 1,532ms |
+| p99 | 1,714ms |
+| Max | 1,819ms |
+| Avg | 1,081ms |
+
+The ~1s p50 latency is dominated by R2 read/modify/write cycle time for
+massif commits. This is the fundamental floor for single-entry latency.
+
+## 4.3 Client-side throughput results
+
+**Configuration:**
+- Single ranger instance (GKE)
+- QUEUE_BATCH_SIZE=100
+- POLL_INTERVAL_MIN=0ms, POLL_INTERVAL_MAX=2s
+- MASSIF_HEIGHT=14
+
+| Statements | POST Time | Total Time | Throughput |
+|------------|-----------|------------|------------|
+| 3 | 461ms | 2,141ms | 1.4 stmt/s |
+| 5 | 405ms | 2,148ms | 2.3 stmt/s |
+| 10 | 1,464ms | 3,188ms | 3.1 stmt/s |
+| 25 | 3,729ms | 6,346ms | 3.9 stmt/s |
+| 50 | 4,195ms | 7,117ms | 7.0 stmt/s |
+| 75 | 5,644ms | 8,869ms | 8.4 stmt/s |
+| 100 | 6,839ms | 11,544ms | 8.6 stmt/s |
+| 150 | 7,939ms | 14,379ms | 10.4 stmt/s |
+| 500 | 30,387ms | 56,472ms | 8.8 stmt/s |
+
+## 4.4 Analysis: batch fill rate limits throughput
+
+The 500-statement test achieved only 8.8 stmt/s despite having entries
+available. Ranger logs show the cause—small batch sizes:
+
+```
+22:54:52 committed count=14
+22:54:53 committed count=17
+22:54:54 committed count=13
+22:54:55 committed count=21
+22:54:56 committed count=16
+22:54:57 committed count=22
+22:54:58 committed count=6
+...
+22:55:03 committed count=2
+```
+
+Average batch size: ~12 entries (not 100).
+
+**Why batches don't fill to 100:**
+
+1. **Burst drains faster than it fills**: The 500 POSTs complete in ~30s.
+   Each ranger commit cycle (~700ms) processes whatever has accumulated
+   since the last pull. With entries arriving over 30s, batches never
+   build up to 100.
+
+2. **Tail effect**: As the burst completes, fewer entries remain, causing
+   progressively smaller batches (count=6, 3, 2 at the end).
+
+3. **Single log constraint**: All entries go to one log, so there's no
+   parallelism benefit from multiple logs being processed concurrently.
+
+## 4.5 Theoretical vs observed throughput
+
+With the observed ~700ms R2 cycle time:
+
+| Batch Size | Theoretical Max | Notes |
+|------------|-----------------|-------|
+| 12 (observed avg) | ~17 stmt/s | Matches ~8.8 stmt/s observed (with overhead) |
+| 50 | ~71 stmt/s | Requires sustained 50/s ingress |
+| 100 | ~143 stmt/s | Requires sustained 100/s ingress |
+
+**Key insight**: To achieve 100 stmt/s throughput, the system needs sustained
+ingress at or above 100 stmt/s so that each ranger pull returns a full batch
+of 100 entries. The burst test methodology cannot demonstrate this because
+entries arrive faster than they can be pulled but then stop.
+
+## 4.6 Path to 100 stmt/s
+
+Based on the testing, 100 stmt/s is achievable with:
+
+1. **Sustained ingress**: Continuous load at 100+ stmt/s keeps batches full.
+   This is the primary requirement.
+
+2. **Current configuration is sufficient**: Single ranger with batch_size=100
+   and ~700ms R2 cycle achieves ~143 stmt/s theoretical max.
+
+3. **Multiple rangers (optional)**: For higher throughput or multiple active
+   logs, scale rangers horizontally. The DO's consistent hashing distributes
+   logs across pollers.
+
+## 4.7 Recommendations for production load testing
+
+To accurately measure sustained throughput:
+
+1. **Use a load generator**: Tools like `wrk`, `vegeta`, or `k6` can sustain
+   constant request rates over extended periods.
+
+2. **Target rate, not count**: Configure the load generator for a target
+   requests/second rather than total request count.
+
+3. **Run for multiple minutes**: Allow the system to reach steady state where
+   batch sizes stabilize.
+
+4. **Monitor DO-side metrics**: Use the `/queue/debug/recent` endpoint to
+   observe actual sequencing latency independent of client polling.
+
+5. **Check ranger batch sizes**: Verify via logs that batches are filling
+   to the expected size under sustained load.
 
 ---
 

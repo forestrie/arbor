@@ -1,7 +1,11 @@
 # Sequencing, latency, and throughput architecture
 
-This document describes the current sequencing path from statement
-registration to receipt.
+This document describes the preDurable Object queue architecture from
+statement registration to receipt.
+It is retained for historical context only.
+For the superseding design based on a Cloudflare Durable Object ingress
+queue, see `docs/arc-cloudflare-do-ingress.md`.
+
 It focuses on storage, Cloudflare queues and workers, Arbor backend
 services, and where latency and throughput costs arise.
 It also suggests architectural changes to reduce hops and improve
@@ -19,8 +23,8 @@ Cloudflare side:
 - Cloudflare Queues:
   - `{CANOPY_ID}-ranger` for leaf notifications from `R2_LEAVES`.
   - `{CANOPY_ID}-sealer` for massif notifications from `R2_MMRS`.
-  - `{CANOPY_ID}-forester` for massif notifications
-    used by the forester service.
+  - `{CANOPY_ID}-forester` (legacy) for massif notifications used by the
+    now-removed forester service.
   - `{CANOPY_ID}-ranger-cache` for massif notifications consumed by the
     `ranger-cache` worker.
 - R2 event notifications configured by `cloudflare.yml`:
@@ -51,8 +55,8 @@ Arbor and GCP side:
 - `delegation-signer` service
   - Issues short lived COSE signing delegation leases to `sealer`.
 
-The forester service also receives massif notifications, but it is not
-on the critical path for receipt resolution.
+Historically, the forester service also received massif notifications,
+but it was not on the critical path for receipt resolution.
 
 ## End to end sequence: register statement to receipt
 
@@ -165,7 +169,8 @@ Every new massif write triggers R2 event notifications from the
 A single write fans out to three queues:
 
 - `{CANOPY_ID}-sealer` for sealing.
-- `{CANOPY_ID}-forester` for forester derived processing.
+- `{CANOPY_ID}-forester` (legacy) for forester derived processing; this
+  queue and service have been removed.
 - `{CANOPY_ID}-ranger-cache` for cache index updates.
 
 8.
@@ -456,20 +461,13 @@ receipt resolution fail purely because `sealer` is a little
 behind `ranger-cache`.
 
 ### 4.
-Forester and derived processing queue
+Forester and derived processing queue (historical)
 
-Massif notifications fan out to a separate forester queue.
-If forester work is mostly derived reporting or async export, you
-could:
-
-- Consider moving forester processing off the hot path by having
-  it read from a durable log of checkpoints instead of raw
-  massifs.
-- Or share the sealer queue and branch on object key prefix so
-  you do not pay for a third separate queue.
-
-This will not reduce registration to receipt latency, but it can
-shrink background load and simplify operations at high scale.
+Historically, massif notifications also fanned out to a separate
+forester queue for derived processing by the forester service.
+That service and queue have been removed.
+The current design based on a Cloudflare Durable Object ingress queue is
+described in `docs/arc-cloudflare-do-ingress.md`.
 
 ## Where Cloudflare or GCP could be used more effectively
 
@@ -519,8 +517,8 @@ from internal processing via Pub/Sub:
 
 - Have a small GCP edge service that consumes the Cloudflare
   queues and republishes messages into Pub/Sub topics.
-- Run `ranger`, `sealer`, and forester instances that subscribe
-  to those topics.
+- Run `ranger` and `sealer` instances that subscribe to those
+  topics.
 
 Benefits:
 

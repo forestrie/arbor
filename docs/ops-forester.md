@@ -1,8 +1,8 @@
-# Forester operations
+# Forester operations (deprecated)
 
-This document describes how the forester service is configured in
-`forestrie/arbor` and how its Kubernetes manifests and GitHub workflows
-provide credentials and configuration.
+The forester service has been removed from this repository. This
+document is retained only for historical reference and should not be
+used for current operations.
 
 ## Role of forester
 
