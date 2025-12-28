@@ -87,11 +87,13 @@ func DecodePullResponse(data []byte) (*PullResponse, error) {
 		return nil, fmt.Errorf("invalid version type: %T", raw[0])
 	}
 
-	// LeaseExpiry (uint64)
+	// LeaseExpiry (uint64) - may arrive as float64 from JavaScript Date.now()
 	switch v := raw[1].(type) {
 	case uint64:
 		resp.LeaseExpiry = v
 	case int64:
+		resp.LeaseExpiry = uint64(v)
+	case float64:
 		resp.LeaseExpiry = uint64(v)
 	default:
 		return nil, fmt.Errorf("invalid leaseExpiry type: %T", raw[1])
