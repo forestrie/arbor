@@ -49,21 +49,44 @@ func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.
 	}
 }
 
+// defaultBackoffBase is used when PollIntervalMin is 0 and PollIntervalMax/8
+// would also be 0. This ensures backoff multiplication always has a non-zero
+// starting point.
+const defaultBackoffBase = 10 * time.Millisecond
+
 // ConsumeQueue starts the poll loop that consumes entries from the DO queue.
 // Uses exponential backoff: resets to min interval on success, doubles on empty.
+//
+// The backoff logic separates the configured sleep minimum (PollIntervalMin)
+// from the backoff base used for multiplication. This allows PollIntervalMin=0
+// to mean "immediate re-poll on success" while still supporting exponential
+// backoff on empty responses.
 func (c *Consumer) ConsumeQueue(ctx context.Context) {
 	defer c.httpClient.Close()
+
+	// Compute backoff base: the starting point for exponential backoff.
+	// This must be non-zero for multiplication to work.
+	backoffBase := c.cfg.PollIntervalMin
+	if backoffBase == 0 {
+		backoffBase = c.cfg.PollIntervalMax / 8
+	}
+	if backoffBase == 0 {
+		backoffBase = defaultBackoffBase
+	}
 
 	c.logger.Info("starting ingress consumer",
 		"queueURL", c.cfg.QueueURL,
 		"pollerId", c.pollerId,
 		"pollIntervalMin", c.cfg.PollIntervalMin,
 		"pollIntervalMax", c.cfg.PollIntervalMax,
+		"backoffBase", backoffBase,
 		"batchSize", c.cfg.QueueBatchSize,
 		"visibilityMs", c.cfg.VisibilityTimeout.Milliseconds(),
 	)
 
-	currentInterval := c.cfg.PollIntervalMin
+	// currentBackoff tracks the current position in the exponential backoff
+	// sequence. It is reset to PollIntervalMin on success (which may be 0).
+	currentBackoff := c.cfg.PollIntervalMin
 
 	for {
 		select {
@@ -78,32 +101,40 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 			c.logger.Error("poll cycle failed", "error", err)
 		}
 
+		var sleepDuration time.Duration
 		if hadEntries {
-			// Reset to minimum interval on success
-			currentInterval = c.cfg.PollIntervalMin
+			// Success: sleep for exactly PollIntervalMin (can be 0 for
+			// immediate re-poll) and reset backoff state.
+			sleepDuration = c.cfg.PollIntervalMin
+			currentBackoff = c.cfg.PollIntervalMin
 		} else {
-			// Double interval on empty response (exponential backoff)
-			currentInterval *= 2
-			if currentInterval > c.cfg.PollIntervalMax {
-				currentInterval = c.cfg.PollIntervalMax
+			// Empty response: exponential backoff.
+			// If currentBackoff is 0, use backoffBase to start the sequence
+			// (since 0 * 2 = 0 would never increase).
+			if currentBackoff == 0 {
+				currentBackoff = backoffBase
+			} else {
+				currentBackoff *= 2
 			}
+			if currentBackoff > c.cfg.PollIntervalMax {
+				currentBackoff = c.cfg.PollIntervalMax
+			}
+			sleepDuration = currentBackoff
 		}
 
-		// Add jitter: ±10% of current interval (skip if interval is 0)
-		sleepDuration := currentInterval
-		if currentInterval > 0 {
-			jitter := time.Duration(rand.Int63n(int64(currentInterval) / 5))
-			jitter -= currentInterval / 10 // center the jitter around zero
+		// Add jitter: ±10% of sleep duration (only if non-zero).
+		if sleepDuration > 0 {
+			jitter := time.Duration(rand.Int63n(int64(sleepDuration) / 5))
+			jitter -= sleepDuration / 10 // center the jitter around zero
 			sleepDuration += jitter
 		}
 
-		if sleepDuration > 0 {
-			select {
-			case <-ctx.Done():
-				c.logger.Debug("ingress consumer stopping")
-				return
-			case <-time.After(sleepDuration):
-			}
+		// Always yield to the scheduler, even if sleepDuration is 0.
+		select {
+		case <-ctx.Done():
+			c.logger.Debug("ingress consumer stopping")
+			return
+		case <-time.After(sleepDuration):
 		}
 	}
 }
