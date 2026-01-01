@@ -271,9 +271,34 @@ golangci-lint run ./...
 
 When adding linting to this repo, prefer wiring it through a `tools/` Go module and Taskfile tasks rather than ad-hoc scripts.
 
+## Documentation
+
+All architecture documents (ARCs), decision records (ADRs), operational runbooks
+(ops), and implementation plans now live in the shared **devdocs** repository at
+`../devdocs/`. This repository should not contain ADRs, ARCs, or plans - use
+devdocs instead.
+
+Key devdocs locations:
+- `../devdocs/adr/` - Architecture Decision Records
+- `../devdocs/arc/` - Architecture documents
+- `../devdocs/ops/` - Operational runbooks
+- `../devdocs/plans/` - Implementation plans
+
+When referencing documentation in commits or code comments, use devdocs paths.
+
 ## Guidance for future changes
 
-- **Respect service boundaries:** Keep ranger- and sharder-specific logic inside their respective modules under `services/`. Extract shared functionality into `libs/` only when it is genuinely shared across services.
-- **Align with documented layout:** Use `LAYOUTmd` as the source of truth for how new services, libs, proto definitions, and ops tooling should be structured.
-- **Integrate with existing CI/CD:** When adding new tasks or deployment logic, align with the existing Taskfile + GitHub Actions + Flux pattern rather than introducing parallel pipelines.
-- **Configuration via env only:** Follow the existing pattern in `ranger.Config` when adding new configuration, including validation and safe logging of configuration values and secrets.
+- **Respect service boundaries:** Keep ranger- and sharder-specific logic inside
+  their respective modules under `services/`. Extract shared functionality into
+  `libs/` only when it is genuinely shared across services.
+- **Align with documented layout:** Use `LAYOUTmd` as the source of truth for
+  how new services, libs, proto definitions, and ops tooling should be
+  structured.
+- **Integrate with existing CI/CD:** When adding new tasks or deployment logic,
+  align with the existing Taskfile + GitHub Actions + Flux pattern rather than
+  introducing parallel pipelines.
+- **Configuration via env only:** Follow the existing pattern in `ranger.Config`
+  when adding new configuration, including validation and safe logging of
+  configuration values and secrets.
+- **Documentation in devdocs:** All ADRs, ARCs, ops docs, and plans should be
+  created in the devdocs repository, not in this repository's docs/ folder.
