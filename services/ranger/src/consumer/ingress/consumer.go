@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/forestrie/arbor/services/ranger"
+	"github.com/forestrie/arbor/services/ranger/metrics"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +31,7 @@ type Consumer struct {
 	httpClient *ranger.HTTPClient
 	logger     *slog.Logger
 	committer  LogGroupCommitter
+	metrics    *metrics.Metrics
 	pollerId   string
 	shardIndex int    // Shard index this consumer is responsible for
 	pullURL    string // Pre-computed pull URL with shard parameter
@@ -38,7 +40,7 @@ type Consumer struct {
 
 // NewConsumer creates a new ingress consumer for a specific shard.
 // Use NewShardedConsumers to create consumers for all shards.
-func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger, committer LogGroupCommitter, shardIndex int, pullURL, ackURL string) *Consumer {
+func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger, committer LogGroupCommitter, m *metrics.Metrics, shardIndex int, pullURL, ackURL string) *Consumer {
 	pollerId := cfg.PollerId
 	if pollerId == "" {
 		pollerId = uuid.New().String()
@@ -49,6 +51,7 @@ func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.
 		httpClient: httpClient,
 		logger:     logger.With("shard", shardIndex),
 		committer:  committer,
+		metrics:    m,
 		pollerId:   pollerId,
 		shardIndex: shardIndex,
 		pullURL:    pullURL,
@@ -64,6 +67,7 @@ func NewShardedConsumers(
 	httpClientFactory func() *ranger.HTTPClient,
 	logger *slog.Logger,
 	committer LogGroupCommitter,
+	m *metrics.Metrics,
 ) ([]*Consumer, error) {
 	discovery := NewShardDiscovery(cfg)
 	shardsResp, err := discovery.DiscoverShards(ctx)
@@ -88,7 +92,7 @@ func NewShardedConsumers(
 	for i := 0; i < shardsResp.Count; i++ {
 		pullURL := discovery.BuildPullURL(i)
 		ackURL := discovery.BuildAckURL(i)
-		consumers[i] = NewConsumer(cfg, httpClientFactory(), logger, committer, i, pullURL, ackURL)
+		consumers[i] = NewConsumer(cfg, httpClientFactory(), logger, committer, m, i, pullURL, ackURL)
 	}
 
 	return consumers, nil
@@ -141,13 +145,31 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 		default:
 		}
 
-		hadEntries, err := c.pollCycle(ctx)
+		entryCount, err := c.pollCycle(ctx)
 		if err != nil {
 			c.logger.Error("poll cycle failed", "error", err)
 		}
 
+		// Record poll metrics based on entry count vs batch size
+		if c.metrics != nil {
+			var result string
+			switch {
+			case entryCount == 0:
+				result = "empty"
+			case entryCount >= c.cfg.QueueBatchSize:
+				result = "full"
+			default:
+				result = "partial"
+			}
+			c.metrics.RecordPoll(result)
+
+			// Batch fullness ratio: entries / batch_size (0.0 to 1.0+)
+			fullness := float64(entryCount) / float64(c.cfg.QueueBatchSize)
+			c.metrics.SetBatchFullness(fullness)
+		}
+
 		var sleepDuration time.Duration
-		if hadEntries {
+		if entryCount > 0 {
 			// Success: sleep for exactly PollIntervalMin (can be 0 for
 			// immediate re-poll) and reset backoff state.
 			sleepDuration = c.cfg.PollIntervalMin
@@ -185,20 +207,35 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 }
 
 // pollCycle pulls entries from the DO and processes them.
-// Returns true if entries were processed, false if queue was empty.
-func (c *Consumer) pollCycle(ctx context.Context) (bool, error) {
+// Returns the total entry count (0 if queue was empty).
+func (c *Consumer) pollCycle(ctx context.Context) (int, error) {
+	start := time.Now()
+
 	resp, err := c.pull(ctx)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 
-	if len(resp.LogGroups) == 0 {
+	// Count total entries across all log groups
+	entryCount := 0
+	for _, group := range resp.LogGroups {
+		entryCount += len(group.Entries)
+	}
+
+	// Record poll metrics
+	if c.metrics != nil {
+		c.metrics.ObservePollDuration(time.Since(start).Seconds())
+		c.metrics.ObserveEntriesPerPoll(entryCount)
+	}
+
+	if entryCount == 0 {
 		c.logger.Debug("no entries to process")
-		return false, nil
+		return 0, nil
 	}
 
 	c.logger.Info("pulled entries",
 		"logGroups", len(resp.LogGroups),
+		"entryCount", entryCount,
 		"leaseExpiry", resp.LeaseExpiry,
 	)
 
@@ -213,14 +250,21 @@ func (c *Consumer) pollCycle(ctx context.Context) (bool, error) {
 	}
 	wg.Wait()
 
-	return true, nil
+	return entryCount, nil
 }
 
 // processLogGroup commits entries for a single log and acks them.
 func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 	logIdHex := hex.EncodeToString(group.LogId)
 
+	commitStart := time.Now()
 	result, err := c.committer.CommitLogGroup(ctx, group.LogId, group.Entries)
+
+	// Record commit duration regardless of outcome
+	if c.metrics != nil {
+		c.metrics.ObserveCommitDuration(time.Since(commitStart).Seconds())
+	}
+
 	if err != nil {
 		c.logger.Warn("commit failed",
 			"logId", logIdHex,
@@ -236,6 +280,11 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 			"logId", logIdHex,
 		)
 		return
+	}
+
+	// Record entries processed
+	if c.metrics != nil {
+		c.metrics.AddEntriesProcessed(result.Committed)
 	}
 
 	c.logger.Info("committed entries",
@@ -258,6 +307,13 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 			"committed", result.Committed,
 			"error", err,
 		)
+		if c.metrics != nil {
+			c.metrics.RecordAck(false)
+		}
+	} else {
+		if c.metrics != nil {
+			c.metrics.RecordAck(true)
+		}
 	}
 }
 

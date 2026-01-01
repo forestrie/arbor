@@ -12,6 +12,8 @@ import (
 
 	"github.com/forestrie/arbor/services/sealer"
 	"github.com/forestrie/arbor/services/sealer/consumer"
+	"github.com/forestrie/arbor/services/sealer/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 var (
@@ -110,8 +112,16 @@ func main() {
 		"signature_size", lease.Info.SignatureSize,
 	)
 
+	// Create metrics registry and metrics
+	metricsRegistry := prometheus.NewRegistry()
+	metricsHandles := metrics.NewMetrics(metricsRegistry)
+
+	// Set initial delegation lease expiry from startup lease
+	metricsHandles.SetDelegationLeaseExpiry(float64(lease.ExpiresAt.Unix()))
+
 	healthMux := http.NewServeMux()
 	setupHealthChecks(healthMux)
+	healthMux.Handle("/metrics", metrics.Handler(metricsRegistry))
 
 	healthServer := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -125,7 +135,7 @@ func main() {
 		}
 	}()
 
-	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr)
+	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	go queueConsumer.ConsumeQueue(ctx)
 
 	<-ctx.Done()

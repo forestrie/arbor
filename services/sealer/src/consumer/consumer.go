@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/forestrie/arbor/services/sealer"
+	"github.com/forestrie/arbor/services/sealer/metrics"
 	"github.com/google/uuid"
 )
 
@@ -25,6 +26,7 @@ type QueueConsumer struct {
 	httpClient *sealer.HTTPClient
 	logger     *slog.Logger
 	leaseMgr   *sealer.DelegationLeaseManager
+	metrics    *metrics.Metrics
 }
 
 type logWork struct {
@@ -34,12 +36,13 @@ type logWork struct {
 }
 
 // NewQueueConsumer constructs a QueueConsumer with a config copy and shared HTTP client.
-func NewQueueConsumer(cfg sealer.Config, httpClient *sealer.HTTPClient, logger *slog.Logger, leaseMgr *sealer.DelegationLeaseManager) *QueueConsumer {
+func NewQueueConsumer(cfg sealer.Config, httpClient *sealer.HTTPClient, logger *slog.Logger, leaseMgr *sealer.DelegationLeaseManager, m *metrics.Metrics) *QueueConsumer {
 	return &QueueConsumer{
 		cfg:        cfg,
 		httpClient: httpClient,
 		logger:     logger,
 		leaseMgr:   leaseMgr,
+		metrics:    m,
 	}
 }
 
@@ -61,15 +64,28 @@ func (q *QueueConsumer) ConsumeQueue(ctx context.Context) {
 			q.logger.Debug("queue consumer stopping")
 			return
 		case <-ticker.C:
-			if err := q.PullAndProcessMessages(ctx); err != nil {
+			msgCount, err := q.PullAndProcessMessages(ctx)
+			if err != nil {
 				q.logger.Error("failed to pull/process messages", "error", err)
+				if q.metrics != nil {
+					q.metrics.RecordPoll("failure")
+				}
+			} else if q.metrics != nil {
+				if msgCount == 0 {
+					q.metrics.RecordPoll("empty")
+				} else {
+					q.metrics.RecordPoll("success")
+				}
 			}
 		}
 	}
 }
 
 // PullAndProcessMessages pulls messages from the queue, extracts log IDs, and acknowledges messages.
-func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
+// Returns the number of messages pulled and any error.
+func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error) {
+	start := time.Now()
+
 	baseQueueURL := strings.TrimSuffix(q.cfg.QueueURL, "/")
 	pullURL := fmt.Sprintf("%s/messages/pull", baseQueueURL)
 
@@ -83,12 +99,12 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("failed to marshal pull payload: %w", err)
+		return 0, fmt.Errorf("failed to marshal pull payload: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", pullURL, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return 0, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+q.cfg.QueueToken)
@@ -96,31 +112,40 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) error {
 
 	resp, err := q.httpClient.Do(ctx, req)
 	if err != nil {
-		return fmt.Errorf("failed to pull messages: %w", err)
+		return 0, fmt.Errorf("failed to pull messages: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		q.logger.Warn("queue pull failed", "status", resp.StatusCode, "body", string(b))
-		return fmt.Errorf("pull request failed: status=%d", resp.StatusCode)
+		return 0, fmt.Errorf("pull request failed: status=%d", resp.StatusCode)
 	}
 
 	var queueResp QueuePullResponse
 	if err := json.NewDecoder(resp.Body).Decode(&queueResp); err != nil {
 		q.logger.Warn("failed to decode queue pull response", "error", err)
-		return fmt.Errorf("failed to decode response: %w", err)
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	msgCount := len(queueResp.Result.Messages)
+
+	// Record poll metrics
+	if q.metrics != nil {
+		q.metrics.ObservePollDuration(time.Since(start).Seconds())
+		q.metrics.ObserveMessagesPerPoll(msgCount)
 	}
 
 	q.logger.Info("pulled messages",
-		"count", len(queueResp.Result.Messages),
+		"count", msgCount,
 		"backlog", queueResp.Result.MessageBacklogCount,
 		"pullURL", pullURL,
 		"batchSz", q.cfg.QueueBatchSize,
 		"visto", q.cfg.VisibilityTimeout.Microseconds(),
 	)
 
-	return q.ProcessAndAcknowledge(ctx, &queueResp.Result)
+	err = q.ProcessAndAcknowledge(ctx, &queueResp.Result)
+	return msgCount, err
 }
 
 // ProcessAndAcknowledge extracts the set of unique log IDs referenced by messages.
@@ -202,6 +227,11 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 		return nil
 	}
 
+	// Record messages processed (total in batch)
+	if q.metrics != nil {
+		q.metrics.AddMessagesProcessed(len(qbatch.Messages))
+	}
+
 	// Acquire a delegation signer token once per batch.
 	token, err := sealer.AcquireDelegationSignerAccessToken(ctx, q.cfg.DelegationSignerServiceAccountEmail)
 	if err != nil {
@@ -227,7 +257,12 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			checkpointStart := time.Now()
 			if err := sealer.CheckpointLog(ctx, svc, batchCtx, w.logIDBytes, w.massifHeight); err != nil {
+				// Record checkpoint duration even on failure
+				if q.metrics != nil {
+					q.metrics.ObserveCheckpointDuration(time.Since(checkpointStart).Seconds())
+				}
 				if errors.Is(err, sealer.ErrDelegationExpired) {
 					// Expected retry path: do not ack messages for this log so the queue will redeliver.
 					q.logger.Info("log checkpointing aborted due to expiring delegation; will retry",
@@ -244,6 +279,13 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				// Don't ack messages for this log; they will be retried after visibility timeout.
 				return
 			}
+
+			// Record successful checkpoint metrics
+			if q.metrics != nil {
+				q.metrics.ObserveCheckpointDuration(time.Since(checkpointStart).Seconds())
+				q.metrics.IncLogsCheckpointed()
+			}
+
 			// Ack only messages for successfully checkpointed logs.
 			q.ackAll(ctx, w.messages)
 		}()
@@ -370,6 +412,11 @@ func (q *QueueConsumer) ackAll(ctx context.Context, messages []QueueMessage) {
 				failureCount++
 				mu.Unlock()
 				q.logger.Warn("failed to acknowledge message", "messageID", msg.ID, "error", err)
+				if q.metrics != nil {
+					q.metrics.RecordAck(false)
+				}
+			} else if q.metrics != nil {
+				q.metrics.RecordAck(true)
 			}
 		}()
 	}

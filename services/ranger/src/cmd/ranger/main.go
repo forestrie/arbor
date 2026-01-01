@@ -14,6 +14,8 @@ import (
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/committer"
 	"github.com/forestrie/arbor/services/ranger/consumer/ingress"
+	"github.com/forestrie/arbor/services/ranger/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Note: the ci does the right thing with go-releaser automatically, as
@@ -74,9 +76,14 @@ func main() {
 		"commitmentEpoch", cfg.CommitmentEpoch,
 	)
 
-	// Start health check server
+	// Create metrics registry and metrics
+	metricsRegistry := prometheus.NewRegistry()
+	metricsHandles := metrics.NewMetrics(metricsRegistry)
+
+	// Start health check server with metrics endpoint
 	healthMux := http.NewServeMux()
 	setupHealthChecks(healthMux)
+	healthMux.Handle("/metrics", metrics.Handler(metricsRegistry))
 
 	healthServer := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -95,12 +102,13 @@ func main() {
 		return ranger.NewHTTPClient(logger)
 	}
 
-	consumers, err := ingress.NewShardedConsumers(ctx, cfg, httpClientFactory, logger, massifCommitter)
+	consumers, err := ingress.NewShardedConsumers(ctx, cfg, httpClientFactory, logger, massifCommitter, metricsHandles)
 	if err != nil {
 		slog.Error("failed to discover shards", "error", err)
 		os.Exit(1)
 	}
 	initialShardCount := len(consumers)
+	metricsHandles.SetShardCount(initialShardCount)
 	slog.Info("starting shard consumers", "shardCount", initialShardCount)
 
 	// Start a consumer goroutine for each shard
