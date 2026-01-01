@@ -25,7 +25,8 @@ type Config struct {
 	QueueToken     string
 	QueueBatchSize int
 
-	PollInterval      time.Duration
+	PollIntervalMin   time.Duration
+	PollIntervalMax   time.Duration
 	VisibilityTimeout time.Duration
 
 	// Delegation signer / GCP Workload Identity configuration
@@ -129,8 +130,9 @@ func LoadConfig() Config {
 		ShutdownTimeout:                     getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
 		QueueURL:                            os.Getenv("QUEUE_URL"),
 		QueueToken:                          os.Getenv("QUEUE_TOKEN"),
-		QueueBatchSize:                      getInt("QUEUE_BATCH_SIZE", 1),
-		PollInterval:                        getDuration("POLL_INTERVAL", 5*time.Second),
+		QueueBatchSize:                      getInt("QUEUE_BATCH_SIZE", 31),
+		PollIntervalMin:                     getDuration("POLL_INTERVAL_MIN", 0),
+		PollIntervalMax:                     getDuration("POLL_INTERVAL_MAX", 5*time.Second),
 		VisibilityTimeout:                   getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		DelegationSignerServiceAccountEmail: os.Getenv("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL"),
 		DelegationSignerURL:                 os.Getenv("DELEGATION_SIGNER_URL"),
@@ -150,7 +152,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "QUEUE_URL", c.QueueURL)
 	logSecretDigest(logger, "QUEUE_TOKEN", c.QueueToken)
 	logConfigValue(logger, "QUEUE_BATCH_SIZE", c.QueueBatchSize)
-	logConfigValue(logger, "POLL_INTERVAL", c.PollInterval)
+	logConfigValue(logger, "POLL_INTERVAL_MIN", c.PollIntervalMin)
+	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 	logConfigValue(logger, "DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL", c.DelegationSignerServiceAccountEmail)
 	logConfigValue(logger, "DELEGATION_SIGNER_URL", c.DelegationSignerURL)

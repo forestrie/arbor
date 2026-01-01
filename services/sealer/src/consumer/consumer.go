@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -46,37 +47,104 @@ func NewQueueConsumer(cfg sealer.Config, httpClient *sealer.HTTPClient, logger *
 	}
 }
 
+// defaultBackoffBase is used when PollIntervalMin is 0 and PollIntervalMax/8
+// would also be 0. This ensures backoff multiplication always has a non-zero
+// starting point.
+const defaultBackoffBase = 10 * time.Millisecond
+
 // ConsumeQueue starts the queue consumer loop that polls for messages.
+// Uses exponential backoff: resets to min interval on full batch, doubles on empty.
 func (q *QueueConsumer) ConsumeQueue(ctx context.Context) {
 	defer q.httpClient.Close()
 
-	ticker := time.NewTicker(q.cfg.PollInterval)
-	defer ticker.Stop()
+	// Compute backoff base: the starting point for exponential backoff.
+	// This must be non-zero for multiplication to work.
+	backoffBase := q.cfg.PollIntervalMin
+	if backoffBase == 0 {
+		backoffBase = q.cfg.PollIntervalMax / 8
+	}
+	if backoffBase == 0 {
+		backoffBase = defaultBackoffBase
+	}
 
-	q.logger.Debug("starting queue consumer",
+	q.logger.Info("starting queue consumer",
 		"queueURL", q.cfg.QueueURL,
-		"pollInterval", q.cfg.PollInterval,
+		"pollIntervalMin", q.cfg.PollIntervalMin,
+		"pollIntervalMax", q.cfg.PollIntervalMax,
+		"backoffBase", backoffBase,
+		"batchSize", q.cfg.QueueBatchSize,
+		"visibilityMs", q.cfg.VisibilityTimeout.Milliseconds(),
 	)
+
+	// currentBackoff tracks the current position in the exponential backoff
+	// sequence. It is reset to PollIntervalMin on full batch (which may be 0).
+	currentBackoff := q.cfg.PollIntervalMin
 
 	for {
 		select {
 		case <-ctx.Done():
 			q.logger.Debug("queue consumer stopping")
 			return
-		case <-ticker.C:
-			msgCount, err := q.PullAndProcessMessages(ctx)
-			if err != nil {
-				q.logger.Error("failed to pull/process messages", "error", err)
-				if q.metrics != nil {
-					q.metrics.RecordPoll("failure")
-				}
-			} else if q.metrics != nil {
-				if msgCount == 0 {
-					q.metrics.RecordPoll("empty")
-				} else {
-					q.metrics.RecordPoll("success")
-				}
+		default:
+		}
+
+		msgCount, err := q.PullAndProcessMessages(ctx)
+		if err != nil {
+			q.logger.Error("failed to pull/process messages", "error", err)
+			if q.metrics != nil {
+				q.metrics.RecordPoll("failure")
 			}
+		} else if q.metrics != nil {
+			var result string
+			switch {
+			case msgCount == 0:
+				result = "empty"
+			case msgCount >= q.cfg.QueueBatchSize:
+				result = "full"
+			default:
+				result = "partial"
+			}
+			q.metrics.RecordPoll(result)
+		}
+
+		var sleepDuration time.Duration
+		if msgCount >= q.cfg.QueueBatchSize {
+			// Full batch: sleep for exactly PollIntervalMin (can be 0 for
+			// immediate re-poll) and reset backoff state.
+			sleepDuration = q.cfg.PollIntervalMin
+			currentBackoff = q.cfg.PollIntervalMin
+		} else if msgCount > 0 {
+			// Partial batch: use current backoff but don't increase it.
+			if currentBackoff == 0 {
+				currentBackoff = backoffBase
+			}
+			sleepDuration = currentBackoff
+		} else {
+			// Empty response: exponential backoff.
+			if currentBackoff == 0 {
+				currentBackoff = backoffBase
+			} else {
+				currentBackoff *= 2
+			}
+			if currentBackoff > q.cfg.PollIntervalMax {
+				currentBackoff = q.cfg.PollIntervalMax
+			}
+			sleepDuration = currentBackoff
+		}
+
+		// Add jitter: ±10% of sleep duration (only if non-zero).
+		if sleepDuration > 0 {
+			jitter := time.Duration(rand.Int63n(int64(sleepDuration) / 5))
+			jitter -= sleepDuration / 10 // center the jitter around zero
+			sleepDuration += jitter
+		}
+
+		// Always yield to the scheduler, even if sleepDuration is 0.
+		select {
+		case <-ctx.Done():
+			q.logger.Debug("queue consumer stopping")
+			return
+		case <-time.After(sleepDuration):
 		}
 	}
 }
