@@ -2403,6 +2403,190 @@ To accurately measure sustained throughput:
 
 ---
 
+# Part 5: Sustained-load testing with k6
+
+This section describes a k6-based load testing approach that addresses the
+limitations of the burst-oriented smoke tests documented in Part 4.
+
+## 5.1 Motivation
+
+Smoke tests are useful for sanity checks but cannot demonstrate steady-state
+behavior because:
+
+1. **Burst ingress**: All statements arrive as fast as the client can POST,
+   then stop. Ranger batches drain faster than they fill.
+2. **Per-request polling overhead**: Even with parallel polling, the test
+   measures client→Cloudflare→GCP round trips, not system capacity.
+3. **No rate control**: There is no way to hold ingress at a specific rate
+   (e.g., exactly 100/s) for an extended period.
+
+Sustained-load testing with k6 uses constant-arrival-rate executors to
+maintain a precise request rate, allowing batches to fill and ranger to
+reach steady-state throughput.
+
+## 5.2 Target scenarios
+
+Initial scenarios target a single log at these sustained rates:
+
+| Scenario | Target Rate | Purpose |
+|----------|-------------|----------|
+| write-10ps | 10 stmt/s | Baseline; batches small but predictable |
+| write-100ps | 100 stmt/s | Target throughput; batches should fill to 100 |
+| write-150ps | 150 stmt/s | Exceed single-ranger capacity (~143 stmt/s) |
+| write-300ps | 300 stmt/s | Stress test; observe backpressure behavior |
+
+Each scenario runs for 3-5 minutes after a 30-60s warmup ramp to avoid
+cold-start skew.
+
+## 5.3 Configuration
+
+Tests are configured via environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| K6_CANOPY_BASE_URL | canopy-api base URL | (required) |
+| K6_API_TOKEN | Bearer token for Authorization header | (required) |
+| K6_MSG_BYTES | Payload size in bytes | 64 |
+| K6_SAMPLE_RATE | Fraction of POSTs polled to completion | 0.01 |
+| K6_STAGE_DURATION | Duration of steady-state stage | 3m |
+| K6_WARMUP_DURATION | Duration of warmup ramp | 30s |
+
+## 5.4 CBOR/COSE encoding challenges
+
+k6 runs in a goja (Go-based) JavaScript runtime that lacks Node.js Buffer
+and npm ecosystem access. The SCRAPI /entries endpoint requires COSE Sign1
+payloads encoded as CBOR.
+
+**Mitigation**: Implement minimal CBOR/COSE helpers in pure JavaScript using
+TypedArrays (Uint8Array, ArrayBuffer, TextEncoder):
+
+- `cbor.js`: Encode major types 0 (uint), 2 (bstr), 4 (array), 5 (map).
+- `cose.js`: Encode COSE Sign1 structure `[protected, unprotected, payload, sig]`
+  with empty protected/unprotected/signature (same as smoke test generator).
+
+These helpers live in `canopy/perf/k6/canopy-api/lib/` and are imported by
+scenario scripts.
+
+**Alternative**: Pre-generate COSE payloads of various sizes and bundle them
+as base64 in the script, decoding at runtime. This trades flexibility for
+simplicity if dynamic payload generation proves problematic.
+
+## 5.5 Async polling strategy
+
+The SCRAPI registration flow is asynchronous:
+1. POST /entries → 303 See Other with status URL
+2. Poll status URL until Location header points to /receipt
+3. (Optional) GET receipt
+
+Blocking on every poll would distort arrival rate and exhaust VUs.
+
+**Strategy**: Sample-based polling
+
+1. For each POST, with probability K6_SAMPLE_RATE (default 1%), record the
+   status URL and POST timestamp.
+2. A separate k6 scenario (`poller`) with limited VUs (e.g., 5) consumes
+   sampled URLs from a shared array and polls until sequenced.
+3. Emit custom metric `e2e_latency_sampled` (POST timestamp → receipt observed).
+4. The main writer scenario is unaffected by polling latency.
+
+**Optional enhancement**: Periodically query `/queue/debug/recent` to extract
+DO-measured `sequencingLatencyMs` percentiles and emit as custom metrics.
+This provides ground-truth latency without any client polling overhead.
+
+## 5.6 Metrics and thresholds
+
+**Core metrics:**
+
+| Metric | Description |
+|--------|-------------|
+| http_req_duration | POST /entries latency (k6 built-in) |
+| http_req_failed | Error rate (k6 built-in) |
+| e2e_latency_sampled | Time from POST to receipt URL (sampled) |
+| sequencing_latency_p50 | DO-measured p50 (from debug endpoint) |
+| sequencing_latency_p95 | DO-measured p95 (from debug endpoint) |
+
+**Initial thresholds (non-blocking):**
+
+```javascript
+thresholds: {
+  http_req_failed: ['rate<0.01'],         // <1% error rate
+  http_req_duration: ['p(95)<1000'],      // p95 POST latency <1s
+  e2e_latency_sampled: ['p(95)<5000'],    // p95 e2e <5s (includes poll)
+}
+```
+
+Thresholds will be tightened as baseline data is collected.
+
+## 5.7 Directory layout
+
+```
+canopy/
+  perf/
+    k6/
+      canopy-api/
+        lib/
+          cbor.js           # Minimal CBOR encoder
+          cose.js           # COSE Sign1 encoder
+          http.js           # POST helpers, 303 parsing
+        scenarios/
+          write-constant-arrival.js   # Single-rate scenario
+          write-sweep.js              # Multi-rate sweep
+        README.md           # Usage instructions
+```
+
+## 5.8 Running tests
+
+**Local (single rate):**
+
+```bash
+K6_CANOPY_BASE_URL=https://canopy-api.example.workers.dev \
+K6_API_TOKEN=your-token \
+k6 run --env RATE=100 perf/k6/canopy-api/scenarios/write-constant-arrival.js
+```
+
+**Task runner:**
+
+```bash
+task perf:k6:write:rate RATE=100 DURATION=3m
+task perf:k6:write:sweep RATES="10,100,150,300" DURATION=3m
+```
+
+**CI (GitHub Actions):**
+
+Workflow `perf-canopy.yml` runs matrix jobs for each target rate, using
+secrets for API tokens. Initial runs are non-blocking; thresholds are
+added incrementally as baselines are established.
+
+## 5.9 Expected results under sustained load
+
+With sustained 100/s ingress:
+
+1. **Batch fill**: Ranger batches should consistently contain ~70-100 entries
+   (depending on exact timing alignment with poll cycles).
+2. **Commit rate**: ~1 commit per 700-1000ms, processing ~100 entries each.
+3. **Throughput**: ~100 stmt/s observed (matching ingress rate).
+4. **Sequencing latency**: p50 ~1s, p95 ~1.5s (dominated by R2 cycle).
+
+At 150/s (exceeding single-ranger capacity of ~143/s):
+
+1. **Queue growth**: DO pending count should increase over time.
+2. **Backpressure**: Eventually, DO returns 503 when MAX_PENDING (100K) is
+   approached, or latency degrades as queue depth grows.
+3. **Diagnostic**: Use `/queue/stats` to observe pending count growth.
+
+## 5.10 Future extensions
+
+1. **Multi-log scenarios**: Distribute load across N logs to test ranger
+   horizontal scaling via consistent hashing.
+2. **Mixed read/write**: Add read scenarios (GET /entries/{id}, GET /receipt)
+   to simulate monitor-style traffic.
+3. **Chaos testing**: Inject ranger restarts or DO migrations during load to
+   validate at-least-once delivery and recovery.
+4. **Grafana dashboards**: Export k6 metrics to InfluxDB/Prometheus for
+   visualization alongside ranger and DO metrics.
+
+---
+
 # Appendix: Full schema
 
 ```sql path=null start=null
