@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +22,7 @@ type LogGroupCommitter interface {
 }
 
 // Consumer polls the forestrie-ingress Durable Object for entries.
+// Each consumer instance is responsible for a single shard.
 //
 // See: arbor/docs/arc-cloudflare-do-ingress.md
 type Consumer struct {
@@ -31,10 +31,14 @@ type Consumer struct {
 	logger     *slog.Logger
 	committer  LogGroupCommitter
 	pollerId   string
+	shardIndex int    // Shard index this consumer is responsible for
+	pullURL    string // Pre-computed pull URL with shard parameter
+	ackURL     string // Pre-computed ack URL with shard parameter
 }
 
-// NewConsumer creates a new ingress consumer.
-func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger, committer LogGroupCommitter) *Consumer {
+// NewConsumer creates a new ingress consumer for a specific shard.
+// Use NewShardedConsumers to create consumers for all shards.
+func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger, committer LogGroupCommitter, shardIndex int, pullURL, ackURL string) *Consumer {
 	pollerId := cfg.PollerId
 	if pollerId == "" {
 		pollerId = uuid.New().String()
@@ -43,10 +47,51 @@ func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.
 	return &Consumer{
 		cfg:        cfg,
 		httpClient: httpClient,
-		logger:     logger,
+		logger:     logger.With("shard", shardIndex),
 		committer:  committer,
 		pollerId:   pollerId,
+		shardIndex: shardIndex,
+		pullURL:    pullURL,
+		ackURL:     ackURL,
 	}
+}
+
+// NewShardedConsumers discovers shards and creates one consumer per shard.
+// Returns the consumers and the discovered shard count.
+func NewShardedConsumers(
+	ctx context.Context,
+	cfg ranger.Config,
+	httpClientFactory func() *ranger.HTTPClient,
+	logger *slog.Logger,
+	committer LogGroupCommitter,
+) ([]*Consumer, error) {
+	discovery := NewShardDiscovery(cfg)
+	shardsResp, err := discovery.DiscoverShards(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("shard discovery failed: %w", err)
+	}
+
+	logger.Info("discovered shards",
+		"count", shardsResp.Count,
+		"pullUrlTemplate", shardsResp.PullURLTemplate,
+	)
+
+	// Log per-shard depth for monitoring
+	for _, shard := range shardsResp.Shards {
+		logger.Info("shard depth",
+			"shard", shard.Index,
+			"pendingCount", shard.PendingCount,
+		)
+	}
+
+	consumers := make([]*Consumer, shardsResp.Count)
+	for i := 0; i < shardsResp.Count; i++ {
+		pullURL := discovery.BuildPullURL(i)
+		ackURL := discovery.BuildAckURL(i)
+		consumers[i] = NewConsumer(cfg, httpClientFactory(), logger, committer, i, pullURL, ackURL)
+	}
+
+	return consumers, nil
 }
 
 // defaultBackoffBase is used when PollIntervalMin is 0 and PollIntervalMax/8
@@ -75,7 +120,7 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 	}
 
 	c.logger.Info("starting ingress consumer",
-		"queueURL", c.cfg.QueueURL,
+		"pullURL", c.pullURL,
 		"pollerId", c.pollerId,
 		"pollIntervalMin", c.cfg.PollIntervalMin,
 		"pollIntervalMax", c.cfg.PollIntervalMax,
@@ -216,7 +261,7 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 	}
 }
 
-// pull fetches entries from the DO queue.
+// pull fetches entries from the DO queue shard.
 func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 	req := PullRequest{
 		PollerId:     c.pollerId,
@@ -229,8 +274,8 @@ func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 		return nil, fmt.Errorf("encode pull request: %w", err)
 	}
 
-	url := strings.TrimSuffix(c.cfg.QueueURL, "/") + "/queue/pull"
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	// Use pre-computed URL with shard parameter
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.pullURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create pull request: %w", err)
 	}
@@ -276,8 +321,8 @@ func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, res
 		return fmt.Errorf("encode ack request: %w", err)
 	}
 
-	url := strings.TrimSuffix(c.cfg.QueueURL, "/") + "/queue/ack"
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	// Use pre-computed URL with shard parameter
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.ackURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create ack request: %w", err)
 	}

@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/committer"
@@ -58,11 +60,11 @@ func main() {
 	)
 	defer stop()
 
-	// Create HTTP client with persistent connections for queue operations
-	httpClient := ranger.NewHTTPClient(logger)
+	// Create HTTP client for the committer (separate from consumer clients)
+	committerHTTPClient := ranger.NewHTTPClient(logger)
 
 	// Create committer wired to the S3-compatible backend (Cloudflare R2 compatible)
-	massifCommitter, err := committer.NewCommitter(cfg, httpClient, logger)
+	massifCommitter, err := committer.NewCommitter(cfg, committerHTTPClient, logger)
 	if err != nil {
 		slog.Error("failed to create committer", "error", err)
 		os.Exit(1)
@@ -88,13 +90,41 @@ func main() {
 		}
 	}()
 
-	// Start ingress consumer (DO queue)
-	ingressConsumer := ingress.NewConsumer(cfg, httpClient, logger, massifCommitter)
-	go ingressConsumer.ConsumeQueue(ctx)
+	// Start ingress consumers (one per shard)
+	httpClientFactory := func() *ranger.HTTPClient {
+		return ranger.NewHTTPClient(logger)
+	}
+
+	consumers, err := ingress.NewShardedConsumers(ctx, cfg, httpClientFactory, logger, massifCommitter)
+	if err != nil {
+		slog.Error("failed to discover shards", "error", err)
+		os.Exit(1)
+	}
+	initialShardCount := len(consumers)
+	slog.Info("starting shard consumers", "shardCount", initialShardCount)
+
+	// Start a consumer goroutine for each shard
+	var consumersWg sync.WaitGroup
+	for _, consumer := range consumers {
+		consumersWg.Add(1)
+		go func(c *ingress.Consumer) {
+			defer consumersWg.Done()
+			c.ConsumeQueue(ctx)
+		}(consumer)
+	}
+
+	// Start shard discovery monitor if interval is configured
+	if cfg.ShardDiscoveryInterval > 0 {
+		go monitorShardCount(ctx, cfg, initialShardCount, stop)
+	}
 
 	// Wait for termination signal
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
+
+	// Wait for all consumers to stop
+	consumersWg.Wait()
+	slog.Info("all consumers stopped")
 
 	// Create shutdown context with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
@@ -128,4 +158,37 @@ func setupHealthChecks(mux *http.ServeMux) {
 			"buildDate": buildDate,
 		})
 	})
+}
+
+// monitorShardCount periodically checks if the shard count has changed.
+// If a change is detected, it triggers a graceful shutdown so Kubernetes
+// can restart the pod with the new configuration.
+func monitorShardCount(ctx context.Context, cfg ranger.Config, expectedCount int, triggerShutdown context.CancelFunc) {
+	discovery := ingress.NewShardDiscovery(cfg)
+	ticker := time.NewTicker(cfg.ShardDiscoveryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			shardsResp, err := discovery.DiscoverShards(ctx)
+			if err != nil {
+				slog.Warn("shard discovery check failed", "error", err)
+				continue
+			}
+
+			if shardsResp.Count != expectedCount {
+				slog.Warn("shard count changed, initiating graceful restart",
+					"expected", expectedCount,
+					"discovered", shardsResp.Count,
+				)
+				triggerShutdown()
+				return
+			}
+
+			slog.Debug("shard count unchanged", "count", shardsResp.Count)
+		}
+	}
 }

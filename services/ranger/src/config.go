@@ -21,13 +21,14 @@ type Config struct {
 
 	// DO Ingress queue configuration
 	// See: arbor/docs/arc-cloudflare-do-ingress.md
-	QueueURL          string        // forestrie-ingress worker URL
-	QueueToken        string        // Bearer token for pull/ack endpoints
-	PollerId          string        // Unique identifier for this poller (auto-generated if empty)
-	QueueBatchSize    int           // Maximum entries per pull request
-	PollIntervalMin   time.Duration // Minimum (initial) poll interval
-	PollIntervalMax   time.Duration // Maximum poll interval (backoff ceiling)
-	VisibilityTimeout time.Duration // Lease duration for pulled entries
+	QueueURL               string        // forestrie-ingress worker URL
+	QueueToken             string        // Bearer token for pull/ack endpoints
+	PollerId               string        // Unique identifier for this poller (auto-generated if empty)
+	QueueBatchSize         int           // Maximum entries per pull request
+	PollIntervalMin        time.Duration // Minimum (initial) poll interval
+	PollIntervalMax        time.Duration // Maximum poll interval (backoff ceiling)
+	VisibilityTimeout      time.Duration // Lease duration for pulled entries
+	ShardDiscoveryInterval time.Duration // Interval for re-discovering shards (0 disables)
 
 	// R2 storage configuration (S3-compatible endpoint)
 	R2URL   string
@@ -150,17 +151,18 @@ func LoadConfig() Config {
 	}
 
 	cfg := Config{
-		Port:               getEnvOrDefault("PORT", "9090"),
-		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
-		ShutdownTimeout:    getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:           os.Getenv("QUEUE_URL"),
-		QueueToken:         os.Getenv("QUEUE_TOKEN"),
-		PollerId:           os.Getenv("POLLER_ID"),
-		QueueBatchSize:     getInt("QUEUE_BATCH_SIZE", 100),
-		PollIntervalMin:    getDuration("POLL_INTERVAL_MIN", 0*time.Millisecond),
-		PollIntervalMax:    getDuration("POLL_INTERVAL", 2*time.Second),
-		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
-		R2URL:              os.Getenv("R2_URL"),
+		Port:                   getEnvOrDefault("PORT", "9090"),
+		LogLevel:               getEnvOrDefault("LOG_LEVEL", "info"),
+		ShutdownTimeout:        getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		QueueURL:               os.Getenv("QUEUE_URL"),
+		QueueToken:             os.Getenv("QUEUE_TOKEN"),
+		PollerId:               os.Getenv("POLLER_ID"),
+		QueueBatchSize:         getInt("QUEUE_BATCH_SIZE", 100),
+		PollIntervalMin:        getDuration("POLL_INTERVAL_MIN", 0*time.Millisecond),
+		PollIntervalMax:        getDuration("POLL_INTERVAL", 2*time.Second),
+		VisibilityTimeout:      getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
+		ShardDiscoveryInterval: getDuration("SHARD_DISCOVERY_INTERVAL", 5*time.Minute),
+		R2URL:                  os.Getenv("R2_URL"),
 		R2Token:            r2Token,
 		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey: awsSecretAccessKey,
@@ -182,6 +184,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL_MIN", c.PollIntervalMin)
 	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
+	logConfigValue(logger, "SHARD_DISCOVERY_INTERVAL", c.ShardDiscoveryInterval)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
 	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
