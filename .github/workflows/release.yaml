@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Git Bootstrap
+        run: task bootstrap
+
+      - name: Unit Tests
+        run: task test:unit
+
+      - name: Integration Tests
+        run: task test:integration
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}-github-ci@${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west2-docker.pkg.dev
+
+      - name: Build and Push Ranger Image
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.version }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: |
+          task ranger:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+          task ranger:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Build and Push Scout Image
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.version }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: |
+          task scout:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+          task scout:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Build and Push Sealer Image
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.version }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: |
+          task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+          task sealer:push IMAGE_TAG=${IMAGE_TAG}
+
+  create-release-pr:
+    name: Create Release PR
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GITAPP_ID }}
+          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
+
+      - name: Checkout arbor-flux
+        uses: actions/checkout@v4
+        with:
+          repository: forestrie/arbor-flux
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Install yq
+        uses: mikefarah/yq@master
+
+      - name: Update gke-prod image tags
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Update image tags in gke-prod kustomizations
+          yq eval ".images[0].newTag = \"$VERSION\"" \
+            -i clusters/gke-prod/services/ranger/kustomization.yaml
+          yq eval ".images[0].newTag = \"$VERSION\"" \
+            -i clusters/gke-prod/services/sealer/kustomization.yaml
+          yq eval ".images[0].newTag = \"$VERSION\"" \
+            -i clusters/gke-prod/services/scout/kustomization.yaml
+
+          # Commit
+          git config user.name "forestrie-cd[bot]"
+          git config user.email "forestrie-cd[bot]@users.noreply.github.com"
+          git checkout -b release/$VERSION
+          git add clusters/gke-prod/
+          git commit -m "chore: update gke-prod to $VERSION
+
+          Source: arbor ${{ github.sha }}
+          Co-Authored-By: Warp <agent@warp.dev>"
+          git push origin release/$VERSION
+
+      - name: Create PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh pr create \
+            --repo forestrie/arbor-flux \
+            --base main \
+            --head release/$VERSION \
+            --title "Release $VERSION to prod" \
+            --body "Updates gke-prod overlay to version $VERSION
+
+          Source commit: forestrie/arbor@${{ github.sha }}
+
+          Merge this PR to deploy to production."

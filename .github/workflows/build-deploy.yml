@@ -52,8 +52,8 @@ jobs:
       - id: auth
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: "projects/887038722151/locations/global/workloadIdentityPools/github-pool-20251026-2329/providers/github-provider"
-          service_account: "forest-dev-1-github-ci@forest-dev-1.iam.gserviceaccount.com"
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}-github-ci@${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}.iam.gserviceaccount.com
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
