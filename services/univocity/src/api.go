@@ -9,7 +9,7 @@ import (
 // API provides the HTTP API for the univocity auth-log status service.
 type API struct {
 	Logger *slog.Logger
-	Chain  *UnivocityContract
+	Chain  ChainReader
 }
 
 // RegisterRoutes wires the API endpoints onto the provided mux.

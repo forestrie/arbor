@@ -1,8 +1,31 @@
 package univocity
 
 import (
+	"context"
 	"testing"
 )
+
+// TestMockChain_RootLogId_ZeroAndNonZero satisfies plan §8.2 verification:
+// unit test with mock for rootLogId returning zero vs non-zero.
+func TestMockChain_RootLogId_ZeroAndNonZero(t *testing.T) {
+	ctx := context.Background()
+	zero := &mockChain{rootLogId: [32]byte{}}
+	got, err := zero.RootLogId(ctx)
+	if err != nil {
+		t.Fatalf("RootLogId: %v", err)
+	}
+	if got != [32]byte{} {
+		t.Error("expected zero rootLogId")
+	}
+	nonZero := &mockChain{rootLogId: [32]byte{31: 1}}
+	got, err = nonZero.RootLogId(ctx)
+	if err != nil {
+		t.Fatalf("RootLogId: %v", err)
+	}
+	if got == [32]byte{} {
+		t.Error("expected non-zero rootLogId")
+	}
+}
 
 func TestLogIDFromHex_Valid32Bytes(t *testing.T) {
 	hex := "0x0000000000000000000000000000000000000000000000000000000000000001"

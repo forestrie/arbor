@@ -46,6 +46,14 @@ type LogConfig struct {
 	InitializedAt uint64
 }
 
+// ChainReader is the contract read interface used by the API. It allows tests to inject a mock.
+type ChainReader interface {
+	RootLogId(ctx context.Context) ([32]byte, error)
+	IsLogInitialized(ctx context.Context, logId [32]byte) (bool, error)
+	LogConfig(ctx context.Context, logId [32]byte) (LogConfig, error)
+	LogRootKey(ctx context.Context, logId [32]byte) (rootKeyX, rootKeyY [32]byte, err error)
+}
+
 type UnivocityContract struct {
 	client   *ethclient.Client
 	addr     common.Address

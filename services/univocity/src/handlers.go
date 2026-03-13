@@ -60,7 +60,7 @@ func (a API) handleLogsList(w http.ResponseWriter, r *http.Request) {
 		authLogs = append(authLogs, h)
 	}
 	resp := struct {
-		RootLogId *string  `json:"rootLogId,omitempty"`
+		RootLogId *string  `json:"rootLogId"` // null when not bootstrapped (plan §7.1)
 		AuthLogs  []string `json:"authLogs"`
 	}{
 		RootLogId: rootStr,
