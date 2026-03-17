@@ -86,6 +86,14 @@ jobs:
           task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
           task sealer:push IMAGE_TAG=${IMAGE_TAG}
 
+      - name: Build and Push Custodian Image
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.version }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+        run: |
+          task custodian:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+          task custodian:push IMAGE_TAG=${IMAGE_TAG}
+
   create-release-pr:
     name: Create Release PR
     needs: build
@@ -121,6 +129,8 @@ jobs:
             -i clusters/gke-prod/services/sealer/kustomization.yaml
           yq eval ".images[0].newTag = \"$VERSION\"" \
             -i clusters/gke-prod/services/scout/kustomization.yaml
+          yq eval ".images[0].newTag = \"$VERSION\"" \
+            -i clusters/gke-prod/services/custodian/kustomization.yaml
 
           # Commit
           git config user.name "forestrie-cd[bot]"

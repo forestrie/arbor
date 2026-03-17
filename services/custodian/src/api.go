@@ -26,11 +26,15 @@ func NewAPI(logger *slog.Logger, cfg Config) *API {
 // RegisterRoutes wires the custodian API onto the provided mux.
 //
 // Endpoints:
-//   - GET  /api/keys/{keyId}/public  (no auth)
-//   - POST /api/keys                 (normal app token) — create key
-//   - POST /api/token                (normal app token) — log-owner token
-//   - POST /api/token/bootstrap      (bootstrap app token) — bootstrap token
+//   - GET  /api/keys/{keyId}/public              (no auth)
+//   - POST /api/keys                             (normal app token) — create key
+//   - POST /api/keys/list                        (normal app token) — list keys matching labels (predicate and/or)
+//   - POST /api/keys/{keyId}/delete              (bootstrap app token) — destroy all key versions
+//   - POST /api/keys/{keyId}/versions/delete-from (bootstrap app token) — destroy versions <= N
+//   - POST /api/token                            (normal app token) — log-owner token
+//   - POST /api/token/bootstrap                  (bootstrap app token) — bootstrap token
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/keys/list", a.handleListKeys)
 	mux.HandleFunc("/api/keys", a.routeKeysCreate)
 	mux.HandleFunc("/api/keys/", a.routeKeys)
 	mux.HandleFunc("/api/token", a.routeToken)
@@ -46,7 +50,7 @@ func (a *API) routeKeysCreate(w http.ResponseWriter, r *http.Request) {
 	a.handleCreateKey(w, r)
 }
 
-// routeKeys: /api/keys/ or /api/keys/{keyId}/public
+// routeKeys: /api/keys/{keyId}/public | /api/keys/{keyId}/delete | /api/keys/{keyId}/versions/delete-from
 func (a *API) routeKeys(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/keys/")
 	if path == "" {
@@ -59,9 +63,20 @@ func (a *API) routeKeys(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")
 		return
 	}
-	if len(parts) == 2 && parts[1] == "public" {
-		a.handleGetPublicKey(w, r, keyID)
-		return
+	if len(parts) == 2 {
+		rest := parts[1]
+		if rest == "public" {
+			a.handleGetPublicKey(w, r, keyID)
+			return
+		}
+		if rest == "delete" {
+			a.handleDeleteKey(w, r, keyID)
+			return
+		}
+		if rest == "versions/delete-from" {
+			a.handleDeleteKeyVersionsFrom(w, r, keyID)
+			return
+		}
 	}
 	a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")
 }

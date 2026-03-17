@@ -7,8 +7,9 @@ import (
 
 // CreateKeyRequest is the body for POST /api/keys.
 type CreateKeyRequest struct {
-	KeyOwnerID string `json:"key_owner_id"`
-	Alg        string `json:"alg,omitempty"` // ES256 or KS256
+	KeyOwnerID string            `json:"key_owner_id"`
+	Alg        string            `json:"alg,omitempty"` // ES256 or KS256
+	Labels     map[string]string  `json:"labels,omitempty"` // Optional structured labels (lowercase, [a-z0-9_-], max 63 chars)
 }
 
 // CreateKeyResponse is the response for POST /api/keys.
@@ -45,7 +46,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), req.KeyOwnerID, req.Alg)
+	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), req.KeyOwnerID, req.Alg, req.Labels)
 	if err != nil {
 		a.Logger.Error("failed to create key", "key_owner_id", req.KeyOwnerID, "error", err)
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key creation failed")

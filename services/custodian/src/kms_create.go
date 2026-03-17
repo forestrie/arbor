@@ -15,7 +15,8 @@ import (
 // CreateKeyForOwner creates a new asymmetric sign key in the custody key ring
 // and grants the custody_signer SA signerVerifier and publicKeyViewer on it.
 // keyOwnerID is used to derive a key name; alg is "ES256" or "KS256".
-func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string) (keyName, publicKeyPEM string, err error) {
+// labels are optional KMS labels (merged with owner_id); keys/values must be lowercase, [a-z0-9_-], max 63 chars.
+func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
 	if a.cfg.CustodyKeyRingID == "" {
 		return "", "", fmt.Errorf("CUSTODY_KEY_RING_ID not set")
 	}
@@ -37,11 +38,36 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string) (ke
 	}
 	defer client.Close()
 
+	// Build labels: canonical owner_id plus optional structured labels (GCP: lowercase, [a-z0-9_-], max 63)
+	labelVal := strings.ToLower(regexp.MustCompile(`[^a-z0-9_-]`).ReplaceAllString(keyOwnerID, "-"))
+	if len(labelVal) > 63 {
+		labelVal = labelVal[:63]
+	}
+	if labelVal == "" {
+		labelVal = "default"
+	}
+	kmsLabels := map[string]string{"owner_id": labelVal}
+	for k, v := range labels {
+		sanitizedKey := strings.ToLower(regexp.MustCompile(`[^a-z0-9_-]`).ReplaceAllString(k, "_"))
+		if len(sanitizedKey) > 63 {
+			sanitizedKey = sanitizedKey[:63]
+		}
+		if sanitizedKey == "" {
+			continue
+		}
+		sanitizedVal := strings.ToLower(regexp.MustCompile(`[^a-z0-9_-]`).ReplaceAllString(v, "_"))
+		if len(sanitizedVal) > 63 {
+			sanitizedVal = sanitizedVal[:63]
+		}
+		kmsLabels[sanitizedKey] = sanitizedVal
+	}
+
 	req := &kmspb.CreateCryptoKeyRequest{
 		Parent:      a.cfg.CustodyKeyRingID,
 		CryptoKeyId: cryptoKeyID,
 		CryptoKey: &kmspb.CryptoKey{
 			Purpose: kmspb.CryptoKey_ASYMMETRIC_SIGN,
+			Labels:  kmsLabels,
 			VersionTemplate: &kmspb.CryptoKeyVersionTemplate{
 				ProtectionLevel: kmspb.ProtectionLevel_HSM,
 			},
