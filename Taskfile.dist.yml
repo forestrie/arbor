@@ -20,6 +20,9 @@ includes:
   sealer:
     taskfile: taskfiles/service-sealer.yml
     dir: .
+  custodian:
+    taskfile: taskfiles/service-custodian.yml
+    dir: .
 tasks:
   registry-auth:
     desc: Configure Docker authentication for Artifact Registry
