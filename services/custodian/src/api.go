@@ -1,7 +1,6 @@
 package custodian
 
 import (
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -18,8 +17,8 @@ type API struct {
 func NewAPI(logger *slog.Logger, cfg Config) *API {
 	return &API{
 		Logger: logger,
-		cfg:   cfg,
-		store: NewKeyStore(),
+		cfg:    cfg,
+		store:  NewKeyStore(),
 	}
 }
 
@@ -31,14 +30,11 @@ func NewAPI(logger *slog.Logger, cfg Config) *API {
 //   - POST /api/keys/list                        (normal app token) — list keys matching labels (predicate and/or)
 //   - POST /api/keys/{keyId}/delete              (bootstrap app token) — destroy all key versions
 //   - POST /api/keys/{keyId}/versions/delete-from (bootstrap app token) — destroy versions <= N
-//   - POST /api/token                            (normal app token) — log-owner token
-//   - POST /api/token/bootstrap                  (bootstrap app token) — bootstrap token
+//   - POST /api/keys/{keyId}/sign                (APP_TOKEN; BOOTSTRAP_APP_TOKEN if keyId is :bootstrap)
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/keys/list", a.handleListKeys)
 	mux.HandleFunc("/api/keys", a.routeKeysCreate)
 	mux.HandleFunc("/api/keys/", a.routeKeys)
-	mux.HandleFunc("/api/token", a.routeToken)
-	mux.HandleFunc("/api/token/", a.routeTokenWithPath)
 }
 
 // routeKeysCreate: POST /api/keys (exact match).
@@ -50,7 +46,7 @@ func (a *API) routeKeysCreate(w http.ResponseWriter, r *http.Request) {
 	a.handleCreateKey(w, r)
 }
 
-// routeKeys: /api/keys/{keyId}/public | /api/keys/{keyId}/delete | /api/keys/{keyId}/versions/delete-from
+// routeKeys: /api/keys/{keyId}/public | .../delete | .../versions/delete-from | .../sign
 func (a *API) routeKeys(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/keys/")
 	if path == "" {
@@ -77,32 +73,10 @@ func (a *API) routeKeys(w http.ResponseWriter, r *http.Request) {
 			a.handleDeleteKeyVersionsFrom(w, r, keyID)
 			return
 		}
+		if rest == "sign" {
+			a.handleSignKey(w, r, keyID)
+			return
+		}
 	}
 	a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")
-}
-
-// routeToken: POST /api/token (body: key_owner_id for log-owner token)
-func (a *API) routeToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		a.writeProblem(w, r, http.StatusMethodNotAllowed, "about:blank", "method not allowed", "")
-		return
-	}
-	a.handleToken(w, r)
-}
-
-// routeTokenWithPath: POST /api/token/bootstrap
-func (a *API) routeTokenWithPath(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/token/")
-	if path == "bootstrap" {
-		a.handleTokenBootstrap(w, r)
-		return
-	}
-	a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")
-}
-
-// writeJSON sends a JSON response with status code.
-func (a *API) writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
 }

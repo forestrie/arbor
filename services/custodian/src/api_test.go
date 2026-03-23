@@ -2,7 +2,6 @@ package custodian
 
 import (
 	"bytes"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -23,38 +22,8 @@ func TestRegisterRoutes_PublicKeyNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", rec.Code)
 	}
-}
-
-func TestRegisterRoutes_TokenBootstrap_Unauthorized(t *testing.T) {
-	cfg := LoadConfig()
-	cfg.BootstrapAppToken = "secret"
-	logger, _ := NewLogger(0)
-	api := NewAPI(logger, cfg)
-	mux := http.NewServeMux()
-	api.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/token/bootstrap", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without token, got %d", rec.Code)
-	}
-}
-
-func TestRegisterRoutes_TokenBootstrap_WrongToken(t *testing.T) {
-	cfg := LoadConfig()
-	cfg.BootstrapAppToken = "secret"
-	logger, _ := NewLogger(0)
-	api := NewAPI(logger, cfg)
-	mux := http.NewServeMux()
-	api.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/token/bootstrap", nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 with wrong token, got %d", rec.Code)
+	if ct := rec.Header().Get("Content-Type"); ct != problemCBORType {
+		t.Errorf("expected problem+cbor, got %q", ct)
 	}
 }
 
@@ -66,13 +35,32 @@ func TestRegisterRoutes_CreateKey_Unauthorized(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := json.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
+	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", cborContentType)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without token, got %d", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_CreateKey_UnsupportedMediaType(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("expected 415, got %d", rec.Code)
 	}
 }
 
@@ -109,13 +97,57 @@ func TestRegisterRoutes_ListKeys_RequiresNormalApp(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := json.Marshal(ListKeysRequest{Labels: map[string]string{"owner_id": "foo"}, Predicate: "and"})
+	body, _ := custodianCBORem.Marshal(ListKeysRequest{Labels: map[string]string{"owner_id": "foo"}, Predicate: "and"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys/list", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", cborContentType)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without token, got %d", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_SignKey_RequiresNormalApp(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/keys/log-owner-x/sign", nil)
+	req.Header.Set("Content-Type", cborContentType)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without token, got %d", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_SignBootstrap_RequiresBootstrapApp(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.BootstrapAppToken = "boot"
+	cfg.AppToken = "normal"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/keys/"+BootstrapKeyAlias+"/sign", nil)
+	req.Header.Set("Content-Type", cborContentType)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without token, got %d", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/keys/"+BootstrapKeyAlias+"/sign", nil)
+	req2.Header.Set("Authorization", "Bearer normal")
+	req2.Header.Set("Content-Type", cborContentType)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with normal token for bootstrap sign, got %d", rec2.Code)
 	}
 }
 
@@ -127,9 +159,9 @@ func TestRegisterRoutes_DeleteKeyVersionsFrom_RequiresBootstrap(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := json.Marshal(DeleteKeyVersionsFromRequest{Version: 2})
+	body, _ := custodianCBORem.Marshal(DeleteKeyVersionsFromRequest{Version: 2})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys/log-owner-foo/versions/delete-from", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", cborContentType)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
@@ -138,8 +170,6 @@ func TestRegisterRoutes_DeleteKeyVersionsFrom_RequiresBootstrap(t *testing.T) {
 }
 
 func TestHealthz(t *testing.T) {
-	// Health is registered in main; we test via a minimal mux that has the same pattern.
-	// In practice health is on the same mux as API. Here we just ensure our API routes exist.
 	cfg := LoadConfig()
 	logger, _ := NewLogger(0)
 	api := NewAPI(logger, cfg)
@@ -148,8 +178,48 @@ func TestHealthz(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/keys/any/public", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	// We get 404 for unknown key, which is expected.
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown key, got %d", rec.Code)
+	}
+}
+
+func TestCBORCodec_RoundTripCreateKeyRequest(t *testing.T) {
+	in := CreateKeyRequest{KeyOwnerID: "o1", Alg: "ES256", Labels: map[string]string{"k": "v"}}
+	b, err := custodianCBORem.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out CreateKeyRequest
+	if err := custodianCBORdm.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.KeyOwnerID != in.KeyOwnerID || out.Alg != in.Alg || out.Labels["k"] != "v" {
+		t.Fatalf("round trip mismatch: %+v", out)
+	}
+}
+
+func TestCBORCanonical_MapKeyOrder(t *testing.T) {
+	// Two maps with same keys different construction order should encode identically.
+	m1 := map[string]int{"a": 1, "b": 2}
+	m2 := map[string]int{"b": 2, "a": 1}
+	b1, _ := custodianCBORem.Marshal(m1)
+	b2, _ := custodianCBORem.Marshal(m2)
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("canonical encoding differs:\n%x\n%x", b1, b2)
+	}
+}
+
+func TestProblemDetail_CBOR(t *testing.T) {
+	pd := ProblemDetail{Type: "about:blank", Title: "x", Status: 400, Detail: "d"}
+	b, err := custodianCBORem.Marshal(pd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ProblemDetail
+	if err := custodianCBORdm.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != 400 || got.Title != "x" {
+		t.Fatalf("%+v", got)
 	}
 }

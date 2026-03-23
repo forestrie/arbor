@@ -1,20 +1,8 @@
 package custodian
 
 import (
-	"encoding/json"
 	"net/http"
 )
-
-// DeleteKeyVersionsFromRequest is the body for POST /api/keys/{keyId}/versions/delete-from.
-type DeleteKeyVersionsFromRequest struct {
-	Version int `json:"version"` // Destroy versions with version number <= this value
-}
-
-// DeleteKeyResponse is the response for delete-key operations.
-type DeleteKeyResponse struct {
-	KeyID         string `json:"key_id"`
-	DestroyedCount int   `json:"destroyed_count"`
-}
 
 // handleDeleteKey implements POST /api/keys/{keyId}/delete — schedule destruction of all key versions.
 // Bootstrap app token required.
@@ -37,7 +25,7 @@ func (a *API) handleDeleteKey(w http.ResponseWriter, r *http.Request, keyID stri
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key destruction failed")
 		return
 	}
-	a.writeJSON(w, http.StatusOK, DeleteKeyResponse{
+	a.writeCBOR(w, http.StatusOK, DeleteKeyResponse{
 		KeyID:          keyName,
 		DestroyedCount: count,
 	})
@@ -54,8 +42,7 @@ func (a *API) handleDeleteKeyVersionsFrom(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req DeleteKeyVersionsFromRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "invalid JSON")
+	if !a.readCBORBody(w, r, &req) {
 		return
 	}
 	if req.Version < 1 {
@@ -73,7 +60,7 @@ func (a *API) handleDeleteKeyVersionsFrom(w http.ResponseWriter, r *http.Request
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "version destruction failed")
 		return
 	}
-	a.writeJSON(w, http.StatusOK, DeleteKeyResponse{
+	a.writeCBOR(w, http.StatusOK, DeleteKeyResponse{
 		KeyID:          keyName,
 		DestroyedCount: count,
 	})

@@ -17,15 +17,16 @@ type Config struct {
 	ShutdownTimeout time.Duration
 
 	// Application tokens (Bearer); log only digests.
-	AppToken        string // Normal: key creation, public key, log-owner token
-	BootstrapAppToken string // Bootstrap only: bootstrap token issuance
+	AppToken          string // Normal: key creation, list keys, public key, custody key signing
+	BootstrapAppToken string // Bootstrap: key destruction, POST .../:bootstrap/sign
 
-	// GCP: SAs to impersonate and custody key ring for key creation.
-	DelegationSignerSAEmail string // Bootstrap token target
-	CustodySignerSAEmail    string // Log-owner token target
-	CustodyKeyRingID       string // Full key ring ID (projects/.../locations/.../keyRings/...)
-	GCPProjectID           string // Project ID (for KMS API)
-	GCPLocation            string // Location (e.g. europe-west2)
+	// GCP: custody signer SA (IAM grants per key) and custody key ring for key creation.
+	CustodySignerSAEmail string
+	CustodyKeyRingID     string // Full key ring ID (projects/.../locations/.../keyRings/...)
+	// BootstrapKMSCryptoKeyID is the full KMS CryptoKey resource for alias :bootstrap (not custody ring).
+	BootstrapKMSCryptoKeyID string
+	GCPProjectID            string // Project ID (for KMS API)
+	GCPLocation             string // Location (e.g. europe-west2)
 }
 
 var levelAliases = map[string]slog.Level{
@@ -83,9 +84,9 @@ func LoadConfig() Config {
 		ShutdownTimeout:         getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
 		AppToken:                os.Getenv("APP_TOKEN"),
 		BootstrapAppToken:       os.Getenv("BOOTSTRAP_APP_TOKEN"),
-		DelegationSignerSAEmail: os.Getenv("DELEGATION_SIGNER_SA_EMAIL"),
 		CustodySignerSAEmail:    os.Getenv("CUSTODY_SIGNER_SA_EMAIL"),
 		CustodyKeyRingID:        os.Getenv("CUSTODY_KEY_RING_ID"),
+		BootstrapKMSCryptoKeyID: os.Getenv("BOOTSTRAP_KMS_CRYPTO_KEY_ID"),
 		GCPProjectID:            os.Getenv("GCP_PROJECT_ID"),
 		GCPLocation:             getEnvOrDefault("GCP_LOCATION", "europe-west2"),
 	}
@@ -98,9 +99,9 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "SHUTDOWN_TIMEOUT", "value", c.ShutdownTimeout.String())
 	logger.Warn("config value", "name", "APP_TOKEN", "value", secretDigest(c.AppToken))
 	logger.Warn("config value", "name", "BOOTSTRAP_APP_TOKEN", "value", secretDigest(c.BootstrapAppToken))
-	logger.Warn("config value", "name", "DELEGATION_SIGNER_SA_EMAIL", "value", c.DelegationSignerSAEmail)
 	logger.Warn("config value", "name", "CUSTODY_SIGNER_SA_EMAIL", "value", c.CustodySignerSAEmail)
 	logger.Warn("config value", "name", "CUSTODY_KEY_RING_ID", "value", c.CustodyKeyRingID)
+	logger.Warn("config value", "name", "BOOTSTRAP_KMS_CRYPTO_KEY_ID", "value", c.BootstrapKMSCryptoKeyID)
 	logger.Warn("config value", "name", "GCP_PROJECT_ID", "value", c.GCPProjectID)
 	logger.Warn("config value", "name", "GCP_LOCATION", "value", c.GCPLocation)
 }

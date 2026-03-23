@@ -12,9 +12,9 @@ type KeyStore struct {
 
 // KeyInfo is stored per key owner.
 type KeyInfo struct {
-	KeyID      string // GCP crypto key resource id or short id
+	KeyID        string // GCP crypto key resource id or short id
 	PublicKeyPEM string
-	Alg        string
+	Alg          string
 }
 
 func NewKeyStore() *KeyStore {

@@ -12,13 +12,6 @@ import (
 	"google.golang.org/api/option"
 )
 
-// KeyListEntry is one key in a list result.
-type KeyListEntry struct {
-	KeyID   string `json:"key_id"`
-	Version int    `json:"version"`             // primary/latest version number
-	Count   *int   `json:"count,omitempty"`    // total version count; omitted when inferable from version (e.g. count==1)
-}
-
 // buildLabelFilter returns a KMS filter expression for the given labels and predicate.
 // Predicate "and" => labels.k1=v1 AND labels.k2=v2; "or" => labels.k1=v1 OR labels.k2=v2.
 // Label keys are sanitized for the filter (GCP: lowercase, [a-z0-9_-]).

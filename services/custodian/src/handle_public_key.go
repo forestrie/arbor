@@ -12,16 +12,15 @@ func (a *API) handleGetPublicKey(w http.ResponseWriter, r *http.Request, keyID s
 	}
 	info, ok := a.store.GetByKeyID(keyID)
 	if !ok {
-		// Also try keyID as key_owner_id
 		info, ok = a.store.Get(keyID)
 	}
 	if !ok {
 		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "key not found")
 		return
 	}
-	a.writeJSON(w, http.StatusOK, map[string]string{
-		"keyId":      info.KeyID,
-		"publicKey":  info.PublicKeyPEM,
-		"alg":        info.Alg,
+	a.writeCBOR(w, http.StatusOK, PublicKeyResponse{
+		KeyID:     info.KeyID,
+		PublicKey: info.PublicKeyPEM,
+		Alg:       info.Alg,
 	})
 }

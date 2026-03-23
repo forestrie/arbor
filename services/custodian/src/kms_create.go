@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
+	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
-	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	"google.golang.org/api/option"
 )
 
