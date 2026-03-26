@@ -3,10 +3,12 @@ package custodian
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
+	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
 
@@ -24,10 +26,59 @@ func kmsResolveSigningVersion(ctx context.Context, client *kms.KeyManagementClie
 	if e != nil {
 		return "", 0, fmt.Errorf("get crypto key: %w", e)
 	}
-	if ck.Primary == nil || ck.Primary.Name == "" {
-		return "", 0, fmt.Errorf("crypto key has no primary version")
+	if ck.Primary != nil && ck.Primary.Name != "" {
+		return ck.Primary.Name, ck.Primary.Algorithm, nil
 	}
-	return ck.Primary.Name, ck.Primary.Algorithm, nil
+	// Some keys / API responses omit Primary; use highest ENABLED version instead.
+	return kmsLatestEnabledSigningVersion(ctx, client, cryptoKeyResource)
+}
+
+// kmsLatestEnabledSigningVersion picks the ENABLED CryptoKeyVersion with the
+// largest numeric suffix (…/cryptoKeyVersions/N). Requires list on the CryptoKey.
+func kmsLatestEnabledSigningVersion(ctx context.Context, client *kms.KeyManagementClient, cryptoKeyName string) (versionName string, versionAlg kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm, err error) {
+	it := client.ListCryptoKeyVersions(ctx, &kmspb.ListCryptoKeyVersionsRequest{
+		Parent: cryptoKeyName,
+	})
+	var (
+		bestName string
+		bestAlg  kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm
+		bestN    int64 = -1
+	)
+	for {
+		ver, e := it.Next()
+		if e == iterator.Done {
+			break
+		}
+		if e != nil {
+			return "", 0, fmt.Errorf("list crypto key versions: %w", e)
+		}
+		if ver.State != kmspb.CryptoKeyVersion_ENABLED {
+			continue
+		}
+		n := cryptoKeyVersionNumber(ver.Name)
+		if n > bestN {
+			bestN = n
+			bestName = ver.Name
+			bestAlg = ver.Algorithm
+		}
+	}
+	if bestN < 0 {
+		return "", 0, fmt.Errorf("crypto key has no enabled version")
+	}
+	return bestName, bestAlg, nil
+}
+
+func cryptoKeyVersionNumber(versionResourceName string) int64 {
+	const p = "/cryptoKeyVersions/"
+	i := strings.LastIndex(versionResourceName, p)
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.ParseInt(versionResourceName[i+len(p):], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // kmsPublicKeyAlgString maps KMS signing algorithm to Custodian wire alg (ES256, KS256).
