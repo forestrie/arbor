@@ -30,6 +30,18 @@ func kmsResolveSigningVersion(ctx context.Context, client *kms.KeyManagementClie
 	return ck.Primary.Name, ck.Primary.Algorithm, nil
 }
 
+// kmsPublicKeyAlgString maps KMS signing algorithm to Custodian wire alg (ES256, KS256).
+func kmsPublicKeyAlgString(a kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm) (string, error) {
+	switch a {
+	case kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256:
+		return "ES256", nil
+	case kmspb.CryptoKeyVersion_EC_SIGN_SECP256K1_SHA256:
+		return "KS256", nil
+	default:
+		return "", fmt.Errorf("unsupported KMS algorithm for public key: %v", a)
+	}
+}
+
 // kmsAsymmetricSignSHA256 calls Cloud KMS asymmetricSign with a SHA-256 digest,
 // equivalent to canopy kmsAsymmetricSignSha256 (REST body digest.sha256).
 func kmsAsymmetricSignSHA256(ctx context.Context, client *kms.KeyManagementClient, cryptoKeyVersionName string, digestSha256 []byte) ([]byte, error) {

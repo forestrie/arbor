@@ -13,7 +13,7 @@ Requests with a body must send **`Content-Type: application/cbor`**. Otherwise t
 
 ## Endpoints
 
-- `GET /api/keys/{keyId}/public` — Public key (no auth). CBOR: `keyId`, `publicKey`, `alg`.
+- `GET /api/keys/{keyId}/public` — Public key (no auth). CBOR: `keyId`, `publicKey`, `alg`. Custody keys are served from the in-memory store (same ids as create/list). **`GET .../:bootstrap/public`** is **not** in the store; it reads the PEM from **`BOOTSTRAP_KMS_CRYPTO_KEY_ID`** via Cloud KMS `GetPublicKey` (same resource as `POST .../:bootstrap/sign`). If that env is unset, the server returns **503** (same as bootstrap sign when unset). Integration against real KMS is not covered by unit tests; verify manually with curl against a deployed instance.
 - `POST /api/keys` — Create key (normal app token). CBOR body: `keyOwnerId`, optional `alg` (`ES256`|`KS256`), optional `labels`. Response: `keyId`, `publicKey`, `alg`.
 - `POST /api/keys/list` — List keys (normal app token). CBOR body: `labels`, optional `predicate` (`and`|`or`). Response: `keys` array of `{keyId, version, count?}`.
 - `POST /api/keys/{keyId}/delete` — Destroy all versions (bootstrap app token). Response: `keyId`, `destroyedCount`.

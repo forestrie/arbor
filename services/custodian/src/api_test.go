@@ -27,6 +27,29 @@ func TestRegisterRoutes_PublicKeyNotFound(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutes_BootstrapPublic_503WhenBootstrapKeyIDEmpty(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.BootstrapKMSCryptoKeyID = ""
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/"+BootstrapKeyAlias+"/public", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when BOOTSTRAP_KMS_CRYPTO_KEY_ID unset, got %d", rec.Code)
+	}
+	var pd ProblemDetail
+	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &pd); err != nil {
+		t.Fatalf("problem body: %v", err)
+	}
+	if pd.Detail != "BOOTSTRAP_KMS_CRYPTO_KEY_ID not set" {
+		t.Errorf("detail: got %q", pd.Detail)
+	}
+}
+
 func TestRegisterRoutes_CreateKey_Unauthorized(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
