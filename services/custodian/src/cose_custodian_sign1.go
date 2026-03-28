@@ -80,11 +80,17 @@ func BuildCustodianCOSESign1(
 	}
 	msg.Payload = payloadDigest
 
+	// Cloud KMS returns ECDSA signatures as ASN.1 DER; COSE / go-cose expect IEEE P1363 R‖S.
+	const coordWidth = 32
 	signer := &kmsCOSESigner{
 		alg: alg,
 		ctx: ctx,
 		sign: func(c context.Context, digest []byte) ([]byte, error) {
-			return kmsAsymmetricSignSHA256(c, client, versionName, digest)
+			der, err := kmsAsymmetricSignSHA256(c, client, versionName, digest)
+			if err != nil {
+				return nil, err
+			}
+			return ecdsaDERSignatureToIEEE1363(der, coordWidth)
 		},
 	}
 	if err := msg.Sign(rand.Reader, nil, signer); err != nil {
