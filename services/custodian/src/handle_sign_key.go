@@ -78,7 +78,7 @@ func (a *API) handleSignKey(w http.ResponseWriter, r *http.Request, keyID string
 		return
 	}
 
-	sign1, err := BuildCustodianCOSESign1(ctx, client, versionName, versionAlg, digest)
+	sign1, err := BuildCustodianCOSESign1(ctx, client, versionName, versionAlg, digest, a.Logger, keyID)
 	if err != nil {
 		a.Logger.Error("build cose sign1", "error", err)
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "signing failed", "")

@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
@@ -45,12 +46,16 @@ func parseECDSAPublicKeyFromPEM(pemStr string) (*ecdsa.PublicKey, error) {
 }
 
 // BuildCustodianCOSESign1 returns an untagged COSE_Sign1 CBOR value (four-element array).
+// If log is non-nil, Sign emits custodianSign1ToBeSignedDigest (Sig_structure SHA-256 prefix)
+// for comparison to Canopy verifyCoseSign1Failure on the same statement.
 func BuildCustodianCOSESign1(
 	ctx context.Context,
 	client *kms.KeyManagementClient,
 	versionName string,
 	versionAlg kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm,
 	payloadDigest []byte,
+	log *slog.Logger,
+	signKeyID string,
 ) ([]byte, error) {
 	if len(payloadDigest) != 32 {
 		return nil, fmt.Errorf("payload digest must be 32 bytes")
@@ -83,8 +88,10 @@ func BuildCustodianCOSESign1(
 	// Cloud KMS returns ECDSA signatures as ASN.1 DER; COSE / go-cose expect IEEE P1363 R‖S.
 	const coordWidth = 32
 	signer := &kmsCOSESigner{
-		alg: alg,
-		ctx: ctx,
+		alg:       alg,
+		ctx:       ctx,
+		log:       log,
+		signKeyID: signKeyID,
 		sign: func(c context.Context, digest []byte) ([]byte, error) {
 			der, err := kmsAsymmetricSignSHA256(c, client, versionName, digest)
 			if err != nil {
