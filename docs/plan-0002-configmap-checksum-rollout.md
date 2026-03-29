@@ -12,7 +12,7 @@ When a GitOps-managed **`service-configmap.yaml`** changes in **arbor-flux**,
 the corresponding workload **rolls out automatically** without
 `kubectl rollout restart`. Achieved by **Pod template annotations** on the
 **Deployment** whose values are **SHA-256 (hex)** of the ConfigMap file bytes,
-updated by a **script** enforced in **CI**.
+updated by a **go-task** target enforced in **CI**.
 
 ## Background (agent: do not skip)
 
