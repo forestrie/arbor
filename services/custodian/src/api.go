@@ -1,6 +1,7 @@
 package custodian
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -8,17 +9,19 @@ import (
 
 // API provides the HTTP API for custodian.
 type API struct {
-	Logger *slog.Logger
-	cfg    Config
-	store  *KeyStore
+	Logger        *slog.Logger
+	cfg           Config
+	store         *KeyStore
+	logIDKeyCache *logIDKeyLRU
 }
 
 // NewAPI builds an API with the given logger and config.
 func NewAPI(logger *slog.Logger, cfg Config) *API {
 	return &API{
-		Logger: logger,
-		cfg:    cfg,
-		store:  NewKeyStore(),
+		Logger:        logger,
+		cfg:           cfg,
+		store:         NewKeyStore(),
+		logIDKeyCache: newLogIDKeyLRU(cfg.LogIDCacheSize),
 	}
 }
 
@@ -30,9 +33,11 @@ func NewAPI(logger *slog.Logger, cfg Config) *API {
 //   - POST /api/keys/list                        (normal app token) — list keys matching labels (predicate and/or)
 //   - POST /api/keys/{keyId}/delete              (bootstrap app token) — destroy all key versions
 //   - POST /api/keys/{keyId}/versions/delete-from (bootstrap app token) — destroy versions <= N
-//   - POST /api/keys/{keyId}/sign                (APP_TOKEN; BOOTSTRAP_APP_TOKEN if keyId is :bootstrap)
+//   - POST /api/keys/{keyId}/sign                (APP_TOKEN; BOOTSTRAP_APP_TOKEN if keyId is :bootstrap);
+//     optional SignRequest.rawSignatureOnly → CBOR { signature } (r‖s), not COSE Sign1
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/keys/list", a.handleListKeys)
+	mux.HandleFunc("/api/keys/curator/log-key", a.handleCuratorLogKey)
 	mux.HandleFunc("/api/keys", a.routeKeysCreate)
 	mux.HandleFunc("/api/keys/", a.routeKeys)
 }
@@ -57,6 +62,18 @@ func (a *API) routeKeys(w http.ResponseWriter, r *http.Request) {
 	keyID := parts[0]
 	if keyID == "" {
 		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")
+		return
+	}
+	var resolveErr error
+	keyID, resolveErr = a.resolveKeyPathSegment(r, keyID)
+	if resolveErr != nil {
+		st := http.StatusBadRequest
+		title := "bad request"
+		if errors.Is(resolveErr, ErrNoCustodianKeyForLogID) {
+			st = http.StatusNotFound
+			title = "not found"
+		}
+		a.writeProblem(w, r, st, "about:blank", title, resolveErr.Error())
 		return
 	}
 	if len(parts) == 2 {

@@ -78,6 +78,24 @@ func (a *API) handleSignKey(w http.ResponseWriter, r *http.Request, keyID string
 		return
 	}
 
+	if req.RawSignatureOnly {
+		const coordWidth = 32
+		der, err := kmsAsymmetricSignSHA256(ctx, client, versionName, digest)
+		if err != nil {
+			a.Logger.Error("kms raw sign", "error", err)
+			a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "signing failed", "")
+			return
+		}
+		rawSig, err := ecdsaDERSignatureToIEEE1363(der, coordWidth)
+		if err != nil {
+			a.Logger.Error("der to ieee p1363", "error", err)
+			a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "signing failed", "")
+			return
+		}
+		a.writeCBOR(w, http.StatusOK, RawSignResponse{Signature: rawSig})
+		return
+	}
+
 	sign1, err := BuildCustodianCOSESign1(ctx, client, versionName, versionAlg, digest, a.Logger, keyID)
 	if err != nil {
 		a.Logger.Error("build cose sign1", "error", err)

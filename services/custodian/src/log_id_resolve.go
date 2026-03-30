@@ -1,0 +1,94 @@
+package custodian
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// ErrNoCustodianKeyForLogID means KMS list returned no custody key for the log label.
+var ErrNoCustodianKeyForLogID = errors.New("no key for log_id")
+
+// ErrAmbiguousCustodianLogID means more than one custody key matched the log label.
+var ErrAmbiguousCustodianLogID = errors.New("ambiguous log_id")
+
+// ForestrieLogIDLabelKey is the KMS label key used to associate a CryptoKey with a log id.
+const ForestrieLogIDLabelKey = "forestrie_log_id"
+
+// NormalizeLogIDForKMSLabel normalizes a log identifier for use as a KMS label value
+// and for comparison with ROOT_LOG_ID (lowercase hex, no 0x prefix).
+func NormalizeLogIDForKMSLabel(raw string) (string, error) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	s = strings.TrimPrefix(s, "0x")
+	if s == "" {
+		return "", fmt.Errorf("log_id required")
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", fmt.Errorf("log_id must be lowercase hex")
+		}
+	}
+	return s, nil
+}
+
+// ResolveCustodianKeyIDForLogID maps a log id to a Custodian route key id (short custody id or :bootstrap).
+func (a *API) ResolveCustodianKeyIDForLogID(ctx context.Context, rawLogID string) (string, error) {
+	norm, err := NormalizeLogIDForKMSLabel(rawLogID)
+	if err != nil {
+		return "", err
+	}
+	if a.logIDKeyCache != nil {
+		if kid, hit := a.logIDKeyCache.Get(norm); hit {
+			return kid, nil
+		}
+	}
+	labels := map[string]string{ForestrieLogIDLabelKey: norm}
+	entries, err := a.ListKeysWithLabels(ctx, labels, "and")
+	if err != nil {
+		return "", err
+	}
+	switch len(entries) {
+	case 0:
+		root := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(a.cfg.RootLogID, "0x")))
+		if root != "" && norm == root {
+			if a.logIDKeyCache != nil {
+				a.logIDKeyCache.Put(norm, BootstrapKeyAlias)
+			}
+			return BootstrapKeyAlias, nil
+		}
+		return "", fmt.Errorf("no key for log_id")
+	case 1:
+		kid := entries[0].KeyID
+		if a.logIDKeyCache != nil {
+			a.logIDKeyCache.Put(norm, kid)
+		}
+		return kid, nil
+	default:
+		return "", fmt.Errorf("%w: %d keys", ErrAmbiguousCustodianLogID, len(entries))
+	}
+}
+
+func queryLogIDTreatAsLogID(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	v := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("log-id")))
+	return v == "true" || v == "1"
+}
+
+func (a *API) resolveKeyPathSegment(r *http.Request, pathKeyID string) (string, error) {
+	if !queryLogIDTreatAsLogID(r) {
+		return pathKeyID, nil
+	}
+	pathKeyID = strings.TrimSpace(pathKeyID)
+	if pathKeyID == "" {
+		return "", fmt.Errorf("key segment required")
+	}
+	// Explicit bootstrap alias: never treat as log-id hex.
+	if pathKeyID == BootstrapKeyAlias {
+		return BootstrapKeyAlias, nil
+	}
+	return a.ResolveCustodianKeyIDForLogID(r.Context(), pathKeyID)
+}

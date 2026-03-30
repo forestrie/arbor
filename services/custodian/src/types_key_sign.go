@@ -10,6 +10,14 @@ import (
 type SignRequest struct {
 	PayloadHash []byte `cbor:"payloadHash,omitempty"`
 	Payload     []byte `cbor:"payload,omitempty"`
+	// RawSignatureOnly requests a CBOR body { signature: bstr } with IEEE P1363 r‖s
+	// (64 bytes for ES256 / ES256K) over the same digest, instead of custodian COSE_Sign1.
+	RawSignatureOnly bool `cbor:"rawSignatureOnly,omitempty"`
+}
+
+// RawSignResponse is the successful body for POST /api/keys/{keyId}/sign when RawSignatureOnly is true.
+type RawSignResponse struct {
+	Signature []byte `cbor:"signature"`
 }
 
 // DigestFromSignRequest returns the 32-byte SHA-256 digest committed in the COSE payload.

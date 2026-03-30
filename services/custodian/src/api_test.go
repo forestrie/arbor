@@ -130,6 +130,54 @@ func TestRegisterRoutes_ListKeys_RequiresNormalApp(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutes_ListKeysGet_RequiresLabelAndAuth(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/list?forestrie_log_id=a1", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without token, got %d", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/keys/list", nil)
+	req2.Header.Set("Authorization", "Bearer secret")
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 without labels, got %d", rec2.Code)
+	}
+}
+
+func TestRegisterRoutes_CuratorLogKey_RequiresAuthAndLogId(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/curator/log-key?logId=abc", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 without token, got %d", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/keys/curator/log-key", nil)
+	req2.Header.Set("Authorization", "Bearer secret")
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 without logId, got %d", rec2.Code)
+	}
+}
+
 func TestRegisterRoutes_SignKey_RequiresNormalApp(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
@@ -203,6 +251,25 @@ func TestHealthz(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for unknown key, got %d", rec.Code)
+	}
+}
+
+func TestSignRequest_RawSignatureOnly_CBORRoundTrip(t *testing.T) {
+	d := make([]byte, 32)
+	for i := range d {
+		d[i] = byte(i)
+	}
+	in := SignRequest{PayloadHash: d, RawSignatureOnly: true}
+	b, err := custodianCBORem.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out SignRequest
+	if err := custodianCBORdm.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.RawSignatureOnly || len(out.PayloadHash) != 32 {
+		t.Fatalf("round trip mismatch: raw=%v hashLen=%d", out.RawSignatureOnly, len(out.PayloadHash))
 	}
 }
 

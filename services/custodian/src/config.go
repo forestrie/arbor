@@ -27,7 +27,15 @@ type Config struct {
 	BootstrapKMSCryptoKeyID string
 	GCPProjectID            string // Project ID (for KMS API)
 	GCPLocation             string // Location (e.g. europe-west2)
+
+	// RootLogID (lowercase hex) for KMS list miss → :bootstrap when bootstrap is not in custody ring.
+	RootLogID string
+	// LogIDCacheSize caps in-memory log id → key id LRU.
+	// Default 1024 when LOG_ID_CACHE_SIZE is unset; set env to "0" to disable.
+	LogIDCacheSize int
 }
+
+const defaultLogIDCacheSize = 1024
 
 var levelAliases = map[string]slog.Level{
 	"debug":   slog.LevelDebug,
@@ -78,6 +86,13 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
+	logCache := defaultLogIDCacheSize
+	if raw := strings.TrimSpace(os.Getenv("LOG_ID_CACHE_SIZE")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			logCache = n
+		}
+	}
+
 	return Config{
 		Port:                    getEnvOrDefault("PORT", "9092"),
 		LogLevel:                getEnvOrDefault("LOG_LEVEL", "info"),
@@ -89,6 +104,8 @@ func LoadConfig() Config {
 		BootstrapKMSCryptoKeyID: os.Getenv("BOOTSTRAP_KMS_CRYPTO_KEY_ID"),
 		GCPProjectID:            os.Getenv("GCP_PROJECT_ID"),
 		GCPLocation:             getEnvOrDefault("GCP_LOCATION", "europe-west2"),
+		RootLogID:               strings.TrimSpace(os.Getenv("ROOT_LOG_ID")),
+		LogIDCacheSize:          logCache,
 	}
 }
 
@@ -104,6 +121,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "BOOTSTRAP_KMS_CRYPTO_KEY_ID", "value", c.BootstrapKMSCryptoKeyID)
 	logger.Warn("config value", "name", "GCP_PROJECT_ID", "value", c.GCPProjectID)
 	logger.Warn("config value", "name", "GCP_LOCATION", "value", c.GCPLocation)
+	logger.Warn("config value", "name", "ROOT_LOG_ID", "value", c.RootLogID)
+	logger.Warn("config value", "name", "LOG_ID_CACHE_SIZE", "value", c.LogIDCacheSize)
 }
 
 func secretDigest(value string) string {
