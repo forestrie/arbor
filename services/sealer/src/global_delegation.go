@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/veraison/go-cose"
 )
@@ -21,9 +22,9 @@ import (
 // with the delegated private key generated locally by sealer.
 type DelegationLease struct {
 	CertBytes []byte
-	Info      *DelegationCertificateInfo
+	Info      *delegationcert.CertificateInfo
 
-	Curve      DelegationCurve
+	Curve      delegationcert.Curve
 	PrivateKey *ecdsa.PrivateKey
 	PublicKey  *ecdsa.PublicKey
 
@@ -43,10 +44,10 @@ func (d *DelegationLease) COSESigner() (cose.Signer, []byte, *ecdsa.PublicKey, e
 	}
 
 	switch d.Curve {
-	case DelegationCurveSecp256r1:
+	case delegationcert.Secp256r1:
 		s, err := cose.NewSigner(cose.AlgorithmES256, d.PrivateKey)
 		return s, kid, d.PublicKey, err
-	case DelegationCurveSecp256k1:
+	case delegationcert.Secp256k1:
 		s, err := NewES256KSigner(d.PrivateKey)
 		return s, kid, d.PublicKey, err
 	default:
@@ -82,7 +83,7 @@ func RequestGlobalDelegationLease(
 		return nil, fmt.Errorf("ttl must be > 0")
 	}
 
-	curve, err := ParseDelegationCurve(curveRaw)
+	curve, err := delegationcert.ParseCurve(curveRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -93,13 +94,13 @@ func RequestGlobalDelegationLease(
 
 	var priv *ecdsa.PrivateKey
 	switch curve {
-	case DelegationCurveSecp256r1:
+	case delegationcert.Secp256r1:
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return nil, fmt.Errorf("generate P-256 key: %w", err)
 		}
 		priv = k
-	case DelegationCurveSecp256k1:
+	case delegationcert.Secp256k1:
 		k, err := secp256k1.GeneratePrivateKey()
 		if err != nil {
 			return nil, fmt.Errorf("generate secp256k1 key: %w", err)
@@ -113,7 +114,7 @@ func RequestGlobalDelegationLease(
 
 	// delegated_pubkey is a COSE_Key EC2 map with integer labels.
 	crv := int64(8) // secp256k1
-	if curve == DelegationCurveSecp256r1 {
+	if curve == delegationcert.Secp256r1 {
 		crv = 1
 	}
 
@@ -164,7 +165,7 @@ func RequestGlobalDelegationLease(
 		return nil, fmt.Errorf("delegation signer returned status=%d", resp.StatusCode)
 	}
 
-	info, err := ParseDelegationCertificate(respBytes)
+	info, err := delegationcert.ParseCertificate(respBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -190,5 +191,3 @@ func RequestGlobalDelegationLease(
 		ExpiresAt:  expiresAt,
 	}, nil
 }
-
-

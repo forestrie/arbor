@@ -8,5 +8,3 @@ var (
 	// caller should retry after obtaining a fresh delegation.
 	ErrDelegationExpired = errors.New("delegation expired or expiring")
 )
-
-

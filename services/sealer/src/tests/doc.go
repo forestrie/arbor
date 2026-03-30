@@ -4,5 +4,3 @@
 // that unit test runs (`go test ./...`) do not require external dependencies
 // like MinIO.
 package tests
-
-

@@ -84,5 +84,3 @@ func encodeECDSASignature(curve elliptic.Curve, r, s *big.Int) ([]byte, error) {
 	}
 	return sig, nil
 }
-
-

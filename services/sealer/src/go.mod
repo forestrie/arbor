@@ -6,10 +6,14 @@ toolchain go1.24.4
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
+	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/google/uuid v1.6.0
+	github.com/veraison/go-cose v1.3.0
 	google.golang.org/api v0.257.0
 )
+
+replace github.com/forestrie/arbor/services/pkgs/delegationcert => ../../pkgs/delegationcert
 
 require (
 	cloud.google.com/go/auth v0.17.0 // indirect

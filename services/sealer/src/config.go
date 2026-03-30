@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 )
 
 // Config holds all 12-factor environment configuration.
@@ -190,7 +192,7 @@ func (c Config) Validate() error {
 	if err := validateHTTPSURL(c.DelegationSignerURL); err != nil {
 		return fmt.Errorf("DELEGATION_SIGNER_URL is invalid: %w", err)
 	}
-	if _, err := ParseDelegationCurve(c.DelegationKeyCurve); err != nil {
+	if _, err := delegationcert.ParseCurve(c.DelegationKeyCurve); err != nil {
 		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)
 	}
 

@@ -1,53 +1,15 @@
-package sealer
+package delegationcert
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
-type DelegationCurve string
-
-const (
-	DelegationCurveSecp256k1 DelegationCurve = "secp256k1"
-	DelegationCurveSecp256r1 DelegationCurve = "secp256r1"
-)
-
-func ParseDelegationCurve(raw string) (DelegationCurve, error) {
-	trimmed := strings.ToLower(strings.TrimSpace(raw))
-	switch trimmed {
-	case "", "secp256k1", "k1", "es256k":
-		return DelegationCurveSecp256k1, nil
-	case "secp256r1", "p-256", "p256", "r1", "es256":
-		return DelegationCurveSecp256r1, nil
-	default:
-		return "", fmt.Errorf("expected secp256k1 or secp256r1, got %q", raw)
-	}
-}
-
-type DelegationCertificateInfo struct {
-	CertSHA256             string
-	CertSize               int
-	ProtectedAlg           int64
-	ProtectedCty           string
-	ProtectedKidHex        string
-	PayloadDelegationIDHex string
-	PayloadLogID           string
-	PayloadLogIDPrefix     string
-	PayloadMmrStart        string
-	PayloadMmrEnd          string
-	PayloadIssuedAt        string
-	PayloadExpiresAt       string
-	PayloadIssuedAtUnix    uint64
-	PayloadExpiresAtUnix   uint64
-	PayloadDelegatedCurve  string
-	SignatureSize          int
-}
-
-func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, error) {
+// ParseCertificate decodes an untagged COSE_Sign1 delegation certificate.
+func ParseCertificate(certBytes []byte) (*CertificateInfo, error) {
 	if len(certBytes) == 0 {
 		return nil, fmt.Errorf("empty certificate bytes")
 	}
@@ -106,16 +68,15 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 		delegationIDHex = hex.EncodeToString(did)
 	}
 
-	// Extract delegated key curve from payload[5].
 	delegatedCurve := ""
 	if rawKey, ok := payloadMap[5]; ok {
 		if m, ok := normalizeAnyIntKeyedMap(rawKey); ok {
 			if crv, ok := asInt64(m[-1]); ok {
 				switch crv {
 				case 8:
-					delegatedCurve = string(DelegationCurveSecp256k1)
+					delegatedCurve = string(Secp256k1)
 				case 1:
-					delegatedCurve = string(DelegationCurveSecp256r1)
+					delegatedCurve = string(Secp256r1)
 				default:
 					delegatedCurve = fmt.Sprintf("unknown(%d)", crv)
 				}
@@ -123,7 +84,6 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 		}
 	}
 
-	// Extract optional constraints.log_id_prefix from payload[6].
 	logIDPrefix := ""
 	if cRaw, ok := payloadMap[6]; ok {
 		switch c := cRaw.(type) {
@@ -142,7 +102,7 @@ func ParseDelegationCertificate(certBytes []byte) (*DelegationCertificateInfo, e
 		}
 	}
 
-	return &DelegationCertificateInfo{
+	return &CertificateInfo{
 		CertSHA256:             certSHA,
 		CertSize:               len(certBytes),
 		ProtectedAlg:           alg,
@@ -179,7 +139,6 @@ func asBstr(v any) ([]byte, bool) {
 		}
 		return asBstr(inner)
 	case []any:
-		// Some encoders may represent binary data as an array of small integers.
 		out := make([]byte, len(t))
 		for i, el := range t {
 			n, ok := asInt64(el)

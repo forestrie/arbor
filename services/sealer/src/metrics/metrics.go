@@ -8,9 +8,9 @@ import (
 // Metrics holds all Prometheus metric handles for the sealer service.
 type Metrics struct {
 	// Counters
-	PollsTotal               *prometheus.CounterVec
-	LogsCheckpointedTotal    prometheus.Counter
-	MessagesProcessedTotal   prometheus.Counter
+	PollsTotal                *prometheus.CounterVec
+	LogsCheckpointedTotal     prometheus.Counter
+	MessagesProcessedTotal    prometheus.Counter
 	MessagesAcknowledgedTotal *prometheus.CounterVec
 
 	// Histograms
@@ -25,14 +25,14 @@ type Metrics struct {
 // NewMetrics creates and registers all metrics with the provided registry.
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
-		PollsTotal:               newPollsTotal(),
-		LogsCheckpointedTotal:    newLogsCheckpointedTotal(),
-		MessagesProcessedTotal:   newMessagesProcessedTotal(),
+		PollsTotal:                newPollsTotal(),
+		LogsCheckpointedTotal:     newLogsCheckpointedTotal(),
+		MessagesProcessedTotal:    newMessagesProcessedTotal(),
 		MessagesAcknowledgedTotal: newMessagesAcknowledgedTotal(),
-		MessagesPerPoll:          newMessagesPerPoll(),
-		PollDuration:             newPollDuration(),
-		CheckpointDuration:       newCheckpointDuration(),
-		DelegationLeaseExpiry:    newDelegationLeaseExpiry(),
+		MessagesPerPoll:           newMessagesPerPoll(),
+		PollDuration:              newPollDuration(),
+		CheckpointDuration:        newCheckpointDuration(),
+		DelegationLeaseExpiry:     newDelegationLeaseExpiry(),
 	}
 
 	reg.MustRegister(

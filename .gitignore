@@ -11,6 +11,7 @@ vendor/
 /services/_deps/
 
 # IDE
+.cursor/
 .vscode/
 .idea/
 *.swp

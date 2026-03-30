@@ -14,5 +14,3 @@ type SealerService struct {
 type SealerBatch struct {
 	DelegationAccessToken string
 }
-
-
