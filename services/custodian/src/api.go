@@ -28,13 +28,14 @@ func NewAPI(logger *slog.Logger, cfg Config) *API {
 // RegisterRoutes wires the custodian API onto the provided mux.
 //
 // Endpoints:
-//   - GET  /api/keys/{keyId}/public              (no auth)
+//   - GET  /api/keys/{keyId}/public              (no auth); optional ?log-id=true
 //   - POST /api/keys                             (normal app token) — create key
-//   - POST /api/keys/list                        (normal app token) — list keys matching labels (predicate and/or)
+//   - GET  /api/keys/list / POST …/list          (normal app token) — list keys (labels)
+//   - GET  /api/keys/curator/log-key              (normal app token) — ?logId=… → { keyId }
 //   - POST /api/keys/{keyId}/delete              (bootstrap app token) — destroy all key versions
 //   - POST /api/keys/{keyId}/versions/delete-from (bootstrap app token) — destroy versions <= N
 //   - POST /api/keys/{keyId}/sign                (APP_TOKEN; BOOTSTRAP_APP_TOKEN if keyId is :bootstrap);
-//     optional SignRequest.rawSignatureOnly → CBOR { signature } (r‖s), not COSE Sign1
+//     optional SignRequest.rawSignatureOnly → CBOR { signature } (r‖s), not COSE Sign1; optional ?log-id=true
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/keys/list", a.handleListKeys)
 	mux.HandleFunc("/api/keys/curator/log-key", a.handleCuratorLogKey)
