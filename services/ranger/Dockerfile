@@ -19,6 +19,7 @@ COPY ranger/src/go.mod ranger/src/go.sum* ./ranger/src/
 
 # Copy shared packages used via go.work
 COPY pkgs/s3storage ./pkgs/s3storage
+COPY pkgs/logredact ./pkgs/logredact
 
 # Copy local module clones explicitly so they are available to go.work and replaces
 COPY _deps/go-sigv4 ./_deps/go-sigv4

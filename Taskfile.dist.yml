@@ -61,6 +61,7 @@ tasks:
         use (
           ./src
           ../pkgs/s3storage
+          ../pkgs/logredact
           ../_deps/go-datatrails-common
           ../_deps/go-datatrails-serialization/eventsv1
           ../_deps/go-datatrails-simplehash
@@ -88,6 +89,7 @@ tasks:
         use (
           ./src
           ../pkgs/s3storage
+          ../pkgs/logredact
           ../_deps/go-datatrails-common
           ../_deps/go-datatrails-serialization/eventsv1
           ../_deps/go-datatrails-simplehash
