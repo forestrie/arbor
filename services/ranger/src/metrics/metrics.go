@@ -13,9 +13,9 @@ type Metrics struct {
 	AcksTotal             *prometheus.CounterVec
 
 	// Histograms
-	EntriesPerPoll   prometheus.Histogram
-	PollDuration     prometheus.Histogram
-	CommitDuration   prometheus.Histogram
+	EntriesPerPoll prometheus.Histogram
+	PollDuration   prometheus.Histogram
+	CommitDuration prometheus.Histogram
 
 	// Gauges
 	BatchFullnessRatio prometheus.Gauge

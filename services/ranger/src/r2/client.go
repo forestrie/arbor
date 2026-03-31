@@ -191,11 +191,11 @@ func (c *Client) ListObjects(
 		return ListResult{}, fmt.Errorf("failed to build list request: %w", err)
 	}
 	req = req.WithContext(ctx)
-	
+
 	// Set headers for R2 native API
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
-	
+
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}

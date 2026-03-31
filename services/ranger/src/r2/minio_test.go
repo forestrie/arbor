@@ -64,4 +64,3 @@ func TestMinIOListObjectsWithArbitraryToken(t *testing.T) {
 	t.Logf("✅ ListObjects succeeded with arbitrary token! Result: %d objects, truncated: %v",
 		len(result.Objects), result.IsTruncated)
 }
-

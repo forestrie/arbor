@@ -163,14 +163,14 @@ func LoadConfig() Config {
 		VisibilityTimeout:      getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		ShardDiscoveryInterval: getDuration("SHARD_DISCOVERY_INTERVAL", 5*time.Minute),
 		R2URL:                  os.Getenv("R2_URL"),
-		R2Token:            r2Token,
-		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey: awsSecretAccessKey,
-		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
-		MassifHeight:       getUint8("MASSIF_HEIGHT", 14),
-		CommitmentEpoch:    getUint32("COMMITMENT_EPOCH", 1),
-		WorkerCIDR:         os.Getenv("WORKER_CIDR"),
-		PodIP:              os.Getenv("POD_IP"),
+		R2Token:                r2Token,
+		AWSAccessKeyID:         os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:     awsSecretAccessKey,
+		AWSRegion:              getEnvOrDefault("AWS_REGION", "auto"),
+		MassifHeight:           getUint8("MASSIF_HEIGHT", 14),
+		CommitmentEpoch:        getUint32("COMMITMENT_EPOCH", 1),
+		WorkerCIDR:             os.Getenv("WORKER_CIDR"),
+		PodIP:                  os.Getenv("POD_IP"),
 	}
 
 	return cfg

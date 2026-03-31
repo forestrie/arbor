@@ -120,8 +120,9 @@ func (c *Committer) CommitLogGroup(
 	}
 
 	var (
-		mmrIndex       uint64
+		mmrSize        uint64
 		lastCommit     int
+		committedCount int
 		firstLeafIndex uint64 = ^uint64(0) // sentinel: max uint64
 	)
 
@@ -162,31 +163,34 @@ func (c *Committer) CommitLogGroup(
 			continue
 		}
 
-		mmrIndex, err = mc.AddIndexedEntry(leafHash)
+		mmrSize, err = mc.AddIndexedEntry(leafHash)
 		if errors.Is(err, massifs.ErrMassifFull) {
 			if err = massifs.CommitContext(ctx, store, &mc); err != nil {
 				return &ingress.CommitResult{
-					Committed:      lastCommit,
+					Committed:      committedCount,
 					FirstLeafIndex: firstLeafIndex,
 				}, fmt.Errorf("commit on massif full: %w", err)
 			}
-			c.logNotice(ctx,
-				"committed (massif full)",
-				"logId", logIDHex,
-				"index", mmrIndex,
-				"count", i-lastCommit,
-			)
 
+			entriesSinceRollover := i - lastCommit
 			lastCommit = i
 			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 			if err != nil {
 				return &ingress.CommitResult{
-					Committed:      lastCommit,
+					Committed:      committedCount,
 					FirstLeafIndex: firstLeafIndex,
 				}, fmt.Errorf("get append context after rollover: %w", err)
 			}
 
-			mmrIndex, err = mc.AddIndexedEntry(leafHash)
+			mmrSize, err = mc.AddIndexedEntry(leafHash)
+			if err == nil {
+				c.logNotice(ctx,
+					"committed (massif full)",
+					"logId", logIDHex,
+					"mmrSize", mmrSize,
+					"count", entriesSinceRollover,
+				)
+			}
 		}
 		if err != nil {
 			c.logger.Warn("failed to add leaf",
@@ -197,38 +201,41 @@ func (c *Committer) CommitLogGroup(
 			continue
 		}
 
-		// Track first leaf index for the batch
-		leafIndex := mmr.LeafIndex(mmrIndex)
+		// AddIndexedEntry returns MMR size (node count) after the append. Derive the
+		// zero-based leaf index e for ingress ack / resolveContent (cheatsheet e),
+		// not mmr.LeafIndex(mmrNodeIndex).
+		leafIndex := mmr.LeafCount(mmrSize) - 1
 		if firstLeafIndex == ^uint64(0) {
 			firstLeafIndex = leafIndex
 		}
 
 		if err := mc.IndexLeaf(idTimestamp, entry.ContentHash); err != nil {
 			return &ingress.CommitResult{
-				Committed:      lastCommit,
+				Committed:      committedCount,
 				FirstLeafIndex: firstLeafIndex,
 			}, fmt.Errorf("update v2 index: %w", err)
 		}
 
 		mc.SetLastIDTimestamp(idTimestamp)
+		committedCount++
 	}
 
 	if err := massifs.CommitContext(ctx, store, &mc); err != nil {
 		return &ingress.CommitResult{
-			Committed:      lastCommit,
+			Committed:      committedCount,
 			FirstLeafIndex: firstLeafIndex,
 		}, fmt.Errorf("final commit: %w", err)
 	}
 	c.logNotice(ctx,
 		"committed",
 		"logId", logIDHex,
-		"index", mmrIndex,
-		"count", len(entries)-lastCommit,
+		"mmrSize", mmrSize,
+		"count", committedCount,
 		"firstLeafIndex", firstLeafIndex,
 	)
 
 	return &ingress.CommitResult{
-		Committed:      len(entries),
+		Committed:      committedCount,
 		FirstLeafIndex: firstLeafIndex,
 	}, nil
 }
