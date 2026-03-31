@@ -5,32 +5,33 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // CreateKeyForOwner creates a new asymmetric sign key in the custody key ring
 // and grants the custody_signer SA signerVerifier and publicKeyViewer on it.
-// keyOwnerID is used to derive a key name; alg is "ES256" or "KS256".
-// labels are optional KMS labels (merged with owner_id); keys/values must be lowercase, [a-z0-9_-], max 63 chars.
-func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
+// Optionally grants publicKeyViewer to CustodianRuntimeSAEmail (ADC identity)
+// so GetPublicKey succeeds for the creating process.
+// selfLogID must be a valid RFC-4122 UUID string; the CryptoKey id is that UUID
+// without hyphens (32 lowercase hex digits).
+func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
 	if a.cfg.CustodyKeyRingID == "" {
 		return "", "", fmt.Errorf("CUSTODY_KEY_RING_ID not set")
 	}
 	if a.cfg.CustodySignerSAEmail == "" {
 		return "", "", fmt.Errorf("CUSTODY_SIGNER_SA_EMAIL not set")
 	}
-	safe := regexp.MustCompile(`[^a-zA-Z0-9-]`).ReplaceAllString(keyOwnerID, "-")
-	if len(safe) > 30 {
-		safe = safe[:30]
+	cryptoKeyID, uuidOK := cryptoKeyShortIDFromLogUUID(selfLogID)
+	if !uuidOK {
+		return "", "", fmt.Errorf("selfLogId must be a valid UUID")
 	}
-	if safe == "" {
-		safe = "key"
-	}
-	cryptoKeyID := "log-owner-" + safe
 
 	client, err := kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
 	if err != nil {
@@ -88,7 +89,7 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string, lab
 	}
 	keyName = key.Name
 
-	member := "serviceAccount:" + a.cfg.CustodySignerSAEmail
+	custodyMember := "serviceAccount:" + a.cfg.CustodySignerSAEmail
 	policy, err := client.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: keyName})
 	if err != nil {
 		return keyName, "", fmt.Errorf("get key iam policy: %w", err)
@@ -96,6 +97,27 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string, lab
 	if policy.Bindings == nil {
 		policy.Bindings = []*iampb.Binding{}
 	}
+
+	ensureMemberInRole(policy, "roles/cloudkms.signerVerifier", custodyMember)
+	ensureMemberInRole(policy, "roles/cloudkms.publicKeyViewer", custodyMember)
+	if rt := strings.TrimSpace(a.cfg.CustodianRuntimeSAEmail); rt != "" {
+		ensureMemberInRole(policy, "roles/cloudkms.publicKeyViewer", "serviceAccount:"+rt)
+	}
+
+	_, err = client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{Resource: keyName, Policy: policy})
+	if err != nil {
+		return keyName, "", fmt.Errorf("set key iam policy: %w", err)
+	}
+
+	versionName := keyName + "/cryptoKeyVersions/1"
+	publicKeyPEM, err = getPublicKeyPEMWithRetry(ctx, client, versionName)
+	if err != nil {
+		return keyName, "", fmt.Errorf("get public key: %w", err)
+	}
+	return keyName, publicKeyPEM, nil
+}
+
+func ensureMemberInRole(policy *iampb.Policy, role, member string) {
 	contains := func(members []string, m string) bool {
 		for _, x := range members {
 			if x == m {
@@ -104,44 +126,34 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, alg string, lab
 		}
 		return false
 	}
-	var hasSigner, hasViewer bool
 	for _, b := range policy.Bindings {
-		if b.Role == "roles/cloudkms.signerVerifier" {
-			hasSigner = true
+		if b.Role == role {
 			if !contains(b.Members, member) {
 				b.Members = append(b.Members, member)
 			}
-		}
-		if b.Role == "roles/cloudkms.publicKeyViewer" {
-			hasViewer = true
-			if !contains(b.Members, member) {
-				b.Members = append(b.Members, member)
-			}
+			return
 		}
 	}
-	if !hasSigner {
-		policy.Bindings = append(policy.Bindings, &iampb.Binding{
-			Role:    "roles/cloudkms.signerVerifier",
-			Members: []string{member},
-		})
-	}
-	if !hasViewer {
-		policy.Bindings = append(policy.Bindings, &iampb.Binding{
-			Role:    "roles/cloudkms.publicKeyViewer",
-			Members: []string{member},
-		})
-	}
-	_, err = client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{Resource: keyName, Policy: policy})
-	if err != nil {
-		return keyName, "", fmt.Errorf("set key iam policy: %w", err)
-	}
-
-	pubResp, err := client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{
-		Name: keyName + "/cryptoKeyVersions/1",
+	policy.Bindings = append(policy.Bindings, &iampb.Binding{
+		Role:    role,
+		Members: []string{member},
 	})
-	if err != nil {
-		return keyName, "", fmt.Errorf("get public key: %w", err)
+}
+
+func getPublicKeyPEMWithRetry(ctx context.Context, client *kms.KeyManagementClient, versionName string) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		pubResp, err := client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: versionName})
+		if err == nil {
+			return pubResp.GetPem(), nil
+		}
+		lastErr = err
+		st, ok := status.FromError(err)
+		if !ok || st.Code() != codes.PermissionDenied {
+			return "", err
+		}
+		// IAM on new keys can lag slightly after SetIamPolicy.
+		time.Sleep(time.Duration(50*(1<<attempt)) * time.Millisecond)
 	}
-	publicKeyPEM = pubResp.GetPem()
-	return keyName, publicKeyPEM, nil
+	return "", lastErr
 }

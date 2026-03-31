@@ -21,7 +21,16 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "keyOwnerId required")
 		return
 	}
+	cryptoKeyShort, uuidOK := cryptoKeyShortIDFromLogUUID(req.SelfLogID)
+	if !uuidOK {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "selfLogId must be a valid UUID")
+		return
+	}
 	if info, ok := a.store.Get(req.KeyOwnerID); ok {
+		if keyIDFromName(info.KeyID) != cryptoKeyShort {
+			a.writeProblem(w, r, http.StatusConflict, "about:blank", "conflict", "keyOwnerId already has a key for a different selfLogId")
+			return
+		}
 		a.writeCBOR(w, http.StatusOK, CreateKeyResponse{
 			KeyID:     info.KeyID,
 			PublicKey: info.PublicKeyPEM,
@@ -29,7 +38,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), req.KeyOwnerID, req.Alg, req.Labels)
+	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), req.KeyOwnerID, req.SelfLogID, req.Alg, req.Labels)
 	if err != nil {
 		a.Logger.Error("failed to create key", "key_owner_id", req.KeyOwnerID, "error", err)
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key creation failed")

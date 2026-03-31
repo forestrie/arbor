@@ -22,7 +22,11 @@ type Config struct {
 
 	// GCP: custody signer SA (IAM grants per key) and custody key ring for key creation.
 	CustodySignerSAEmail string
-	CustodyKeyRingID     string // Full key ring ID (projects/.../locations/.../keyRings/...)
+	// CustodianRuntimeSAEmail is the GCP SA used by this process (ADC). When set,
+	// CreateKeyForOwner grants it publicKeyViewer on each new custody key so
+	// GetPublicKey succeeds immediately after SetIamPolicy.
+	CustodianRuntimeSAEmail string
+	CustodyKeyRingID        string // Full key ring ID (projects/.../locations/.../keyRings/...)
 	// BootstrapKMSCryptoKeyID is the full KMS CryptoKey resource for alias :bootstrap (not custody ring).
 	BootstrapKMSCryptoKeyID string
 	GCPProjectID            string // Project ID (for KMS API)
@@ -100,6 +104,7 @@ func LoadConfig() Config {
 		AppToken:                os.Getenv("APP_TOKEN"),
 		BootstrapAppToken:       os.Getenv("BOOTSTRAP_APP_TOKEN"),
 		CustodySignerSAEmail:    os.Getenv("CUSTODY_SIGNER_SA_EMAIL"),
+		CustodianRuntimeSAEmail: strings.TrimSpace(os.Getenv("CUSTODIAN_RUNTIME_SA_EMAIL")),
 		CustodyKeyRingID:        os.Getenv("CUSTODY_KEY_RING_ID"),
 		BootstrapKMSCryptoKeyID: os.Getenv("BOOTSTRAP_KMS_CRYPTO_KEY_ID"),
 		GCPProjectID:            os.Getenv("GCP_PROJECT_ID"),
@@ -117,6 +122,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "APP_TOKEN", "value", secretDigest(c.AppToken))
 	logger.Warn("config value", "name", "BOOTSTRAP_APP_TOKEN", "value", secretDigest(c.BootstrapAppToken))
 	logger.Warn("config value", "name", "CUSTODY_SIGNER_SA_EMAIL", "value", c.CustodySignerSAEmail)
+	logger.Warn("config value", "name", "CUSTODIAN_RUNTIME_SA_EMAIL", "value", c.CustodianRuntimeSAEmail)
 	logger.Warn("config value", "name", "CUSTODY_KEY_RING_ID", "value", c.CustodyKeyRingID)
 	logger.Warn("config value", "name", "BOOTSTRAP_KMS_CRYPTO_KEY_ID", "value", c.BootstrapKMSCryptoKeyID)
 	logger.Warn("config value", "name", "GCP_PROJECT_ID", "value", c.GCPProjectID)

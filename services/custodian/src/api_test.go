@@ -87,6 +87,44 @@ func TestRegisterRoutes_CreateKey_UnsupportedMediaType(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutes_CreateKey_BadRequestInvalidSelfLogId(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1", SelfLogID: "not-a-uuid"})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", cborContentType)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestRegisterRoutes_CreateKey_BadRequestMissingSelfLogId(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", cborContentType)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
 func TestRegisterRoutes_DeleteKey_RequiresBootstrap(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "normal"
@@ -274,7 +312,12 @@ func TestSignRequest_RawSignatureOnly_CBORRoundTrip(t *testing.T) {
 }
 
 func TestCBORCodec_RoundTripCreateKeyRequest(t *testing.T) {
-	in := CreateKeyRequest{KeyOwnerID: "o1", Alg: "ES256", Labels: map[string]string{"k": "v"}}
+	in := CreateKeyRequest{
+		KeyOwnerID: "o1",
+		SelfLogID:  "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		Alg:        "ES256",
+		Labels:     map[string]string{"k": "v"},
+	}
 	b, err := custodianCBORem.Marshal(in)
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +326,8 @@ func TestCBORCodec_RoundTripCreateKeyRequest(t *testing.T) {
 	if err := custodianCBORdm.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.KeyOwnerID != in.KeyOwnerID || out.Alg != in.Alg || out.Labels["k"] != "v" {
+	if out.KeyOwnerID != in.KeyOwnerID || out.SelfLogID != in.SelfLogID ||
+		out.Alg != in.Alg || out.Labels["k"] != "v" {
 		t.Fatalf("round trip mismatch: %+v", out)
 	}
 }
