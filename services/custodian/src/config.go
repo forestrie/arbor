@@ -23,8 +23,8 @@ type Config struct {
 	// GCP: custody signer SA (IAM grants per key) and custody key ring for key creation.
 	CustodySignerSAEmail string
 	// CustodianRuntimeSAEmail is the GCP SA used by this process (ADC). When set,
-	// CreateKeyForOwner grants it publicKeyViewer on each new custody key so
-	// GetPublicKey succeeds immediately after SetIamPolicy.
+	// CreateKeyForOwner grants it signerVerifier and publicKeyViewer on each new
+	// custody key so SignAsymmetric and GetPublicKey succeed for that identity.
 	CustodianRuntimeSAEmail string
 	CustodyKeyRingID        string // Full key ring ID (projects/.../locations/.../keyRings/...)
 	// BootstrapKMSCryptoKeyID is the full KMS CryptoKey resource for alias :bootstrap (not custody ring).

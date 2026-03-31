@@ -17,8 +17,8 @@ import (
 
 // CreateKeyForOwner creates a new asymmetric sign key in the custody key ring
 // and grants the custody_signer SA signerVerifier and publicKeyViewer on it.
-// Optionally grants publicKeyViewer to CustodianRuntimeSAEmail (ADC identity)
-// so GetPublicKey succeeds for the creating process.
+// Optionally grants publicKeyViewer and signerVerifier to CustodianRuntimeSAEmail
+// (ADC identity) so GetPublicKey and SignAsymmetric succeed for this process.
 // selfLogID must be a valid RFC-4122 UUID string; the CryptoKey id is that UUID
 // without hyphens (32 lowercase hex digits).
 func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
@@ -101,7 +101,9 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg 
 	ensureMemberInRole(policy, "roles/cloudkms.signerVerifier", custodyMember)
 	ensureMemberInRole(policy, "roles/cloudkms.publicKeyViewer", custodyMember)
 	if rt := strings.TrimSpace(a.cfg.CustodianRuntimeSAEmail); rt != "" {
-		ensureMemberInRole(policy, "roles/cloudkms.publicKeyViewer", "serviceAccount:"+rt)
+		rtMember := "serviceAccount:" + rt
+		ensureMemberInRole(policy, "roles/cloudkms.signerVerifier", rtMember)
+		ensureMemberInRole(policy, "roles/cloudkms.publicKeyViewer", rtMember)
 	}
 
 	_, err = client.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{Resource: keyName, Policy: policy})
