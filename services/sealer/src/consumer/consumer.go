@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 	"github.com/forestrie/arbor/services/sealer"
 	"github.com/forestrie/arbor/services/sealer/metrics"
 	"github.com/google/uuid"
@@ -68,7 +69,7 @@ func (q *QueueConsumer) ConsumeQueue(ctx context.Context) {
 	}
 
 	q.logger.Info("starting queue consumer",
-		"queueURL", q.cfg.QueueURL,
+		"queueURL_sha256", logredact.StringSHA256Hex(q.cfg.QueueURL),
 		"pollIntervalMin", q.cfg.PollIntervalMin,
 		"pollIntervalMax", q.cfg.PollIntervalMax,
 		"backoffBase", backoffBase,
@@ -186,7 +187,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		q.logger.Warn("queue pull failed", "status", resp.StatusCode, "body", string(b))
+		q.logger.Warn("queue pull failed", "status", resp.StatusCode, "body_sha256", logredact.SHA256Hex(b))
 		return 0, fmt.Errorf("pull request failed: status=%d", resp.StatusCode)
 	}
 
@@ -207,7 +208,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 	q.logger.Info("pulled messages",
 		"count", msgCount,
 		"backlog", queueResp.Result.MessageBacklogCount,
-		"pullURL", pullURL,
+		"pullURL_sha256", logredact.StringSHA256Hex(pullURL),
 		"batchSz", q.cfg.QueueBatchSize,
 		"visto", q.cfg.VisibilityTimeout.Microseconds(),
 	)
@@ -414,7 +415,7 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("ack request failed: status=%d, body=%s", resp.StatusCode, string(b))
+		return fmt.Errorf("ack request failed: status=%d, body_sha256=%s", resp.StatusCode, logredact.SHA256Hex(b))
 	}
 
 	// Read the response body first, then decode it
@@ -429,7 +430,7 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 	var ackResp QueueAckResponse
 	if err := json.Unmarshal(bodyBytes, &ackResp); err != nil {
 		// If we can't parse the response, log it with the raw body
-		q.logger.Warn("failed to parse ack response", "messageID", message.ID, "error", err, "body", string(bodyBytes))
+		q.logger.Warn("failed to parse ack response", "messageID", message.ID, "error", err, "body_sha256", logredact.SHA256Hex(bodyBytes))
 		return fmt.Errorf("failed to parse ack response: %w", err)
 	}
 

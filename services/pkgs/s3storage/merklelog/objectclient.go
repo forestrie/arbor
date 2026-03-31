@@ -28,5 +28,3 @@ type ObjectClient interface {
 	PutObject(ctx context.Context, key string, data []byte, opts PutOptions) (PutResult, error)
 	DeleteObject(ctx context.Context, key string) error
 }
-
-

@@ -137,4 +137,3 @@ func TestMapError_IncludesHTTPStatusCode(t *testing.T) {
 		})
 	}
 }
-

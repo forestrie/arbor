@@ -89,12 +89,12 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 	return Config{
-		Port:             getEnv("PORT", "9092"),
-		LogLevel:         getEnv("LOG_LEVEL", "info"),
-		ShutdownTimeout:  getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		BootstrapKeyID:   strings.TrimSpace(os.Getenv("SIGNER_BOOTSTRAP_KEY_ID")),
-		UnivocityURL:     strings.TrimSpace(os.Getenv("SIGNER_UNIVOCITY_URL")),
-		ParentKeysJSON:   os.Getenv("SIGNER_PARENT_KEYS"),
+		Port:            getEnv("PORT", "9092"),
+		LogLevel:        getEnv("LOG_LEVEL", "info"),
+		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		BootstrapKeyID:  strings.TrimSpace(os.Getenv("SIGNER_BOOTSTRAP_KEY_ID")),
+		UnivocityURL:    strings.TrimSpace(os.Getenv("SIGNER_UNIVOCITY_URL")),
+		ParentKeysJSON:  os.Getenv("SIGNER_PARENT_KEYS"),
 	}
 }
 

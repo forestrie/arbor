@@ -11,9 +11,9 @@ import (
 
 // mockChain implements ChainReader for tests (plan §8.2, §8.7 verification).
 type mockChain struct {
-	rootLogId        [32]byte
-	logInitialized   bool
-	logConfig        LogConfig
+	rootLogId                [32]byte
+	logInitialized           bool
+	logConfig                LogConfig
 	logRootKeyX, logRootKeyY [32]byte
 }
 

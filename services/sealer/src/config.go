@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 )
 
 // Config holds all 12-factor environment configuration.
@@ -163,7 +164,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
-	logConfigValue(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
+	logSecretDigest(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
 	logSecretDigest(logger, "AWS_SECRET_ACCESS_KEY", c.AWSSecretAccessKey)
 	logConfigValue(logger, "AWS_REGION", c.AWSRegion)
 }
@@ -228,14 +229,7 @@ func validateHTTPSURL(raw string) error {
 }
 
 func logSecretDigest(logger *slog.Logger, name, value string) {
-	var digest string
-	if value == "" {
-		digest = ""
-	} else {
-		sum := sha256.Sum256([]byte(value))
-		digest = hex.EncodeToString(sum[:])
-	}
-	logConfigValue(logger, name, digest)
+	logConfigValue(logger, name, logredact.StringSHA256Hex(value))
 }
 
 func logConfigValue[T any](logger *slog.Logger, name string, value T) {

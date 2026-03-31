@@ -24,7 +24,7 @@ func TestHandleFindExtraBytes_Success(t *testing.T) {
 	defer ts.Close()
 
 	const (
-		logID      = "746573742d6c6f67" // "test-log" encoded as hex
+		logID      = "746573742d6c6f67"                                 // "test-log" encoded as hex
 		extraBytes = "1234567890abcdef1234567890abcdef1234567890abcdef" // 24 bytes hex
 	)
 
@@ -322,9 +322,9 @@ func TestHandleFindExtraBytes_InvalidPath(t *testing.T) {
 	defer ts.Close()
 
 	testCases := []string{
-		"/api/logs/746573742d6c6f67/find-extrabytes/",                    // missing extraBytes
-		"/api/logs//find-extrabytes/1234567890abcdef",           // missing logID
-		"/api/logs/746573742d6c6f67/find-wrong/1234567890abcdef",        // wrong operation
+		"/api/logs/746573742d6c6f67/find-extrabytes/",            // missing extraBytes
+		"/api/logs//find-extrabytes/1234567890abcdef",            // missing logID
+		"/api/logs/746573742d6c6f67/find-wrong/1234567890abcdef", // wrong operation
 	}
 
 	for _, path := range testCases {

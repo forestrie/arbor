@@ -83,5 +83,3 @@ func MapDeleteError(statusCode int, originalErr error) error {
 		return originalErr
 	}
 }
-
-

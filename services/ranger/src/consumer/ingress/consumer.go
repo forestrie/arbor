@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 	"github.com/forestrie/arbor/services/ranger"
 	"github.com/forestrie/arbor/services/ranger/metrics"
 	"github.com/google/uuid"
@@ -124,7 +125,7 @@ func (c *Consumer) ConsumeQueue(ctx context.Context) {
 	}
 
 	c.logger.Info("starting ingress consumer",
-		"pullURL", c.pullURL,
+		"pullURL_sha256", logredact.StringSHA256Hex(c.pullURL),
 		"pollerId", c.pollerId,
 		"pollIntervalMin", c.cfg.PollIntervalMin,
 		"pollIntervalMax", c.cfg.PollIntervalMax,
@@ -346,7 +347,7 @@ func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
-		return nil, fmt.Errorf("pull returned status %d: %s", httpResp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("pull returned status %d: body_sha256=%s", httpResp.StatusCode, logredact.SHA256Hex(respBody))
 	}
 
 	respBody, err := io.ReadAll(httpResp.Body)
@@ -393,7 +394,7 @@ func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, res
 
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
-		return fmt.Errorf("ack returned status %d: %s", httpResp.StatusCode, string(respBody))
+		return fmt.Errorf("ack returned status %d: body_sha256=%s", httpResp.StatusCode, logredact.SHA256Hex(respBody))
 	}
 
 	return nil

@@ -14,6 +14,7 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/veraison/go-cose"
 )
@@ -162,7 +163,7 @@ func RequestGlobalDelegationLease(
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("delegation signer returned status=%d", resp.StatusCode)
+		return nil, fmt.Errorf("delegation signer returned status=%d: body_sha256=%s", resp.StatusCode, logredact.SHA256Hex(respBytes))
 	}
 
 	info, err := delegationcert.ParseCertificate(respBytes)

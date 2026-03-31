@@ -387,5 +387,3 @@ func TestClientGetObjectError(t *testing.T) {
 		t.Fatalf("expected ErrDoesNotExist, got %v", err)
 	}
 }
-
-

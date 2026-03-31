@@ -68,5 +68,3 @@ func NewFactory(client ObjectClient, massifHeight uint8, logger *slog.Logger) (*
 func (f *Factory) NewStore(logID massifstorage.LogID) (*Store, error) {
 	return NewStore(f.client, logID, f.massifHeight, f.logger)
 }
-
-

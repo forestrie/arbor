@@ -5,15 +5,15 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
-	github.com/forestrie/go-merklelog/bloom v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
-	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/forestrie/go-merklelog/bloom v0.0.0-00010101000000-000000000000 // indirect
 	github.com/forestrie/go-merklelog/mmr v0.0.2 // indirect
+	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/ldclabs/cose/go v0.0.0-20221214142927-d22c1cfc2154 // indirect

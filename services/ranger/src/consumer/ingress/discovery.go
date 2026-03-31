@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 	"github.com/forestrie/arbor/services/ranger"
 )
 
@@ -60,7 +61,7 @@ func (d *ShardDiscovery) DiscoverShards(ctx context.Context) (*ShardsResponse, e
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("discovery returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("discovery returned status %d: body_sha256=%s", resp.StatusCode, logredact.SHA256Hex(body))
 	}
 
 	var shardsResp ShardsResponse

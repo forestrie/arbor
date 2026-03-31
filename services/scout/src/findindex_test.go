@@ -7,12 +7,12 @@ import (
 
 func TestParseFindIndexPath(t *testing.T) {
 	testCases := []struct {
-		name        string
-		path        string
-		operation   string
-		expectedLog string
+		name           string
+		path           string
+		operation      string
+		expectedLog    string
 		expectedTarget string
-		expectError bool
+		expectError    bool
 	}{
 		{
 			name:           "valid appid path",
@@ -99,9 +99,9 @@ func TestParseQueryParams(t *testing.T) {
 			name:  "all parameters",
 			query: "mmr-index=100&massif-range=5&idtimestamp=0x123456789abcdef0",
 			expected: FindIndexParams{
-				MinMMRIndex:  uintPtr(100),
-				MassifRange:  5,
-				IDTimestamp:  uintPtr(0x123456789abcdef0),
+				MinMMRIndex: uintPtr(100),
+				MassifRange: 5,
+				IDTimestamp: uintPtr(0x123456789abcdef0),
 			},
 		},
 		{
@@ -420,17 +420,17 @@ func TestComputeStartMassifIndex(t *testing.T) {
 		{
 			name:        "zero mmr index",
 			minMMRIndex: uintPtr(0),
-			expected:   0,
+			expected:    0,
 		},
 		{
 			name:        "small mmr index",
 			minMMRIndex: uintPtr(100),
-			expected:   0, // 100 / 1024 = 0
+			expected:    0, // 100 / 1024 = 0
 		},
 		{
 			name:        "large mmr index",
 			minMMRIndex: uintPtr(2048),
-			expected:   2, // 2048 / 1024 = 2
+			expected:    2, // 2048 / 1024 = 2
 		},
 	}
 

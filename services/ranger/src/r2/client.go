@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 	storageobjects "github.com/forestrie/arbor/services/pkgs/s3storage/storageobjects"
 )
 
@@ -68,7 +69,7 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	return fmt.Sprintf("r2 api error: status=%d body=%q", e.StatusCode, e.Body)
+	return fmt.Sprintf("r2 api error: status=%d body_sha256=%s", e.StatusCode, logredact.StringSHA256Hex(e.Body))
 }
 
 // emptyBodySHA256 is the SHA256 hash of an empty string, used for x-amz-content-sha256
@@ -209,8 +210,12 @@ func (c *Client) ListObjects(
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 
-		c.logger.Info("R2ListObjects", "url", req.URL.String(), "status", resp.Status, "code", resp.StatusCode)
-		c.logger.Info("R2ListObjects", "body", string(body))
+		c.logger.Info("R2ListObjects",
+			"url_sha256", logredact.StringSHA256Hex(req.URL.String()),
+			"status", resp.Status,
+			"code", resp.StatusCode,
+			"body_sha256", logredact.SHA256Hex(body),
+		)
 
 		apiErr := &Error{
 			StatusCode: resp.StatusCode,

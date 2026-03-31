@@ -21,5 +21,3 @@ type ListPage struct {
 	NextContinuationToken string       `json:"cursor,omitempty"`
 	IsTruncated           bool         `json:"truncated,omitempty"`
 }
-
-

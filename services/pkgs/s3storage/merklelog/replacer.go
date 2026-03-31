@@ -13,9 +13,9 @@ import (
 // over a backend-agnostic ObjectClient (S3-compatible APIs, etc.).
 //
 // It supports three write modes:
-//   1. Unconditional write/replace: etag=="" and failIfExists==false
-//   2. Create-only: etag=="" and failIfExists==true (uses If-None-Match: *)
-//   3. Consistent update: etag!= "" and failIfExists==false (uses If-Match: <etag>)
+//  1. Unconditional write/replace: etag=="" and failIfExists==false
+//  2. Create-only: etag=="" and failIfExists==true (uses If-None-Match: *)
+//  3. Consistent update: etag!= "" and failIfExists==false (uses If-Match: <etag>)
 //
 // If etag is supplied, failIfExists MUST be false.
 type Replacer struct {
@@ -130,5 +130,3 @@ func (r *Replacer) PutWithETag(
 
 	return result, nil
 }
-
-

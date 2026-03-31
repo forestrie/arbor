@@ -339,5 +339,3 @@ func (s *Store) ensureLog(logID massifstorage.LogID) (*logCache, error) {
 	s.logCaches[key] = cache
 	return cache, nil
 }
-
-

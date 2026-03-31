@@ -24,8 +24,8 @@ func TestHandleFindAppID_Success(t *testing.T) {
 	defer ts.Close()
 
 	const (
-		logID  = "746573742d6c6f67" // "test-log" encoded as hex
-		appID  = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" // 32 bytes hex
+		logID = "746573742d6c6f67"                                                 // "test-log" encoded as hex
+		appID = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" // 32 bytes hex
 	)
 
 	// Test successful request with all parameters
@@ -218,8 +218,8 @@ func TestHandleFindAppID_InvalidPath(t *testing.T) {
 	defer ts.Close()
 
 	testCases := []string{
-		"/api/logs/746573742d6c6f67/find-appid/",           // missing appID
-		"/api/logs//find-appid/1234567890abcdef",  // missing logID
+		"/api/logs/746573742d6c6f67/find-appid/",                 // missing appID
+		"/api/logs//find-appid/1234567890abcdef",                 // missing logID
 		"/api/logs/746573742d6c6f67/find-wrong/1234567890abcdef", // wrong operation
 	}
 

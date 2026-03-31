@@ -24,31 +24,40 @@ const Finalizer = "shard.gav.dev/finalizer"
 type PodShardReconciler struct{ Client client.Client }
 
 func (r *PodShardReconciler) SetupWithManager(mgr ctrl.Manager) error {
-  return ctrl.NewControllerManagedBy(mgr).
-    For(&corev1.Pod{}, builder.WithPredicates(
-      predicate.NewPredicateFuncs(func(o client.Object) bool {
-        return o.GetLabels()["app"] == "writer"
-      }),
-    )).
-    Complete(r)
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Pod{}, builder.WithPredicates(
+			predicate.NewPredicateFuncs(func(o client.Object) bool {
+				return o.GetLabels()["app"] == "writer"
+			}),
+		)).
+		Complete(r)
 }
 
 func (r *PodShardReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-  var pod corev1.Pod
-  if err := r.Client.Get(ctx, req.NamespacedName, &pod); err != nil { return ctrl.Result{}, client.IgnoreNotFound(err) }
-  if pod.DeletionTimestamp != nil {
-    if err := r.releaseByUID(ctx, string(pod.UID)); err != nil {
-      return ctrl.Result{}, err
-    }
-    return ctrl.Result{}, nil
-  }
+	var pod corev1.Pod
+	if err := r.Client.Get(ctx, req.NamespacedName, &pod); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if pod.DeletionTimestamp != nil {
+		if err := r.releaseByUID(ctx, string(pod.UID)); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
 
-  if pod.Annotations[ShardAnn] != "" { return ctrl.Result{}, nil }
-  name, ok, err := r.claimOne(ctx, &pod)
-  if err != nil || !ok { return ctrl.Result{}, err }
-  patch := client.MergeFrom(pod.DeepCopy()); if pod.Annotations == nil { pod.Annotations = map[string]string{} }
-  pod.Annotations[ShardAnn] = name
-  return ctrl.Result{}, r.Client.Patch(ctx, &pod, patch)
+	if pod.Annotations[ShardAnn] != "" {
+		return ctrl.Result{}, nil
+	}
+	name, ok, err := r.claimOne(ctx, &pod)
+	if err != nil || !ok {
+		return ctrl.Result{}, err
+	}
+	patch := client.MergeFrom(pod.DeepCopy())
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations[ShardAnn] = name
+	return ctrl.Result{}, r.Client.Patch(ctx, &pod, patch)
 }
 
 // claimOne tries to atomically claim a free ShardAssignment for the given pod.

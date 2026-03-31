@@ -8,5 +8,3 @@ type GetOptions struct {
 	RangeStart  int64
 	RangeLength int64
 }
-
-
