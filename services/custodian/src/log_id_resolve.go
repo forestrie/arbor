@@ -49,21 +49,27 @@ func (a *API) ResolveCustodianKeyIDForLogID(ctx context.Context, rawLogID string
 	if err != nil {
 		return "", err
 	}
+	return resolveCustodianKeyFromEntries(norm, entries, a.cfg.RootLogID, a.logIDKeyCache)
+}
+
+// resolveCustodianKeyFromEntries maps KMS list results (+ optional root log id) to a route key id.
+// Returns ErrNoCustodianKeyForLogID when no custody key matches and log id is not the configured root.
+func resolveCustodianKeyFromEntries(norm string, entries []KeyListEntry, rootLogID string, cache *logIDKeyLRU) (string, error) {
 	switch len(entries) {
 	case 0:
-		root := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(a.cfg.RootLogID, "0x")))
+		root := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(rootLogID, "0x")))
 		root = strings.ReplaceAll(root, "-", "")
 		if root != "" && norm == root {
-			if a.logIDKeyCache != nil {
-				a.logIDKeyCache.Put(norm, BootstrapKeyAlias)
+			if cache != nil {
+				cache.Put(norm, BootstrapKeyAlias)
 			}
 			return BootstrapKeyAlias, nil
 		}
-		return "", fmt.Errorf("no key for log_id")
+		return "", ErrNoCustodianKeyForLogID
 	case 1:
 		kid := entries[0].KeyID
-		if a.logIDKeyCache != nil {
-			a.logIDKeyCache.Put(norm, kid)
+		if cache != nil {
+			cache.Put(norm, kid)
 		}
 		return kid, nil
 	default:
