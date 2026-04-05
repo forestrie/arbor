@@ -52,6 +52,7 @@ func (a *API) ResolveCustodianKeyIDForLogID(ctx context.Context, rawLogID string
 	switch len(entries) {
 	case 0:
 		root := strings.TrimSpace(strings.ToLower(strings.TrimPrefix(a.cfg.RootLogID, "0x")))
+		root = strings.ReplaceAll(root, "-", "")
 		if root != "" && norm == root {
 			if a.logIDKeyCache != nil {
 				a.logIDKeyCache.Put(norm, BootstrapKeyAlias)
