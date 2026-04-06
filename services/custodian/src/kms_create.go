@@ -19,18 +19,21 @@ import (
 // and grants the custody_signer SA signerVerifier and publicKeyViewer on it.
 // Optionally grants publicKeyViewer and signerVerifier to CustodianRuntimeSAEmail
 // (ADC identity) so GetPublicKey and SignAsymmetric succeed for this process.
-// selfLogID must be a valid RFC-4122 UUID string; the CryptoKey id is that UUID
-// without hyphens (32 lowercase hex digits).
+// keyOwnerID and selfLogID must already be normalized 32-char lowercase hex (see NormalizeForestrieHexID32).
+// The CryptoKey id is selfLogID (32 hex digits).
 func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
+	if err := validateUserLabelKeysNotOperatorPrefix(labels); err != nil {
+		return "", "", err
+	}
 	if a.cfg.CustodyKeyRingID == "" {
 		return "", "", fmt.Errorf("CUSTODY_KEY_RING_ID not set")
 	}
 	if a.cfg.CustodySignerSAEmail == "" {
 		return "", "", fmt.Errorf("CUSTODY_SIGNER_SA_EMAIL not set")
 	}
-	cryptoKeyID, uuidOK := cryptoKeyShortIDFromLogUUID(selfLogID)
-	if !uuidOK {
-		return "", "", fmt.Errorf("selfLogId must be a valid UUID")
+	cryptoKeyID := selfLogID
+	if len(cryptoKeyID) != 32 || !validCryptoKeyID(cryptoKeyID) {
+		return "", "", fmt.Errorf("selfLogId must be 32 lowercase hex digits")
 	}
 
 	client, err := kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
@@ -39,7 +42,7 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg 
 	}
 	defer client.Close()
 
-	// Build labels: canonical owner_id plus optional structured labels (GCP: lowercase, [a-z0-9_-], max 63)
+	// Build labels: operator keys (fo-) plus optional user labels (GCP: lowercase, [a-z0-9_-], max 63)
 	labelVal := strings.ToLower(regexp.MustCompile(`[^a-z0-9_-]`).ReplaceAllString(keyOwnerID, "-"))
 	if len(labelVal) > 63 {
 		labelVal = labelVal[:63]
@@ -47,7 +50,10 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg 
 	if labelVal == "" {
 		labelVal = "default"
 	}
-	kmsLabels := map[string]string{"owner_id": labelVal}
+	kmsLabels := map[string]string{
+		ForestrieOwnerIDLabelKey: labelVal,
+		ForestrieLogIDLabelKey:   selfLogID,
+	}
 	for k, v := range labels {
 		sanitizedKey := strings.ToLower(regexp.MustCompile(`[^a-z0-9_-]`).ReplaceAllString(k, "_"))
 		if len(sanitizedKey) > 63 {

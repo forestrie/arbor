@@ -40,19 +40,13 @@ func validCryptoKeyID(id string) bool {
 	return id != "" && len(id) <= maxKMSCryptoKeyIDLen && cryptoKeyIDChars.MatchString(id)
 }
 
-// cryptoKeyShortIDFromLogUUID returns the KMS CryptoKey id: lowercase UUID with
-// hyphens removed (32 hex digits). ok is false if selfLogID is empty or not a
-// valid UUID (32 hex digits in standard layout; optional hyphens; case-insensitive hex).
+// cryptoKeyShortIDFromLogUUID returns the KMS CryptoKey id: 32 lowercase hex digits
+// (optional hyphens and 0x prefix). ok is false if selfLogID is not valid 32-hex.
 func cryptoKeyShortIDFromLogUUID(selfLogID string) (shortID string, ok bool) {
-	selfLogID = strings.TrimSpace(selfLogID)
-	if selfLogID == "" {
+	out, err := NormalizeForestrieHexID32(selfLogID)
+	if err != nil {
 		return "", false
 	}
-	h := normalizeUUIDToHyphenated(selfLogID)
-	if h == "" {
-		return "", false
-	}
-	out := stripHyphens(h)
 	if !validCryptoKeyID(out) {
 		return "", false
 	}

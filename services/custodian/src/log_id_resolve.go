@@ -14,21 +14,12 @@ var ErrNoCustodianKeyForLogID = errors.New("no key for log_id")
 // ErrAmbiguousCustodianLogID means more than one custody key matched the log label.
 var ErrAmbiguousCustodianLogID = errors.New("ambiguous log_id")
 
-// ForestrieLogIDLabelKey is the KMS label key used to associate a CryptoKey with a log id.
-const ForestrieLogIDLabelKey = "forestrie_log_id"
-
 // NormalizeLogIDForKMSLabel normalizes a log identifier for use as a KMS label value
-// and for comparison with ROOT_LOG_ID (lowercase hex, no 0x prefix).
+// and for comparison with ROOT_LOG_ID (32 lowercase hex digits; hyphens and 0x stripped).
 func NormalizeLogIDForKMSLabel(raw string) (string, error) {
-	s := strings.TrimSpace(strings.ToLower(raw))
-	s = strings.TrimPrefix(s, "0x")
-	if s == "" {
+	s, err := NormalizeForestrieHexID32(raw)
+	if err != nil {
 		return "", fmt.Errorf("log_id required")
-	}
-	for _, r := range s {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			return "", fmt.Errorf("log_id must be lowercase hex")
-		}
 	}
 	return s, nil
 }

@@ -8,12 +8,13 @@ import (
 )
 
 func TestNormalizeLogIDForKMSLabel(t *testing.T) {
-	got, err := NormalizeLogIDForKMSLabel(" 0xAbCdEf01 ")
+	want := "6ba7b8109dad11d180b400c04fd430c8"
+	got, err := NormalizeLogIDForKMSLabel(" 0x6Ba7B8109DAD11D180B400C04FD430C8 ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "abcdef01" {
-		t.Fatalf("got %q", got)
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
 	}
 	if _, err := NormalizeLogIDForKMSLabel("no!"); err == nil {
 		t.Fatal("expected error")

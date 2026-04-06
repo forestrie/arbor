@@ -106,6 +106,29 @@ func TestRegisterRoutes_CreateKey_BadRequestInvalidSelfLogId(t *testing.T) {
 	}
 }
 
+func TestRegisterRoutes_CreateKey_BadRequestReservedUserLabelPrefix(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(CreateKeyRequest{
+		KeyOwnerID: "11111111111111111111111111111111",
+		SelfLogID:  "22222222-2222-2222-2222-222222222222",
+		Labels:     map[string]string{"FO-test": "1"},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", cborContentType)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for reserved fo- label prefix, got %d", rec.Code)
+	}
+}
+
 func TestRegisterRoutes_CreateKey_BadRequestMissingSelfLogId(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
@@ -158,7 +181,7 @@ func TestRegisterRoutes_ListKeys_RequiresNormalApp(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := custodianCBORem.Marshal(ListKeysRequest{Labels: map[string]string{"owner_id": "foo"}, Predicate: "and"})
+	body, _ := custodianCBORem.Marshal(ListKeysRequest{Labels: map[string]string{"fo-owner_id": "foo"}, Predicate: "and"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys/list", bytes.NewReader(body))
 	req.Header.Set("Content-Type", cborContentType)
 	rec := httptest.NewRecorder()
@@ -176,7 +199,7 @@ func TestRegisterRoutes_ListKeysGet_RequiresLabelAndAuth(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/keys/list?forestrie_log_id=a1", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/list?fo-log_id=a1", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {

@@ -1,7 +1,9 @@
 package custodian
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 )
 
 // handleCreateKey implements POST /api/keys — create a key for a log owner.
@@ -17,16 +19,26 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	if !a.readCBORBody(w, r, &req) {
 		return
 	}
-	if req.KeyOwnerID == "" {
+	if strings.TrimSpace(req.KeyOwnerID) == "" {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "keyOwnerId required")
 		return
 	}
-	cryptoKeyShort, uuidOK := cryptoKeyShortIDFromLogUUID(req.SelfLogID)
-	if !uuidOK {
-		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "selfLogId must be a valid UUID")
+	normOwner, err := NormalizeForestrieHexID32(req.KeyOwnerID)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "invalid keyOwnerId")
 		return
 	}
-	if info, ok := a.store.Get(req.KeyOwnerID); ok {
+	if strings.TrimSpace(req.SelfLogID) == "" {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "selfLogId required")
+		return
+	}
+	normSelf, err := NormalizeForestrieHexID32(req.SelfLogID)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "invalid selfLogId")
+		return
+	}
+	cryptoKeyShort := normSelf
+	if info, ok := a.store.Get(normOwner); ok {
 		if keyIDFromName(info.KeyID) != cryptoKeyShort {
 			a.writeProblem(w, r, http.StatusConflict, "about:blank", "conflict", "keyOwnerId already has a key for a different selfLogId")
 			return
@@ -38,9 +50,13 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), req.KeyOwnerID, req.SelfLogID, req.Alg, req.Labels)
+	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), normOwner, normSelf, req.Alg, req.Labels)
 	if err != nil {
-		a.Logger.Error("failed to create key", "key_owner_id", req.KeyOwnerID, "error", err)
+		if errors.Is(err, ErrForbiddenUserLabelKey) {
+			a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "user label key uses reserved Forestrie operator prefix")
+			return
+		}
+		a.Logger.Error("failed to create key", "key_owner_id", normOwner, "error", err)
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key creation failed")
 		return
 	}
@@ -48,7 +64,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	if alg == "" {
 		alg = "ES256"
 	}
-	a.store.Set(req.KeyOwnerID, KeyInfo{
+	a.store.Set(normOwner, KeyInfo{
 		KeyID:        keyName,
 		PublicKeyPEM: publicKeyPEM,
 		Alg:          alg,
