@@ -25,6 +25,7 @@ func (a *API) handleDeleteKey(w http.ResponseWriter, r *http.Request, keyID stri
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key destruction failed")
 		return
 	}
+	a.publicKeyCacheDelete(keyIDFromName(keyName))
 	a.writeCBOR(w, http.StatusOK, DeleteKeyResponse{
 		KeyID:          keyName,
 		DestroyedCount: count,

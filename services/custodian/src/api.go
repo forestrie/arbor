@@ -54,6 +54,14 @@ func (a *API) publicKeyCachePut(shortKey, pem, alg string) {
 	a.publicKeyCache[shortKey] = publicKeyCacheEntry{PEM: pem, Alg: alg}
 }
 
+func (a *API) publicKeyCacheDelete(shortKey string) {
+	a.publicKeyMu.Lock()
+	defer a.publicKeyMu.Unlock()
+	if a.publicKeyCache != nil {
+		delete(a.publicKeyCache, shortKey)
+	}
+}
+
 // RegisterRoutes wires the custodian API onto the provided mux.
 //
 // Endpoints:
