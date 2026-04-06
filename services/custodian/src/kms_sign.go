@@ -17,6 +17,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// errKmsNoEnabledSigningVersion is returned when a CryptoKey exists but has no
+// ENABLED version (e.g. all versions destroyed or destroy-scheduled). Callers
+// that serve public key material should map this to 404, same as NotFound.
+var errKmsNoEnabledSigningVersion = errors.New("kms: crypto key has no enabled signing version")
+
 // kmsResolveSigningVersion returns the CryptoKeyVersion name and algorithm for signing.
 // If cryptoKeyResource names a version, that version is used; otherwise the key's primary.
 func kmsResolveSigningVersion(ctx context.Context, client *kms.KeyManagementClient, cryptoKeyResource string) (versionName string, versionAlg kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm, err error) {
@@ -68,7 +73,7 @@ func kmsLatestEnabledSigningVersion(ctx context.Context, client *kms.KeyManageme
 		}
 	}
 	if bestN < 0 {
-		return "", 0, fmt.Errorf("crypto key has no enabled version")
+		return "", 0, errKmsNoEnabledSigningVersion
 	}
 	return bestName, bestAlg, nil
 }
@@ -148,9 +153,23 @@ func kmsErrIsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		return true
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if st, ok := status.FromError(e); ok && st.Code() == codes.NotFound {
+			return true
+		}
 	}
 	var ge *googleapi.Error
 	return errors.As(err, &ge) && ge.Code == http.StatusNotFound
+}
+
+// kmsErrPublicKeyUnavailable reports whether err means no public key can be served
+// (missing key/version, or all versions unusable after destroy).
+func kmsErrPublicKeyUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if kmsErrIsNotFound(err) {
+		return true
+	}
+	return errors.Is(err, errKmsNoEnabledSigningVersion)
 }

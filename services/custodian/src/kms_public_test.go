@@ -1,6 +1,7 @@
 package custodian
 
 import (
+	"fmt"
 	"testing"
 
 	"google.golang.org/api/googleapi"
@@ -20,5 +21,24 @@ func TestKmsErrIsNotFound(t *testing.T) {
 	}
 	if !kmsErrIsNotFound(&googleapi.Error{Code: 404}) {
 		t.Error("expected true for googleapi 404")
+	}
+	wrapped := fmt.Errorf("outer: %w", status.Error(codes.NotFound, "nested"))
+	if !kmsErrIsNotFound(wrapped) {
+		t.Error("expected true for wrapped grpc NotFound")
+	}
+}
+
+func TestKmsErrPublicKeyUnavailable(t *testing.T) {
+	if kmsErrPublicKeyUnavailable(nil) {
+		t.Error("expected false for nil")
+	}
+	if !kmsErrPublicKeyUnavailable(errKmsNoEnabledSigningVersion) {
+		t.Error("expected true when no ENABLED signing version (e.g. post-destroy)")
+	}
+	if !kmsErrPublicKeyUnavailable(status.Error(codes.NotFound, "gone")) {
+		t.Error("expected true for NotFound")
+	}
+	if kmsErrPublicKeyUnavailable(status.Error(codes.Internal, "kms")) {
+		t.Error("expected false for Internal")
 	}
 }

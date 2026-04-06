@@ -34,7 +34,7 @@ func (a *API) handleGetPublicKey(w http.ResponseWriter, r *http.Request, keyID s
 	}
 	pem, alg, err := kmsPublicKeyPEMAndAlg(ctx, cryptoKeyName)
 	if err != nil {
-		if kmsErrIsNotFound(err) {
+		if kmsErrPublicKeyUnavailable(err) {
 			a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "key not found")
 			return
 		}
@@ -61,7 +61,7 @@ func (a *API) handleBootstrapPublicKey(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	pem, alg, err := kmsPublicKeyPEMAndAlg(ctx, cryptoKeyName)
 	if err != nil {
-		if kmsErrIsNotFound(err) {
+		if kmsErrPublicKeyUnavailable(err) {
 			a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "key not found")
 			return
 		}
