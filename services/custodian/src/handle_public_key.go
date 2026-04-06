@@ -3,11 +3,10 @@ package custodian
 import (
 	"net/http"
 	"strings"
-
-	"cloud.google.com/go/kms/apiv1/kmspb"
 )
 
 // handleGetPublicKey implements GET /api/keys/{keyId}/public (no auth).
+// Non-bootstrap keys: ResolveKeyName (short id or full resource name) + KMS GetPublicKey, same as sign.
 func (a *API) handleGetPublicKey(w http.ResponseWriter, r *http.Request, keyID string) {
 	if r.Method != http.MethodGet {
 		a.writeProblem(w, r, http.StatusMethodNotAllowed, "about:blank", "method not allowed", "")
@@ -18,18 +17,36 @@ func (a *API) handleGetPublicKey(w http.ResponseWriter, r *http.Request, keyID s
 		a.handleBootstrapPublicKey(w, r)
 		return
 	}
-	info, ok := a.store.GetByKeyID(keyID)
-	if !ok {
-		info, ok = a.store.Get(keyID)
-	}
-	if !ok {
-		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "key not found")
+	ctx := r.Context()
+	cryptoKeyName, err := a.ResolveKeyName(keyID)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid key", err.Error())
 		return
 	}
+	shortKey := keyIDFromName(cryptoKeyName)
+	if e, ok := a.publicKeyCacheGet(shortKey); ok {
+		a.writeCBOR(w, http.StatusOK, PublicKeyResponse{
+			KeyID:     shortKey,
+			PublicKey: e.PEM,
+			Alg:       e.Alg,
+		})
+		return
+	}
+	pem, alg, err := kmsPublicKeyPEMAndAlg(ctx, cryptoKeyName)
+	if err != nil {
+		if kmsErrIsNotFound(err) {
+			a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "key not found")
+			return
+		}
+		a.Logger.Error("kms public key", "error", err)
+		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "kms get public key failed")
+		return
+	}
+	a.publicKeyCachePut(shortKey, pem, alg)
 	a.writeCBOR(w, http.StatusOK, PublicKeyResponse{
-		KeyID:     info.KeyID,
-		PublicKey: info.PublicKeyPEM,
-		Alg:       info.Alg,
+		KeyID:     shortKey,
+		PublicKey: pem,
+		Alg:       alg,
 	})
 }
 
@@ -42,35 +59,19 @@ func (a *API) handleBootstrapPublicKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	client, err := newKMSClient(ctx)
+	pem, alg, err := kmsPublicKeyPEMAndAlg(ctx, cryptoKeyName)
 	if err != nil {
-		a.Logger.Error("kms client for public key", "error", err)
-		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "kms client failed")
-		return
-	}
-	defer client.Close()
-
-	versionName, versionAlg, err := kmsResolveSigningVersion(ctx, client, cryptoKeyName)
-	if err != nil {
-		a.Logger.Error("kms resolve signing version", "error", err)
-		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "kms resolve failed")
-		return
-	}
-	pubResp, err := client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: versionName})
-	if err != nil {
-		a.Logger.Error("kms get public key", "error", err)
+		if kmsErrIsNotFound(err) {
+			a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "key not found")
+			return
+		}
+		a.Logger.Error("kms public key (bootstrap)", "error", err)
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "kms get public key failed")
-		return
-	}
-	algStr, err := kmsPublicKeyAlgString(versionAlg)
-	if err != nil {
-		a.Logger.Error("unsupported kms algorithm for public key", "alg", versionAlg, "error", err)
-		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "unsupported algorithm")
 		return
 	}
 	a.writeCBOR(w, http.StatusOK, PublicKeyResponse{
 		KeyID:     BootstrapKeyAlias,
-		PublicKey: pubResp.GetPem(),
-		Alg:       algStr,
+		PublicKey: pem,
+		Alg:       alg,
 	})
 }

@@ -5,30 +5,60 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 )
+
+// publicKeyCacheEntry caches PEM + alg after a successful KMS GetPublicKey (short crypto key id key).
+type publicKeyCacheEntry struct {
+	PEM string
+	Alg string
+}
 
 // API provides the HTTP API for custodian.
 type API struct {
-	Logger        *slog.Logger
-	cfg           Config
-	store         *KeyStore
-	logIDKeyCache *logIDKeyLRU
+	Logger         *slog.Logger
+	cfg            Config
+	store          *KeyStore
+	logIDKeyCache  *logIDKeyLRU
+	publicKeyMu    sync.RWMutex
+	publicKeyCache map[string]publicKeyCacheEntry
 }
 
 // NewAPI builds an API with the given logger and config.
 func NewAPI(logger *slog.Logger, cfg Config) *API {
 	return &API{
-		Logger:        logger,
-		cfg:           cfg,
-		store:         NewKeyStore(),
-		logIDKeyCache: newLogIDKeyLRU(cfg.LogIDCacheSize),
+		Logger:         logger,
+		cfg:            cfg,
+		store:          NewKeyStore(),
+		logIDKeyCache:  newLogIDKeyLRU(cfg.LogIDCacheSize),
+		publicKeyCache: make(map[string]publicKeyCacheEntry),
 	}
+}
+
+func (a *API) publicKeyCacheGet(shortKey string) (publicKeyCacheEntry, bool) {
+	a.publicKeyMu.RLock()
+	defer a.publicKeyMu.RUnlock()
+	if a.publicKeyCache == nil {
+		return publicKeyCacheEntry{}, false
+	}
+	e, ok := a.publicKeyCache[shortKey]
+	return e, ok
+}
+
+func (a *API) publicKeyCachePut(shortKey, pem, alg string) {
+	a.publicKeyMu.Lock()
+	defer a.publicKeyMu.Unlock()
+	if a.publicKeyCache == nil {
+		a.publicKeyCache = make(map[string]publicKeyCacheEntry)
+	}
+	a.publicKeyCache[shortKey] = publicKeyCacheEntry{PEM: pem, Alg: alg}
 }
 
 // RegisterRoutes wires the custodian API onto the provided mux.
 //
 // Endpoints:
-//   - GET  /api/keys/{keyId}/public              (no auth); optional ?log-id=true
+//   - GET  /api/keys/{keyId}/public              (no auth); optional ?log-id=true;
+//     {keyId} is the same as POST .../sign: short CryptoKey id under CUSTODY_KEY_RING_ID or full projects/.../cryptoKeys/... name
 //   - POST /api/keys                             (normal app token) — create key
 //   - GET  /api/keys/list / POST …/list          (normal app token) — list keys (labels)
 //   - GET  /api/keys/curator/log-key              (normal app token) — ?logId=… → { keyId }

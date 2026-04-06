@@ -43,6 +43,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 			a.writeProblem(w, r, http.StatusConflict, "about:blank", "conflict", "keyOwnerId already has a key for a different selfLogId")
 			return
 		}
+		a.publicKeyCachePut(keyIDFromName(info.KeyID), info.PublicKeyPEM, info.Alg)
 		a.writeCBOR(w, http.StatusOK, CreateKeyResponse{
 			KeyID:     info.KeyID,
 			PublicKey: info.PublicKeyPEM,
@@ -69,6 +70,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		PublicKeyPEM: publicKeyPEM,
 		Alg:          alg,
 	})
+	a.publicKeyCachePut(keyIDFromName(keyName), publicKeyPEM, alg)
 	a.writeCBOR(w, http.StatusCreated, CreateKeyResponse{
 		KeyID:     keyName,
 		PublicKey: publicKeyPEM,

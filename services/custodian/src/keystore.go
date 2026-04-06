@@ -33,14 +33,3 @@ func (s *KeyStore) Set(keyOwnerID string, info KeyInfo) {
 	defer s.mu.Unlock()
 	s.byID[keyOwnerID] = info
 }
-
-func (s *KeyStore) GetByKeyID(keyID string) (KeyInfo, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, info := range s.byID {
-		if info.KeyID == keyID {
-			return info, true
-		}
-	}
-	return KeyInfo{}, false
-}

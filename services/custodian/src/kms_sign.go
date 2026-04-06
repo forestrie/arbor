@@ -2,14 +2,19 @@ package custodian
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // kmsResolveSigningVersion returns the CryptoKeyVersion name and algorithm for signing.
@@ -114,4 +119,38 @@ func kmsAsymmetricSignSHA256(ctx context.Context, client *kms.KeyManagementClien
 
 func newKMSClient(ctx context.Context) (*kms.KeyManagementClient, error) {
 	return kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
+}
+
+// kmsPublicKeyPEMAndAlg fetches PEM and Custodian wire alg for a CryptoKey resource name.
+func kmsPublicKeyPEMAndAlg(ctx context.Context, cryptoKeyName string) (pem string, alg string, err error) {
+	client, err := newKMSClient(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer client.Close()
+	versionName, versionAlg, err := kmsResolveSigningVersion(ctx, client, cryptoKeyName)
+	if err != nil {
+		return "", "", err
+	}
+	pubResp, err := client.GetPublicKey(ctx, &kmspb.GetPublicKeyRequest{Name: versionName})
+	if err != nil {
+		return "", "", err
+	}
+	algStr, err := kmsPublicKeyAlgString(versionAlg)
+	if err != nil {
+		return "", "", err
+	}
+	return pubResp.GetPem(), algStr, nil
+}
+
+// kmsErrIsNotFound reports whether err indicates the CryptoKey or version does not exist in KMS.
+func kmsErrIsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		return true
+	}
+	var ge *googleapi.Error
+	return errors.As(err, &ge) && ge.Code == http.StatusNotFound
 }

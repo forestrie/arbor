@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestRegisterRoutes_PublicKeyNotFound(t *testing.T) {
+func TestRegisterRoutes_PublicKey_InvalidKeyWhenRingUnset(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "test-app"
 	cfg.BootstrapAppToken = "test-bootstrap"
@@ -19,11 +19,45 @@ func TestRegisterRoutes_PublicKeyNotFound(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/keys/unknown/public", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when CUSTODY_KEY_RING_ID unset, got %d", rec.Code)
 	}
 	if ct := rec.Header().Get("Content-Type"); ct != problemCBORType {
 		t.Errorf("expected problem+cbor, got %q", ct)
+	}
+	var pd ProblemDetail
+	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &pd); err != nil {
+		t.Fatalf("problem body: %v", err)
+	}
+	if pd.Title != "invalid key" {
+		t.Errorf("title: got %q", pd.Title)
+	}
+}
+
+func TestRegisterRoutes_PublicKey_CacheHitSkipsKMS(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.CustodyKeyRingID = "projects/test/locations/loc/keyRings/ring"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	api.publicKeyCachePut("cachedshort", "-----BEGIN FAKE-----", "ES256")
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/keys/cachedshort/public", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from cache, got %d", rec.Code)
+	}
+	var resp PublicKeyResponse
+	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	if resp.KeyID != "cachedshort" {
+		t.Errorf("keyId: got %q", resp.KeyID)
+	}
+	if resp.PublicKey != "-----BEGIN FAKE-----" || resp.Alg != "ES256" {
+		t.Errorf("unexpected body: %+v", resp)
 	}
 }
 
@@ -310,8 +344,8 @@ func TestHealthz(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/keys/any/public", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 for unknown key, got %d", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 when CUSTODY_KEY_RING_ID unset, got %d", rec.Code)
 	}
 }
 
