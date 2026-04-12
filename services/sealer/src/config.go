@@ -32,11 +32,12 @@ type Config struct {
 	PollIntervalMax   time.Duration
 	VisibilityTimeout time.Duration
 
-	// Delegation signer / GCP Workload Identity configuration
-	DelegationSignerServiceAccountEmail string
-	DelegationSignerURL                 string
-	DelegationLogIDPrefix               string
-	DelegationKeyCurve                  string
+	// Custodian configuration (per-log delegation signing)
+	CustodianURL      string
+	CustodianAppToken string
+
+	// Delegation key curve for ephemeral keys (secp256k1 or secp256r1)
+	DelegationKeyCurve string
 
 	// R2 access configuration (S3-compatible endpoint)
 	R2URL   string
@@ -137,10 +138,9 @@ func LoadConfig() Config {
 		PollIntervalMin:                     getDuration("POLL_INTERVAL_MIN", 0),
 		PollIntervalMax:                     getDuration("POLL_INTERVAL_MAX", 5*time.Second),
 		VisibilityTimeout:                   getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
-		DelegationSignerServiceAccountEmail: os.Getenv("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL"),
-		DelegationSignerURL:                 os.Getenv("DELEGATION_SIGNER_URL"),
-		DelegationLogIDPrefix:               os.Getenv("DELEGATION_LOG_ID_PREFIX"),
-		DelegationKeyCurve:                  getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256k1"),
+		CustodianURL:       os.Getenv("CUSTODIAN_URL"),
+		CustodianAppToken:  os.Getenv("CUSTODIAN_APP_TOKEN"),
+		DelegationKeyCurve: getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
 		R2URL:                               os.Getenv("R2_URL"),
 		R2Token:                             r2Token,
 		AWSAccessKeyID:                      os.Getenv("AWS_ACCESS_KEY_ID"),
@@ -158,9 +158,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL_MIN", c.PollIntervalMin)
 	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
-	logConfigValue(logger, "DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL", c.DelegationSignerServiceAccountEmail)
-	logConfigValue(logger, "DELEGATION_SIGNER_URL", c.DelegationSignerURL)
-	logConfigValue(logger, "DELEGATION_LOG_ID_PREFIX", c.DelegationLogIDPrefix)
+	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
+	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
@@ -184,14 +183,14 @@ func (c Config) Validate() error {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
 
-	if c.DelegationSignerServiceAccountEmail == "" {
-		return fmt.Errorf("DELEGATION_SIGNER_SERVICE_ACCOUNT_EMAIL is required")
+	if c.CustodianURL == "" {
+		return fmt.Errorf("CUSTODIAN_URL is required")
 	}
-	if c.DelegationSignerURL == "" {
-		return fmt.Errorf("DELEGATION_SIGNER_URL is required")
+	if err := validateHTTPSURL(c.CustodianURL); err != nil {
+		return fmt.Errorf("CUSTODIAN_URL is invalid: %w", err)
 	}
-	if err := validateHTTPSURL(c.DelegationSignerURL); err != nil {
-		return fmt.Errorf("DELEGATION_SIGNER_URL is invalid: %w", err)
+	if c.CustodianAppToken == "" {
+		return fmt.Errorf("CUSTODIAN_APP_TOKEN is required")
 	}
 	if _, err := delegationcert.ParseCurve(c.DelegationKeyCurve); err != nil {
 		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)

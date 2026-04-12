@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/forestrie/arbor/services/sealer"
 	"github.com/forestrie/arbor/services/sealer/consumer"
@@ -57,67 +56,18 @@ func main() {
 	)
 	defer stop()
 
-	// Startup check: ensure we can obtain an impersonated access token for the
-	// delegation-signer service account. Fail fast to avoid running without the
-	// required trust boundary plumbing.
-	startupCtx, startupCancel := context.WithTimeout(ctx, 20*time.Second)
-	defer startupCancel()
-	token, err := sealer.AcquireDelegationSignerAccessToken(startupCtx, cfg.DelegationSignerServiceAccountEmail)
-	if err != nil {
-		slog.Error("failed to obtain delegation signer access token",
-			"target_service_account", cfg.DelegationSignerServiceAccountEmail,
-			"error", err,
-		)
-		os.Exit(1)
-	}
-	slog.Info("obtained delegation signer access token",
-		"target_service_account", token.Info.TargetServiceAccount,
-		"token_type", token.Info.TokenType,
-		"expiry", token.Info.Expiry,
-		"expires_in", token.Info.ExpiresIn.String(),
-		"token_len", token.Info.TokenLength,
-		"token_fingerprint", token.Info.TokenFingerprint,
-	)
-
 	httpClient := sealer.NewHTTPClient(logger)
-
 	leaseMgr := sealer.NewDelegationLeaseManager(0, 0)
 
-	// Startup check: obtain (and cache) a global time-limited delegation lease.
-	lease, err := leaseMgr.EnsureValid(
-		startupCtx,
-		httpClient,
-		logger,
-		cfg.DelegationSignerURL,
-		token.AccessToken,
-		cfg.DelegationKeyCurve,
-	)
-	if err != nil {
-		slog.Error("failed to obtain delegation lease",
-			"delegation_signer_url", cfg.DelegationSignerURL,
-			"curve", cfg.DelegationKeyCurve,
-			"error", err,
-		)
-		os.Exit(1)
-	}
-	slog.Info("obtained delegation lease",
-		"cert_sha256", lease.Info.CertSHA256,
-		"cert_size", lease.Info.CertSize,
-		"alg", lease.Info.ProtectedAlg,
-		"cty", lease.Info.ProtectedCty,
-		"kid_hex", lease.Info.ProtectedKidHex,
-		"issued_at", lease.IssuedAt,
-		"expires_at", lease.ExpiresAt,
-		"delegated_curve", lease.Info.PayloadDelegatedCurve,
-		"signature_size", lease.Info.SignatureSize,
+	// Log Custodian configuration (per-log delegation leases are obtained lazily)
+	slog.Info("sealer configured for per-log delegation via Custodian",
+		"custodian_url", cfg.CustodianURL,
+		"delegation_key_curve", cfg.DelegationKeyCurve,
 	)
 
 	// Create metrics registry and metrics
 	metricsRegistry := prometheus.NewRegistry()
 	metricsHandles := metrics.NewMetrics(metricsRegistry)
-
-	// Set initial delegation lease expiry from startup lease
-	metricsHandles.SetDelegationLeaseExpiry(float64(lease.ExpiresAt.Unix()))
 
 	healthMux := http.NewServeMux()
 	setupHealthChecks(healthMux)

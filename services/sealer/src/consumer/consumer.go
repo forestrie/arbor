@@ -301,20 +301,11 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 		q.metrics.AddMessagesProcessed(len(qbatch.Messages))
 	}
 
-	// Acquire a delegation signer token once per batch.
-	token, err := sealer.AcquireDelegationSignerAccessToken(ctx, q.cfg.DelegationSignerServiceAccountEmail)
-	if err != nil {
-		return fmt.Errorf("failed to obtain delegation signer access token: %w", err)
-	}
-
 	svc := sealer.SealerService{
 		Cfg:          q.cfg,
 		HTTPClient:   q.httpClient,
 		Logger:       q.logger,
 		LeaseManager: q.leaseMgr,
-	}
-	batchCtx := sealer.SealerBatch{
-		DelegationAccessToken: token.AccessToken,
 	}
 
 	var wg sync.WaitGroup
@@ -327,7 +318,7 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 		go func() {
 			defer wg.Done()
 			checkpointStart := time.Now()
-			if err := sealer.CheckpointLog(ctx, svc, batchCtx, w.logIDBytes, w.massifHeight); err != nil {
+			if err := sealer.CheckpointLog(ctx, svc, w.logIDBytes, w.massifHeight); err != nil {
 				// Record checkpoint duration even on failure
 				if q.metrics != nil {
 					q.metrics.ObserveCheckpointDuration(time.Since(checkpointStart).Seconds())

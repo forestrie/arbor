@@ -41,7 +41,6 @@ const (
 func CheckpointLog(
 	ctx context.Context,
 	svc SealerService,
-	batch SealerBatch,
 	logID massifstorage.LogID,
 	massifHeight uint8,
 ) error {
@@ -58,9 +57,6 @@ func CheckpointLog(
 	if massifHeight == 0 {
 		return fmt.Errorf("massifHeight is required")
 	}
-	if batch.DelegationAccessToken == "" {
-		return fmt.Errorf("delegation access token is required")
-	}
 	if svc.LeaseManager == nil {
 		return fmt.Errorf("delegation lease manager is required")
 	}
@@ -71,27 +67,8 @@ func CheckpointLog(
 		return fmt.Errorf("invalid logID bytes: %w", err)
 	}
 	logIDString := logUUID.String()
-
-	// Ensure we have a valid global delegation lease before doing any sealing work.
-	lease, err := svc.LeaseManager.EnsureValid(
-		ctx,
-		svc.HTTPClient,
-		logger,
-		svc.Cfg.DelegationSignerURL,
-		batch.DelegationAccessToken,
-		svc.Cfg.DelegationKeyCurve,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to obtain delegation lease: %w", err)
-	}
-	coseSigner, kid, pubKey, err := lease.COSESigner()
-	if err != nil {
-		return fmt.Errorf("delegation signer setup failed: %w", err)
-	}
-	// RootSigner encodes keyIdentifier as a CBOR text string inside the cnf claim,
-	// so it MUST be valid UTF-8. The raw kid bytes are arbitrary, so we hex-encode
-	// them to get a stable, printable identifier.
-	keyIdentifier := hex.EncodeToString(kid)
+	// 32-char lowercase hex for Custodian log-id resolution
+	logIdHex := hex.EncodeToString(logID)
 
 	// Build shared clients.
 	s3Client, err := s3.NewClientWithCredentials(
@@ -157,7 +134,8 @@ func CheckpointLog(
 	if err != nil {
 		return fmt.Errorf("init cbor codec: %w", err)
 	}
-	rootSigner := massifs.NewRootSigner(svc.Cfg.DelegationSignerServiceAccountEmail, codec)
+	// Use log ID as issuer for checkpoint signing
+	rootSigner := massifs.NewRootSigner(logIDString, codec)
 
 	// Process each massif from the last checkpoint to head.
 	for mi := startMassifIndex; mi <= headMassifIndex; mi++ {
@@ -206,6 +184,32 @@ func CheckpointLog(
 			}
 			newPeaks = peaks
 		}
+
+		// Calculate MMR range for this massif for the delegation
+		// MMR size at start of massif and end of massif
+		mmrStart := baseState.MMRSize
+		mmrEnd := curSize
+
+		// Obtain per-log delegation lease from Custodian
+		lease, err := svc.LeaseManager.EnsureValidForLog(
+			ctx,
+			svc.HTTPClient,
+			logger,
+			svc.Cfg.CustodianURL,
+			svc.Cfg.CustodianAppToken,
+			svc.Cfg.DelegationKeyCurve,
+			logIdHex,
+			mmrStart,
+			mmrEnd,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to obtain delegation lease for log %s: %w", logIdHex, err)
+		}
+		coseSigner, kid, pubKey, err := lease.COSESigner()
+		if err != nil {
+			return fmt.Errorf("delegation signer setup failed: %w", err)
+		}
+		keyIdentifier := hex.EncodeToString(kid)
 
 		// If the lease is expired or likely to expire during this run, abort so
 		// the message can be retried and a fresh lease acquired.
