@@ -10,7 +10,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -30,6 +29,7 @@ import (
 	"github.com/forestrie/arbor/services/sealer"
 	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -386,9 +386,9 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 	state := &fakeCustodianState{privateKey: priv}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Match GET /api/keys/<logIdHex> - return public key
-		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/keys/") {
-			// Return the custody key in PEM format
+		// Match GET /api/keys/<logIdHex>/public - return public key as CBOR
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/public") {
+			// Return the custody key in PEM format via CBOR
 			pubKeyDER, err := x509.MarshalPKIXPublicKey(&state.privateKey.PublicKey)
 			if err != nil {
 				http.Error(w, "marshal pub", http.StatusInternalServerError)
@@ -399,16 +399,17 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 				Bytes: pubKeyDER,
 			})
 
-			resp := map[string]string{
-				"public_key": string(pubKeyPEM),
-				"algorithm":  "ES256",
+			resp := sealer.CustodianPublicKeyResponse{
+				PublicKey: string(pubKeyPEM),
+				Alg:       "ES256",
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			respBytes, _ := cbor.Marshal(resp)
+			w.Header().Set("Content-Type", "application/cbor")
+			_, _ = w.Write(respBytes)
 			return
 		}
 
-		// Match POST /api/keys/<logIdHex>/sign - sign digest
+		// Match POST /api/keys/<logIdHex>/sign - sign digest using CBOR
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sign") {
 			body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 			if err != nil {
@@ -416,17 +417,15 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 				return
 			}
 
-			var req struct {
-				Digest []byte `json:"digest"`
-			}
-			if err := json.Unmarshal(body, &req); err != nil {
-				http.Error(w, "json", http.StatusBadRequest)
+			var req sealer.CustodianSignRequest
+			if err := cbor.Unmarshal(body, &req); err != nil {
+				http.Error(w, "cbor unmarshal", http.StatusBadRequest)
 				return
 			}
 
 			// Sign the digest with the custody key
 			var rVal, sVal *big.Int
-			rVal, sVal, err = ecdsa.Sign(rand.Reader, state.privateKey, req.Digest)
+			rVal, sVal, err = ecdsa.Sign(rand.Reader, state.privateKey, req.PayloadHash)
 			if err != nil {
 				http.Error(w, "sign", http.StatusInternalServerError)
 				return
@@ -437,11 +436,12 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 			rVal.FillBytes(sig[0:32])
 			sVal.FillBytes(sig[32:64])
 
-			resp := map[string][]byte{
-				"signature": sig,
+			resp := sealer.CustodianSignResponse{
+				Signature: sig,
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			respBytes, _ := cbor.Marshal(resp)
+			w.Header().Set("Content-Type", "application/cbor")
+			_, _ = w.Write(respBytes)
 			return
 		}
 
