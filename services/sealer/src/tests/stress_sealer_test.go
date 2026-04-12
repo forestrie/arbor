@@ -5,10 +5,17 @@ package tests
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,9 +29,7 @@ import (
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/arbor/services/sealer"
 	"github.com/forestrie/go-merklelog/massifs"
-	commoncbor "github.com/forestrie/go-merklelog/massifs/cbor"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
-	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -64,13 +69,13 @@ func Test_SealerCheckpointLog_racingCheckpointLogs_minio(t *testing.T) {
 	require.NoError(t, err)
 	deleteV2LogObjects(t.Context(), s3Client, logID, massifHeight)
 
-	delegationSigner := newFakeDelegationSigner(t)
-	t.Cleanup(delegationSigner.Close)
+	fakeCustodian := newFakeCustodian(t)
+	t.Cleanup(fakeCustodian.Close)
 
 	cfg := sealer.Config{
-		DelegationSignerServiceAccountEmail: "integration-test@example.com",
-		DelegationSignerURL:                 delegationSigner.URL,
-		DelegationKeyCurve:                  "secp256r1",
+		CustodianURL:       fakeCustodian.URL,
+		CustodianAppToken:  "test-custodian-token",
+		DelegationKeyCurve: "secp256r1",
 
 		R2URL: baseURL,
 
@@ -262,7 +267,7 @@ func runCheckpointLogs(
 	cfg sealer.Config,
 	httpClient *sealer.HTTPClient,
 	logger *slog.Logger,
-	delegationAccessToken string,
+	_ string, // unused, was delegation access token
 	logID massifstorage.LogID,
 	massifHeight uint8,
 	n int,
@@ -277,7 +282,6 @@ func runCheckpointLogs(
 		Logger:       logger,
 		LeaseManager: leaseMgr,
 	}
-	batch := sealer.SealerBatch{DelegationAccessToken: delegationAccessToken}
 
 	var wg sync.WaitGroup
 	errs := make([]error, n)
@@ -289,7 +293,6 @@ func runCheckpointLogs(
 			errs[i] = sealer.CheckpointLog(
 				ctx,
 				svc,
-				batch,
 				logID,
 				massifHeight,
 			)
@@ -368,75 +371,80 @@ func assertCheckpointSize(
 	require.Equal(t, expectedMMRSize, cp.MMRState.MMRSize)
 }
 
-func newFakeDelegationSigner(t *testing.T) *httptest.Server {
+// fakeCustodianState holds ephemeral key pair for the fake custodian to use.
+type fakeCustodianState struct {
+	privateKey *ecdsa.PrivateKey
+}
+
+func newFakeCustodian(t *testing.T) *httptest.Server {
 	t.Helper()
 
+	// Generate a P-256 key for all log key requests (tests use secp256r1)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	state := &fakeCustodianState{privateKey: priv}
+
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/delegations" {
-			http.NotFound(w, r)
+		// Match GET /api/keys/<logIdHex> - return public key
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/keys/") {
+			// Return the custody key in PEM format
+			pubKeyDER, err := x509.MarshalPKIXPublicKey(&state.privateKey.PublicKey)
+			if err != nil {
+				http.Error(w, "marshal pub", http.StatusInternalServerError)
+				return
+			}
+			pubKeyPEM := pem.EncodeToMemory(&pem.Block{
+				Type:  "PUBLIC KEY",
+				Bytes: pubKeyDER,
+			})
+
+			resp := map[string]string{
+				"public_key": string(pubKeyPEM),
+				"algorithm":  "ES256",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
-		if err != nil {
-			http.Error(w, "read", http.StatusBadRequest)
+		// Match POST /api/keys/<logIdHex>/sign - sign digest
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sign") {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+			if err != nil {
+				http.Error(w, "read", http.StatusBadRequest)
+				return
+			}
+
+			var req struct {
+				Digest []byte `json:"digest"`
+			}
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, "json", http.StatusBadRequest)
+				return
+			}
+
+			// Sign the digest with the custody key
+			var rVal, sVal *big.Int
+			rVal, sVal, err = ecdsa.Sign(rand.Reader, state.privateKey, req.Digest)
+			if err != nil {
+				http.Error(w, "sign", http.StatusInternalServerError)
+				return
+			}
+
+			// Return r||s concatenated signature (fixed 64 bytes for P-256)
+			sig := make([]byte, 64)
+			rVal.FillBytes(sig[0:32])
+			sVal.FillBytes(sig[32:64])
+
+			resp := map[string][]byte{
+				"signature": sig,
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		var req map[string]any
-		if err := cbor.Unmarshal(body, &req); err != nil {
-			http.Error(w, "cbor", http.StatusBadRequest)
-			return
-		}
-
-		// Extract delegated_pubkey and derive alg.
-		delegated, _ := req["delegated_pubkey"].(map[any]any)
-		crv, _ := delegated[int64(-1)].(uint64)
-		alg := int64(-7) // ES256
-		if crv == 8 {
-			alg = -47 // ES256K
-		}
-
-		// Global (prefix/no-log) request shape should not include log_id/mmr fields.
-		issuedAt, _ := req["issued_at"].(uint64)
-		expiresAt, _ := req["expires_at"].(uint64)
-
-		// Use go-merklelog deterministic enc/dec options for realism.
-		encOpts := commoncbor.NewDeterministicEncOpts()
-		encMode, _ := encOpts.EncMode()
-
-		kid := make([]byte, 16)
-		for i := range kid {
-			kid[i] = byte(i + 1)
-		}
-
-		protectedMap := map[int64]any{
-			1: alg,
-			3: "application/forestrie.delegation+cbor",
-			4: kid,
-		}
-		protectedBytes, _ := encMode.Marshal(protectedMap)
-
-		delegationID := make([]byte, 16)
-		copy(delegationID, []byte("delegation-test!"))
-
-		payloadMap := map[int64]any{
-			5:  delegated,        // echo back requested key
-			6:  map[string]any{}, // constraints
-			7:  uint64(1),        // schema_version
-			8:  issuedAt,         // issued_at
-			9:  expiresAt,        // expires_at
-			10: delegationID,     // delegation_id
-		}
-		payloadBytes, _ := encMode.Marshal(payloadMap)
-
-		sig := make([]byte, 64) // r||s placeholder
-
-		coseArr := []any{protectedBytes, map[any]any{}, payloadBytes, sig}
-		respBytes, _ := encMode.Marshal(coseArr)
-
-		w.Header().Set("Content-Type", "application/cose; cose-type=\"cose-sign1\"")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(respBytes)
+		http.NotFound(w, r)
 	}))
 }
