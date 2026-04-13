@@ -21,7 +21,8 @@ import (
 // (ADC identity) so GetPublicKey and SignAsymmetric succeed for this process.
 // keyOwnerID and selfLogID must already be normalized 32-char lowercase hex (see NormalizeForestrieHexID32).
 // The CryptoKey id is selfLogID (32 hex digits).
-func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
+// protectionLevel: "HSM" or "SOFTWARE"; defaults to "SOFTWARE".
+func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg, protectionLevel string, labels map[string]string) (keyName, publicKeyPEM string, err error) {
 	if err := validateUserLabelKeysNotOperatorPrefix(labels); err != nil {
 		return "", "", err
 	}
@@ -69,6 +70,12 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg 
 		kmsLabels[sanitizedKey] = sanitizedVal
 	}
 
+	// Determine protection level: default to SOFTWARE for faster key generation
+	protLevel := kmspb.ProtectionLevel_SOFTWARE
+	if strings.ToUpper(protectionLevel) == "HSM" {
+		protLevel = kmspb.ProtectionLevel_HSM
+	}
+
 	req := &kmspb.CreateCryptoKeyRequest{
 		Parent:      a.cfg.CustodyKeyRingID,
 		CryptoKeyId: cryptoKeyID,
@@ -76,7 +83,7 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg 
 			Purpose: kmspb.CryptoKey_ASYMMETRIC_SIGN,
 			Labels:  kmsLabels,
 			VersionTemplate: &kmspb.CryptoKeyVersionTemplate{
-				ProtectionLevel: kmspb.ProtectionLevel_HSM,
+				ProtectionLevel: protLevel,
 			},
 		},
 	}

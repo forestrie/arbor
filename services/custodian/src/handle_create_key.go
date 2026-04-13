@@ -51,7 +51,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), normOwner, normSelf, req.Alg, req.Labels)
+	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), normOwner, normSelf, req.Alg, req.ProtectionLevel, req.Labels)
 	if err != nil {
 		if errors.Is(err, ErrForbiddenUserLabelKey) {
 			a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "user label key uses reserved Forestrie operator prefix")

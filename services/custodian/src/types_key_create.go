@@ -7,6 +7,8 @@ type CreateKeyRequest struct {
 	SelfLogID string            `cbor:"selfLogId"`
 	Alg       string            `cbor:"alg,omitempty"`
 	Labels    map[string]string `cbor:"labels,omitempty"`
+	// ProtectionLevel: "SOFTWARE" or "HSM"; defaults to "SOFTWARE".
+	ProtectionLevel string `cbor:"protectionLevel,omitempty"`
 }
 
 // CreateKeyResponse is the CBOR body for POST /api/keys success.
