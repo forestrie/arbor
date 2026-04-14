@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/go-merklelog/massifs"
@@ -248,10 +249,25 @@ func CheckpointLog(
 		}
 		msg.Headers.Unprotected[delegationCertUnprotectedLabel] = lease.CertBytes
 
-		signedWithDeleg, err := msg.MarshalCBOR()
+		logger.Info("injecting delegation cert",
+			"log_id", logIDString,
+			"label", delegationCertUnprotectedLabel,
+			"cert_len", len(lease.CertBytes),
+			"unprotected_keys_before", len(msg.Headers.Unprotected)-1,
+			"unprotected_keys_after", len(msg.Headers.Unprotected),
+		)
+
+		// Marshal using direct CBOR to preserve all unprotected header keys.
+		// go-cose's MarshalCBOR() doesn't preserve arbitrary keys like 1000.
+		signedWithDeleg, err := marshalSign1WithAllHeaders(msg.Sign1Message)
 		if err != nil {
 			return fmt.Errorf("encode checkpoint: %w", err)
 		}
+
+		logger.Info("marshaled checkpoint with delegation cert",
+			"log_id", logIDString,
+			"bytes_len", len(signedWithDeleg),
+		)
 
 		// Write checkpoint with optimistic concurrency.
 		if err := putCheckpoint(ctx, store, codec, mi, curSize, signedWithDeleg); err != nil {
@@ -319,6 +335,69 @@ func putCheckpoint(ctx context.Context, store *merklelog.Store, codec commoncbor
 	}
 
 	return fmt.Errorf("checkpoint write retries exceeded for massif %d", massifIndex)
+}
+
+// marshalSign1WithAllHeaders marshals a COSE_Sign1 message preserving all
+// unprotected header keys, including application-private labels like 1000.
+// go-cose's MarshalCBOR() only serializes known/registered header labels,
+// so we manually construct the CBOR structure.
+func marshalSign1WithAllHeaders(msg *cose.Sign1Message) ([]byte, error) {
+	// Encode protected headers to bytes (go-cose does this internally too).
+	// MarshalProtected returns CBOR-encoded bstr (already wrapped).
+	protectedBytes, err := msg.Headers.MarshalProtected()
+	if err != nil {
+		return nil, fmt.Errorf("marshal protected headers: %w", err)
+	}
+
+	// Convert unprotected header map to use int64 keys explicitly.
+	// UnprotectedHeader is map[any]any, so we need type assertion for each key.
+	unprotectedMap := make(map[int64]any)
+	for k, v := range msg.Headers.Unprotected {
+		switch key := k.(type) {
+		case int64:
+			unprotectedMap[key] = v
+		case int:
+			unprotectedMap[int64(key)] = v
+		default:
+			return nil, fmt.Errorf("unsupported unprotected header key type: %T", k)
+		}
+	}
+
+	// Use deterministic encoding
+	encMode, err := cbor.EncOptions{
+		Sort: cbor.SortCoreDeterministic,
+	}.EncMode()
+	if err != nil {
+		return nil, fmt.Errorf("create cbor enc mode: %w", err)
+	}
+
+	// Encode unprotected header separately so we can use it as RawMessage.
+	unprotectedBytes, err := encMode.Marshal(unprotectedMap)
+	if err != nil {
+		return nil, fmt.Errorf("marshal unprotected headers: %w", err)
+	}
+
+	// COSE_Sign1 = [
+	//   protected : bstr,
+	//   unprotected : map,
+	//   payload : bstr / nil,
+	//   signature : bstr
+	// ]
+	// Use cbor.RawMessage for already-encoded CBOR to prevent double-encoding.
+	structure := []any{
+		cbor.RawMessage(protectedBytes),
+		cbor.RawMessage(unprotectedBytes),
+		msg.Payload,
+		msg.Signature,
+	}
+
+	// Wrap in CBOR tag 18 (COSE_Sign1)
+	tagged := cbor.Tag{
+		Number:  18,
+		Content: structure,
+	}
+
+	return encMode.Marshal(tagged)
 }
 
 func kidFromECDSAPublicKey(pub *ecdsa.PublicKey) ([]byte, error) {
