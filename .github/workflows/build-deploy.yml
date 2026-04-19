@@ -53,7 +53,7 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}-github-ci@${{ vars.GCP_PROJECT_ID || 'forest-dev-1' }}.iam.gserviceaccount.com
+          service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -71,115 +71,50 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task ranger:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
       - name: Build Scout Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task scout:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
       - name: Build Sealer Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
       - name: Build Custodian Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task custodian:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
       - name: Push Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task ranger:push IMAGE_TAG=${IMAGE_TAG}
 
       - name: Push Scout image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task scout:push IMAGE_TAG=${IMAGE_TAG}
 
       - name: Push Sealer image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task sealer:push IMAGE_TAG=${IMAGE_TAG}
 
       - name: Push Custodian image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task custodian:push IMAGE_TAG=${IMAGE_TAG}
-
-      - name: Generate GitHub App Token
-        id: app-token
-        uses: tibdex/github-app-token@v1
-        with:
-          app_id: ${{ vars.GITAPP_ID }}
-          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
-
-      # TODO: helm library chart support
-      #- name: Install yq
-      #  uses: mikefarah/yq@master
-
-      #- name: Update Scout Helm Chart
-      #  env:
-      #    GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-      #    IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-      #  run: |
-      #    set -euo pipefail
-      #
-      #    # Clone helm-charts repository
-      #    git clone https://github.com/forestrie/helm-charts.git
-      #    cd helm-charts
-      #
-      #    # Configure git for commits
-      #    git config user.name "github-actions[bot]"
-      #    git config user.email "github-actions[bot]@users.noreply.github.com"
-      #
-      #    # Update scout chart version and image tag
-      #    # Increment patch version for chart
-      #    CURRENT_VERSION=$(yq e '.version' charts/scout/Chart.yaml)
-      #    NEW_VERSION=$(echo $CURRENT_VERSION | awk -F. '{$NF = $NF + 1;} 1' | sed 's/ /./g')
-      #
-      #    # Update Chart.yaml version
-      #    yq e ".version = \"$NEW_VERSION\"" -i charts/scout/Chart.yaml
-      #    yq e ".appVersion = \"${IMAGE_TAG}\"" -i charts/scout/Chart.yaml
-      #
-      #    # Update values.yaml with new image tag
-      #    yq e ".common.image.tag = \"${IMAGE_TAG}\"" -i charts/scout/values.yaml
-      #
-      #    # Commit and push changes
-      #    git add charts/scout/
-      #    git commit -m "Update scout chart to version $NEW_VERSION with image ${IMAGE_TAG}
-
-      #    Source: arbor build ${{ github.run_id }}
-      #    Commit: ${{ github.sha }}"
-      #
-      #    git push origin main
-      #
-      #    echo "Updated scout chart to version $NEW_VERSION with image tag ${IMAGE_TAG}"
-
-      - name: Trigger arbor-flux to sync service secrets
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-
-          # Create the complete request body as JSON to avoid quotation/encoding issues
-          cat > /tmp/dispatch_request.json << EOF
-          {
-            "event_type": "sync-services-secrets",
-            "client_payload": {
-              "source": "arbor",
-              "workflow": "build-deploy",
-              "run_id": "${{ github.run_id }}",
-              "sha": "${{ github.sha }}"
-            }
-          }
-          EOF
-
-          # Trigger arbor-flux workflow to sync service secrets after build
-          gh api repos/forestrie/arbor-flux/dispatches \
-            --method POST \
-            --input /tmp/dispatch_request.json

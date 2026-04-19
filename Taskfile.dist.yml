@@ -2,9 +2,12 @@
 version: "3"
 
 vars:
-  IMAGE_URL: europe-west2-docker.pkg.dev/forest-dev-1/forestrie
-  CLUSTER_NAME: forest-dev-1
-  CLUSTER_ZONE: europe-west2-a
+  IMAGE_URL:
+    sh: echo "${ARTIFACT_REGISTRY_URL:-europe-west2-docker.pkg.dev/forest-dev-1/forestrie}"
+  CLUSTER_NAME:
+    sh: echo "${CLUSTER_NAME:-forest-dev-1}"
+  CLUSTER_ZONE:
+    sh: echo "${CLUSTER_ZONE:-europe-west2-a}"
 
 includes:
   minio:
