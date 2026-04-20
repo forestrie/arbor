@@ -116,32 +116,47 @@ jobs:
       - name: Install yq
         uses: mikefarah/yq@master
 
-      - name: Update gke-prod image tags
+      - name: Update arbor-flux image tags for release
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
 
-          # Update image tags in gke-prod kustomizations
-          yq eval ".images[0].newTag = \"$VERSION\"" \
-            -i clusters/gke-prod/services/ranger/kustomization.yaml
-          yq eval ".images[0].newTag = \"$VERSION\"" \
-            -i clusters/gke-prod/services/sealer/kustomization.yaml
-          yq eval ".images[0].newTag = \"$VERSION\"" \
-            -i clusters/gke-prod/services/scout/kustomization.yaml
-          yq eval ".images[0].newTag = \"$VERSION\"" \
-            -i clusters/gke-prod/services/custodian/kustomization.yaml
+          bump_if_present() {
+            local file=$1
+            if [ -f "$file" ]; then
+              yq eval ".images[0].newTag = \"$VERSION\"" -i "$file"
+              echo "updated $file"
+            fi
+          }
 
-          # Commit
+          for svc in ranger sealer scout custodian; do
+            bump_if_present "clusters/ledger-b/services/${svc}/kustomization.yaml"
+            bump_if_present "clusters/gke-prod/services/${svc}/kustomization.yaml"
+          done
+
           git config user.name "forestrie-cd[bot]"
           git config user.email "forestrie-cd[bot]@users.noreply.github.com"
-          git checkout -b release/$VERSION
-          git add clusters/gke-prod/
-          git commit -m "chore: update gke-prod to $VERSION
+          git checkout -b "release/${VERSION}"
 
-          Source: arbor ${{ github.sha }}
-          Co-Authored-By: Warp <agent@warp.dev>"
-          git push origin release/$VERSION
+          git add clusters/ledger-b/services/custodian/kustomization.yaml \
+            clusters/ledger-b/services/ranger/kustomization.yaml \
+            clusters/ledger-b/services/scout/kustomization.yaml \
+            clusters/ledger-b/services/sealer/kustomization.yaml
+
+          if [ -d clusters/gke-prod/services ]; then
+            git add clusters/gke-prod/services || true
+          fi
+
+          if git diff --cached --quiet; then
+            echo "No image tag changes to commit (check arbor-flux paths)" >&2
+            exit 1
+          fi
+
+          git commit -m "chore: release ${VERSION} (ledger-b; gke-prod when present)" \
+            -m "Source: forestrie/arbor@${{ github.sha }}"
+
+          git push origin "release/${VERSION}"
 
       - name: Create PR
         env:
@@ -151,10 +166,12 @@ jobs:
           gh pr create \
             --repo forestrie/arbor-flux \
             --base main \
-            --head release/$VERSION \
-            --title "Release $VERSION to prod" \
-            --body "Updates gke-prod overlay to version $VERSION
+            --head "release/${VERSION}" \
+            --title "Release ${VERSION} (ledger-b)" \
+            --body "Bumps pinned images for slot B (\`clusters/ledger-b\`) to **${VERSION}**.
+
+          When \`clusters/gke-prod\` exists in this repo, those manifests are updated too.
 
           Source commit: forestrie/arbor@${{ github.sha }}
 
-          Merge this PR to deploy to production."
+          Merge to roll out promoted images."
