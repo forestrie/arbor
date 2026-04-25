@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -52,6 +53,73 @@ func NewQueueConsumer(cfg sealer.Config, httpClient *sealer.HTTPClient, logger *
 // would also be 0. This ensures backoff multiplication always has a non-zero
 // starting point.
 const defaultBackoffBase = 10 * time.Millisecond
+
+// errBodyLogMax is the max printable runes we log for a failed queue HTTP
+// response (Cloudflare v4 error JSON is usually short; this aids ops without
+// dumping large payloads).
+const errBodyLogMax = 200
+
+// cloudflareQueueAPIBase returns the account/queue base for Cloudflare Queues
+// HTTP pull/ack, accepting Terraform's shape
+//
+//	https://api.cloudflare.com/client/v4/accounts/{id}/queues/{queueID}
+//
+// and a common mis-set value that included an extra "…/messages" suffix, which
+// would otherwise make pull hit "…/messages/messages/pull" and often return 405.
+func cloudflareQueueAPIBase(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", fmt.Errorf("empty queue URL")
+	}
+	s = strings.TrimSuffix(s, "/")
+	s = strings.TrimSuffix(s, "/messages")
+	return s, nil
+}
+
+func logHTTPErrorResponse(logger *slog.Logger, msg string, method string, endpoint *url.URL, status int, allow string, body []byte) {
+	if logger == nil {
+		return
+	}
+	attrs := []any{
+		"http_method", method,
+		"http_status", status,
+	}
+	if endpoint != nil {
+		attrs = append(attrs, "queue_http_host", endpoint.Host, "queue_http_path", endpoint.Path)
+	}
+	if allow != "" {
+		attrs = append(attrs, "http_allow", allow)
+	}
+	if body != nil {
+		attrs = append(attrs, "err_body_len", len(body), "err_body_sha256", logredact.SHA256Hex(body), "err_body_preview", printablePreview(body, errBodyLogMax))
+	}
+	logger.Warn(msg, attrs...)
+}
+
+func printablePreview(b []byte, max int) string {
+	if len(b) == 0 || max <= 0 {
+		return ""
+	}
+	s := string(b)
+	var sb strings.Builder
+	n := 0
+	for _, c := range s {
+		if n >= max {
+			sb.WriteRune('…')
+			break
+		}
+		switch {
+		case c == '\n' || c == '\r' || c == '\t':
+			sb.WriteRune(' ')
+		case c >= 32 && c < 0x7f:
+			sb.WriteRune(c)
+		default:
+			sb.WriteRune('·')
+		}
+		n++
+	}
+	return strings.TrimSpace(sb.String())
+}
 
 // ConsumeQueue starts the queue consumer loop that polls for messages.
 // Uses exponential backoff: resets to min interval on full batch, doubles on empty.
@@ -155,8 +223,15 @@ func (q *QueueConsumer) ConsumeQueue(ctx context.Context) {
 func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error) {
 	start := time.Now()
 
-	baseQueueURL := strings.TrimSuffix(q.cfg.QueueURL, "/")
-	pullURL := fmt.Sprintf("%s/messages/pull", baseQueueURL)
+	baseQueueURL, err := cloudflareQueueAPIBase(q.cfg.QueueURL)
+	if err != nil {
+		return 0, fmt.Errorf("QUEUE_URL: %w", err)
+	}
+	pullURL := baseQueueURL + "/messages/pull"
+	pullEndpoint, err := url.Parse(pullURL)
+	if err != nil {
+		return 0, fmt.Errorf("invalid pull URL: %w", err)
+	}
 
 	payload := struct {
 		BatchSize           int `json:"batch_size"`
@@ -171,7 +246,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 		return 0, fmt.Errorf("failed to marshal pull payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", pullURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, pullURL, bytes.NewReader(body))
 	if err != nil {
 		return 0, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -187,7 +262,7 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		q.logger.Warn("queue pull failed", "status", resp.StatusCode, "body_sha256", logredact.SHA256Hex(b))
+		logHTTPErrorResponse(q.logger, "queue pull failed", http.MethodPost, pullEndpoint, resp.StatusCode, resp.Header.Get("Allow"), b)
 		return 0, fmt.Errorf("pull request failed: status=%d", resp.StatusCode)
 	}
 
@@ -360,8 +435,15 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 
 // AcknowledgeMessage acknowledges a message to remove it from the queue.
 func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMessage) error {
-	baseQueueURL := strings.TrimSuffix(q.cfg.QueueURL, "/")
-	ackURL := fmt.Sprintf("%s/messages/ack", baseQueueURL)
+	baseQueueURL, err := cloudflareQueueAPIBase(q.cfg.QueueURL)
+	if err != nil {
+		return fmt.Errorf("QUEUE_URL: %w", err)
+	}
+	ackURL := baseQueueURL + "/messages/ack"
+	ackEndpoint, err := url.Parse(ackURL)
+	if err != nil {
+		return fmt.Errorf("invalid ack URL: %w", err)
+	}
 
 	if message.LeaseID == "" {
 		return fmt.Errorf("missing lease_id for message %s", message.ID)
@@ -390,7 +472,7 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 		return fmt.Errorf("failed to marshal ack payload: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", ackURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, ackURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create ack request: %w", err)
 	}
@@ -406,6 +488,7 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		logHTTPErrorResponse(q.logger, "queue ack failed", http.MethodPost, ackEndpoint, resp.StatusCode, resp.Header.Get("Allow"), b)
 		return fmt.Errorf("ack request failed: status=%d, body_sha256=%s", resp.StatusCode, logredact.SHA256Hex(b))
 	}
 

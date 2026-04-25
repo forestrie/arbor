@@ -86,6 +86,55 @@ func TestParseLogIDFromObjectPath(t *testing.T) {
 	}
 }
 
+func TestCloudflareQueueAPIBase(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{
+			in:   "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid",
+			want: "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid",
+		},
+		{
+			in:   "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid/",
+			want: "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid",
+		},
+		{
+			in:   "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid/messages",
+			want: "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid",
+		},
+		{
+			in:   "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid/messages/",
+			want: "https://api.cloudflare.com/client/v4/accounts/acc/queues/qid",
+		},
+	}
+	for _, tc := range cases {
+		got, err := cloudflareQueueAPIBase(tc.in)
+		if err != nil {
+			t.Fatalf("cloudflareQueueAPIBase(%q): %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("cloudflareQueueAPIBase(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if _, err := cloudflareQueueAPIBase(""); err == nil {
+		t.Fatalf("expected error for empty URL")
+	}
+}
+
+func TestPrintablePreview(t *testing.T) {
+	t.Parallel()
+	p := printablePreview([]byte(`{"errors":[{"code":10001}]}`), 200)
+	if p != `{"errors":[{"code":10001}]}` {
+		t.Fatalf("unexpected preview %q", p)
+	}
+	p2 := printablePreview([]byte("a\nb\xffc"), 10)
+	if p2 != "a b·c" {
+		t.Fatalf("unexpected preview %q", p2)
+	}
+}
+
 func TestParseLogIDAndMassifHeightFromObjectPath(t *testing.T) {
 	logID := uuid.New()
 	key := fmt.Sprintf("v2/merklelog/massifs/14/%s/0000000000000000.log", logID.String())
