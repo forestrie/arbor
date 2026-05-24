@@ -196,8 +196,6 @@ func CheckpointLog(
 			ctx,
 			svc.HTTPClient,
 			logger,
-			svc.Cfg.CustodianURL,
-			svc.Cfg.CustodianAppToken,
 			svc.Cfg.DelegationKeyCurve,
 			logIdHex,
 			mmrStart,

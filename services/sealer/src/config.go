@@ -32,7 +32,12 @@ type Config struct {
 	PollIntervalMax   time.Duration
 	VisibilityTimeout time.Duration
 
-	// Custodian configuration (per-log delegation signing)
+	// Delegation seams (pilot: Custodian adapters for trust root + issuer)
+	TrustRootURL          string
+	DelegationIssuerURL   string
+	DelegationIssuerToken string
+
+	// Deprecated migration aliases (fall back when seam URLs/tokens unset).
 	CustodianURL      string
 	CustodianAppToken string
 
@@ -140,6 +145,9 @@ func LoadConfig() Config {
 		VisibilityTimeout:                   getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		CustodianURL:       os.Getenv("CUSTODIAN_URL"),
 		CustodianAppToken:  os.Getenv("CUSTODIAN_APP_TOKEN"),
+		TrustRootURL:          os.Getenv("TRUST_ROOT_URL"),
+		DelegationIssuerURL:   os.Getenv("DELEGATION_ISSUER_URL"),
+		DelegationIssuerToken: os.Getenv("DELEGATION_ISSUER_TOKEN"),
 		DelegationKeyCurve: getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
 		R2URL:                               os.Getenv("R2_URL"),
 		R2Token:                             r2Token,
@@ -148,7 +156,20 @@ func LoadConfig() Config {
 		AWSRegion:                           getEnvOrDefault("AWS_REGION", "auto"),
 	}
 
+	cfg.applyDelegationSeamFallbacks()
 	return cfg
+}
+
+func (c *Config) applyDelegationSeamFallbacks() {
+	if c.TrustRootURL == "" {
+		c.TrustRootURL = c.CustodianURL
+	}
+	if c.DelegationIssuerURL == "" {
+		c.DelegationIssuerURL = c.CustodianURL
+	}
+	if c.DelegationIssuerToken == "" {
+		c.DelegationIssuerToken = c.CustodianAppToken
+	}
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {
@@ -158,6 +179,9 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL_MIN", c.PollIntervalMin)
 	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
+	logConfigValue(logger, "TRUST_ROOT_URL", c.TrustRootURL)
+	logConfigValue(logger, "DELEGATION_ISSUER_URL", c.DelegationIssuerURL)
+	logSecretDigest(logger, "DELEGATION_ISSUER_TOKEN", c.DelegationIssuerToken)
 	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
 	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
@@ -183,14 +207,20 @@ func (c Config) Validate() error {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
 
-	if c.CustodianURL == "" {
-		return fmt.Errorf("CUSTODIAN_URL is required")
+	if c.TrustRootURL == "" {
+		return fmt.Errorf("TRUST_ROOT_URL is required (or set CUSTODIAN_URL during migration)")
 	}
-	if err := validateHTTPSURL(c.CustodianURL); err != nil {
-		return fmt.Errorf("CUSTODIAN_URL is invalid: %w", err)
+	if err := validateHTTPSURL(c.TrustRootURL); err != nil {
+		return fmt.Errorf("TRUST_ROOT_URL is invalid: %w", err)
 	}
-	if c.CustodianAppToken == "" {
-		return fmt.Errorf("CUSTODIAN_APP_TOKEN is required")
+	if c.DelegationIssuerURL == "" {
+		return fmt.Errorf("DELEGATION_ISSUER_URL is required (or set CUSTODIAN_URL during migration)")
+	}
+	if err := validateHTTPSURL(c.DelegationIssuerURL); err != nil {
+		return fmt.Errorf("DELEGATION_ISSUER_URL is invalid: %w", err)
+	}
+	if c.DelegationIssuerToken == "" {
+		return fmt.Errorf("DELEGATION_ISSUER_TOKEN is required (or set CUSTODIAN_APP_TOKEN during migration)")
 	}
 	if _, err := delegationcert.ParseCurve(c.DelegationKeyCurve); err != nil {
 		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)

@@ -7,11 +7,14 @@ toolchain go1.24.4
 require (
 	cloud.google.com/go/iam v1.5.3
 	cloud.google.com/go/kms v1.25.0
+	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/veraison/go-cose v1.3.0
 	google.golang.org/api v0.256.0
 	google.golang.org/grpc v1.76.0
 )
+
+replace github.com/forestrie/arbor/services/pkgs/delegationcert => ../../pkgs/delegationcert
 
 require (
 	cloud.google.com/go v0.121.6 // indirect
