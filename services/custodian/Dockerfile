@@ -7,16 +7,19 @@ ARG BUILD_DATE=unknown
 
 RUN apk add --no-cache git ca-certificates tzdata
 
+# Build context is services/ (see taskfiles/service-custodian.yml)
 WORKDIR /build
 
-# Copy module files and download dependencies
-COPY src/go.mod src/go.sum* ./
+# Local replace: custodian/src/go.mod => ../../pkgs/delegationcert
+COPY pkgs/delegationcert ./pkgs/delegationcert
+
+WORKDIR /build/custodian/src
+
+COPY custodian/src/go.mod custodian/src/go.sum* ./
 RUN go mod download
 
-# Copy application source
-COPY src/ ./
+COPY custodian/src/ ./
 
-# Build the application
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
   -ldflags="-w -s -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
   -o custodian \
@@ -32,7 +35,7 @@ RUN addgroup -g 1000 custodian && \
 
 WORKDIR /app
 
-COPY --from=builder /build/custodian /app/custodian
+COPY --from=builder /build/custodian/src/custodian /app/custodian
 
 RUN chown -R custodian:custodian /app
 
