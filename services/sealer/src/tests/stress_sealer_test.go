@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -23,6 +24,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 
 	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
@@ -73,9 +76,12 @@ func Test_SealerCheckpointLog_racingCheckpointLogs_minio(t *testing.T) {
 	t.Cleanup(fakeCustodian.Close)
 
 	cfg := sealer.Config{
-		CustodianURL:       fakeCustodian.URL,
-		CustodianAppToken:  "test-custodian-token",
-		DelegationKeyCurve: "secp256r1",
+		TrustRootURL:          fakeCustodian.URL,
+		DelegationIssuerURL:   fakeCustodian.URL,
+		DelegationIssuerToken: "test-custodian-token",
+		CustodianURL:          fakeCustodian.URL,
+		CustodianAppToken:     "test-custodian-token",
+		DelegationKeyCurve:    "secp256r1",
 
 		R2URL: baseURL,
 
@@ -275,7 +281,19 @@ func runCheckpointLogs(
 	t.Helper()
 	ctx := t.Context()
 
-	leaseMgr := sealer.NewDelegationLeaseManager(0, 0)
+	leaseMgr := sealer.NewDelegationLeaseManager(
+		&sealer.CustodianPublicTrustRootClient{
+			BaseURL:    cfg.TrustRootURL,
+			HTTPClient: httpClient,
+		},
+		&sealer.HTTPDelegationIssuer{
+			BaseURL:    cfg.DelegationIssuerURL,
+			Token:      cfg.DelegationIssuerToken,
+			HTTPClient: httpClient,
+		},
+		0,
+		0,
+	)
 	svc := sealer.SealerService{
 		Cfg:          cfg,
 		HTTPClient:   httpClient,
@@ -409,6 +427,83 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 			return
 		}
 
+		// POST /api/delegations — issue delegation lease (CBOR)
+		if r.Method == http.MethodPost && r.URL.Path == "/api/delegations" {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 256*1024))
+			if err != nil {
+				http.Error(w, "read", http.StatusBadRequest)
+				return
+			}
+			var req delegationcert.DelegationIssueRequest
+			if err := cbor.Unmarshal(body, &req); err != nil {
+				http.Error(w, "cbor unmarshal", http.StatusBadRequest)
+				return
+			}
+			delegatedKey, curve, err := delegationcert.ParseDelegatedPublicKeyFromCBOR(req.DelegatedPublicKey)
+			if err != nil {
+				http.Error(w, "delegated key", http.StatusBadRequest)
+				return
+			}
+			kid, err := fakeKidFromECDSAPublicKey(&state.privateKey.PublicKey)
+			if err != nil {
+				http.Error(w, "kid", http.StatusInternalServerError)
+				return
+			}
+			logIdHex, err := fakeLogIDHexFromWire(req.LogID)
+			if err != nil {
+				http.Error(w, "log id", http.StatusBadRequest)
+				return
+			}
+			issuedAt := uint64(time.Now().Unix())
+			expiresAt := issuedAt + req.RequestedTTLSeconds
+			if expiresAt == issuedAt {
+				expiresAt = issuedAt + uint64((60 * time.Minute).Seconds())
+			}
+			delegationID := make([]byte, 16)
+			if len(req.RequestID) >= 16 {
+				copy(delegationID, req.RequestID[:16])
+			} else {
+				_, _ = rand.Read(delegationID)
+			}
+			tbs, err := delegationcert.BuildDelegationToBeSigned(curve, kid, delegationcert.DelegationInput{
+				LogID:        logIdHex,
+				MmrStart:     req.MMRStart,
+				MmrEnd:       req.MMREnd,
+				DelegatedKey: delegatedKey,
+				Constraints:  map[string]any{},
+				DelegationID: delegationID,
+				IssuedAt:     issuedAt,
+				ExpiresAt:    expiresAt,
+			})
+			if err != nil {
+				http.Error(w, "tbs", http.StatusInternalServerError)
+				return
+			}
+			rVal, sVal, err := ecdsa.Sign(rand.Reader, state.privateKey, tbs.SigStructureDigest)
+			if err != nil {
+				http.Error(w, "sign", http.StatusInternalServerError)
+				return
+			}
+			sig := make([]byte, 64)
+			rVal.FillBytes(sig[0:32])
+			sVal.FillBytes(sig[32:64])
+			certBytes, err := delegationcert.AssembleDelegationCert(tbs, sig)
+			if err != nil {
+				http.Error(w, "assemble", http.StatusInternalServerError)
+				return
+			}
+			resp := delegationcert.DelegationIssueResponse{
+				Version:     1,
+				IssuedAt:    int64(issuedAt),
+				ExpiresAt:   int64(expiresAt),
+				Certificate: certBytes,
+			}
+			respBytes, _ := cbor.Marshal(resp)
+			w.Header().Set("Content-Type", "application/cbor")
+			_, _ = w.Write(respBytes)
+			return
+		}
+
 		// Match POST /api/keys/<logIdHex>/sign - sign digest using CBOR
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sign") {
 			body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
@@ -447,4 +542,25 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 
 		http.NotFound(w, r)
 	}))
+}
+
+func fakeLogIDHexFromWire(logID []byte) (string, error) {
+	if len(logID) == 16 {
+		return hex.EncodeToString(logID), nil
+	}
+	if len(logID) == 32 {
+		return strings.ToLower(string(logID)), nil
+	}
+	return "", fmt.Errorf("invalid log id length")
+}
+
+func fakeKidFromECDSAPublicKey(pub *ecdsa.PublicKey) ([]byte, error) {
+	if pub == nil {
+		return nil, fmt.Errorf("nil public key")
+	}
+	uncompressed := elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+	sum := sha256.Sum256(uncompressed)
+	kid := make([]byte, 16)
+	copy(kid, sum[:16])
+	return kid, nil
 }

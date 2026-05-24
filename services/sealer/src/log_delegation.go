@@ -11,19 +11,15 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
+	"github.com/fxamacker/cbor/v2"
 )
 
-// RequestLogDelegationLease requests a delegation certificate for a specific log
-// by calling Custodian directly (no delegation-signer intermediary).
-//
-// This generates an ephemeral key pair locally, has Custodian sign a delegation
-// certificate for that key using the log's custody key, and returns a lease
-// containing the cert and ephemeral private key.
+// RequestLogDelegationLease obtains a verified delegation lease via issuer + trust root seams.
 func RequestLogDelegationLease(
 	ctx context.Context,
 	httpClient *HTTPClient,
-	custodianURL string,
-	appToken string,
+	trustRoot TrustRootClient,
+	issuer DelegationIssuer,
 	curveRaw string,
 	ttl time.Duration,
 	logIdHex string,
@@ -32,11 +28,11 @@ func RequestLogDelegationLease(
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is nil")
 	}
-	if strings.TrimSpace(custodianURL) == "" {
-		return nil, fmt.Errorf("custodian URL is empty")
+	if trustRoot == nil {
+		return nil, fmt.Errorf("trust root client is nil")
 	}
-	if strings.TrimSpace(appToken) == "" {
-		return nil, fmt.Errorf("app token is empty")
+	if issuer == nil {
+		return nil, fmt.Errorf("delegation issuer is nil")
 	}
 	if ttl <= 0 {
 		return nil, fmt.Errorf("ttl must be > 0")
@@ -50,119 +46,94 @@ func RequestLogDelegationLease(
 		return nil, err
 	}
 
-	now := time.Now().UTC()
-	issuedAtUnix := uint64(now.Unix())
-	expiresAtUnix := uint64(now.Add(ttl).Unix())
-
-	// Generate ephemeral key pair
-	var priv *ecdsa.PrivateKey
-	switch curve {
-	case delegationcert.Secp256r1:
-		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("generate P-256 key: %w", err)
-		}
-		priv = k
-	case delegationcert.Secp256k1:
-		k, err := secp256k1.GeneratePrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("generate secp256k1 key: %w", err)
-		}
-		priv = k.ToECDSA()
-	default:
-		return nil, fmt.Errorf("unsupported curve %q", curve)
-	}
-	pub := &priv.PublicKey
-
-	// Get custody key's public key from Custodian to derive kid
-	custodyPEM, custodyAlg, err := GetPublicKeyByLogID(ctx, httpClient, custodianURL, logIdHex)
+	priv, pub, err := generateEphemeralKey(curve)
 	if err != nil {
-		return nil, fmt.Errorf("get custody public key for log %s: %w", logIdHex, err)
+		return nil, err
 	}
 
-	// Verify algorithm matches curve
-	if !algMatchesCurve(custodyAlg, curve) {
-		return nil, fmt.Errorf("custody key alg %s doesn't match requested curve %s", custodyAlg, curve)
-	}
-
-	// Derive kid from custody public key
-	kid, err := KidFromPublicKeyPEM(custodyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("derive kid from custody key: %w", err)
-	}
-
-	// Build delegated key
 	x := make([]byte, 32)
 	y := make([]byte, 32)
 	pub.X.FillBytes(x)
 	pub.Y.FillBytes(y)
-
 	delegatedKey, err := delegationcert.NewDelegatedCoseKey(curve, x, y)
 	if err != nil {
 		return nil, fmt.Errorf("build delegated key: %w", err)
 	}
-
-	// Generate delegation ID
-	delegationID := make([]byte, 16)
-	if _, err := rand.Read(delegationID); err != nil {
-		return nil, fmt.Errorf("generate delegation ID: %w", err)
-	}
-
-	// Build delegation certificate
-	input := delegationcert.DelegationInput{
-		LogID:        logIdHex,
-		MmrStart:     mmrStart,
-		MmrEnd:       mmrEnd,
-		DelegatedKey: delegatedKey,
-		Constraints:  map[string]any{},
-		DelegationID: delegationID,
-		IssuedAt:     issuedAtUnix,
-		ExpiresAt:    expiresAtUnix,
-	}
-
-	tbs, err := delegationcert.BuildDelegationToBeSigned(curve, kid, input)
+	delegatedPubCBOR, err := cbor.Marshal(delegatedKey.ToCBORMap())
 	if err != nil {
-		return nil, fmt.Errorf("build delegation to-be-signed: %w", err)
+		return nil, fmt.Errorf("encode delegated public key: %w", err)
 	}
 
-	// Sign via Custodian
-	signature, err := SignDigestByLogID(ctx, httpClient, custodianURL, appToken, logIdHex, tbs.SigStructureDigest)
+	logIDBytes, err := decodeLogIDHex(logIdHex)
 	if err != nil {
-		return nil, fmt.Errorf("sign delegation: %w", err)
+		return nil, err
 	}
 
-	// Assemble final certificate
-	certBytes, err := delegationcert.AssembleDelegationCert(tbs, signature)
+	algorithm := "ES256"
+	if curve == delegationcert.Secp256k1 {
+		algorithm = "KS256"
+	}
+
+	issuerResp, err := issuer.IssueForLog(ctx, IssuerLeaseRequest{
+		LogIDBytes:          logIDBytes,
+		LogIdHex:            logIdHex,
+		MMRStart:            mmrStart,
+		MMREnd:              mmrEnd,
+		Curve:               curve,
+		Algorithm:           algorithm,
+		DelegatedPublicKey:  delegatedPubCBOR,
+		RequestedTTLSeconds: uint64(ttl.Seconds()),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("assemble delegation cert: %w", err)
+		return nil, fmt.Errorf("delegation issuer: %w", err)
 	}
 
-	// Parse for validation and info extraction
-	info, err := delegationcert.ParseCertificate(certBytes)
+	rootKey, err := trustRoot.LogSigningKey(ctx, logIdHex)
 	if err != nil {
-		return nil, fmt.Errorf("parse delegation cert: %w", err)
+		return nil, fmt.Errorf("trust root: %w", err)
 	}
 
-	// Validate the certificate looks correct
-	if info.PayloadLogID != logIdHex {
-		return nil, fmt.Errorf("delegation cert log_id mismatch: got %s, expected %s", info.PayloadLogID, logIdHex)
+	info, err := VerifyDelegationLease(rootKey, issuerResp, LeaseVerificationInput{
+		LogIdHex:            logIdHex,
+		MMRStart:            mmrStart,
+		MMREnd:              mmrEnd,
+		Curve:               curve,
+		DelegatedPublicKey:  pub,
+		RequestedTTLSeconds: uint64(ttl.Seconds()),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("verify delegation lease: %w", err)
 	}
-	if info.PayloadExpiresAtUnix == 0 {
-		return nil, fmt.Errorf("delegation certificate missing expires_at")
-	}
-
-	issuedAt := time.Unix(int64(info.PayloadIssuedAtUnix), 0).UTC()
-	expiresAt := time.Unix(int64(info.PayloadExpiresAtUnix), 0).UTC()
 
 	return &DelegationLease{
-		CertBytes:  certBytes,
+		CertBytes:  issuerResp.Certificate,
 		Info:       info,
 		Curve:      curve,
 		PrivateKey: priv,
 		PublicKey:  pub,
-		IssuedAt:   issuedAt,
-		ExpiresAt:  expiresAt,
+		IssuedAt:   issuerResp.IssuedAt,
+		ExpiresAt:  issuerResp.ExpiresAt,
 	}, nil
+}
+
+func generateEphemeralKey(curve delegationcert.Curve) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
+	switch curve {
+	case delegationcert.Secp256r1:
+		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate P-256 key: %w", err)
+		}
+		return k, &k.PublicKey, nil
+	case delegationcert.Secp256k1:
+		k, err := secp256k1.GeneratePrivateKey()
+		if err != nil {
+			return nil, nil, fmt.Errorf("generate secp256k1 key: %w", err)
+		}
+		priv := k.ToECDSA()
+		return priv, &priv.PublicKey, nil
+	default:
+		return nil, nil, fmt.Errorf("unsupported curve %q", curve)
+	}
 }
 
 // algMatchesCurve checks if a Custodian algorithm string matches the curve.

@@ -29,6 +29,8 @@ type leaseEntry struct {
 // DelegationLeaseManager manages per-log, time-limited delegation leases
 // for the sealer process. Uses LRU eviction when the cache is full.
 type DelegationLeaseManager struct {
+	trustRoot   TrustRootClient
+	issuer      DelegationIssuer
 	mu          sync.Mutex
 	leases      map[string]*list.Element // logIdHex -> list element
 	lru         *list.List               // LRU order (front = most recent)
@@ -37,7 +39,11 @@ type DelegationLeaseManager struct {
 	renewBefore time.Duration
 }
 
-func NewDelegationLeaseManager(ttl, renewBefore time.Duration) *DelegationLeaseManager {
+func NewDelegationLeaseManager(
+	trustRoot TrustRootClient,
+	issuer DelegationIssuer,
+	ttl, renewBefore time.Duration,
+) *DelegationLeaseManager {
 	if ttl <= 0 {
 		ttl = defaultDelegationTTL
 	}
@@ -45,6 +51,8 @@ func NewDelegationLeaseManager(ttl, renewBefore time.Duration) *DelegationLeaseM
 		renewBefore = defaultRenewBefore
 	}
 	return &DelegationLeaseManager{
+		trustRoot:   trustRoot,
+		issuer:      issuer,
 		leases:      make(map[string]*list.Element),
 		lru:         list.New(),
 		maxLeases:   defaultMaxLeases,
@@ -55,19 +63,21 @@ func NewDelegationLeaseManager(ttl, renewBefore time.Duration) *DelegationLeaseM
 
 // EnsureValidForLog returns a delegation lease for a specific log that is not
 // expired and has at least renewBefore remaining lifetime. If no such lease
-// exists, it requests a new one from Custodian.
+// exists, it requests a new one from the delegation issuer and verifies it
+// against the trust root before caching.
 func (m *DelegationLeaseManager) EnsureValidForLog(
 	ctx context.Context,
 	httpClient *HTTPClient,
 	logger *slog.Logger,
-	custodianURL string,
-	appToken string,
 	curve string,
 	logIdHex string,
 	mmrStart, mmrEnd uint64,
 ) (*DelegationLease, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if m.trustRoot == nil || m.issuer == nil {
+		return nil, fmt.Errorf("delegation seams not configured")
 	}
 
 	m.mu.Lock()
@@ -90,9 +100,8 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		delete(m.leases, logIdHex)
 	}
 
-	// Request new lease from Custodian
 	lease, err := RequestLogDelegationLease(
-		ctx, httpClient, custodianURL, appToken, curve, m.ttl,
+		ctx, httpClient, m.trustRoot, m.issuer, curve, m.ttl,
 		logIdHex, mmrStart, mmrEnd,
 	)
 	if err != nil {

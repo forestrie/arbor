@@ -57,13 +57,25 @@ func main() {
 	defer stop()
 
 	httpClient := sealer.NewHTTPClient(logger)
-	leaseMgr := sealer.NewDelegationLeaseManager(0, 0)
+	trustRoot := &sealer.CustodianPublicTrustRootClient{
+		BaseURL:    cfg.TrustRootURL,
+		HTTPClient: httpClient,
+	}
+	issuer := &sealer.HTTPDelegationIssuer{
+		BaseURL:    cfg.DelegationIssuerURL,
+		Token:      cfg.DelegationIssuerToken,
+		HTTPClient: httpClient,
+	}
+	leaseMgr := sealer.NewDelegationLeaseManager(trustRoot, issuer, 0, 0)
 
-	// Log Custodian configuration (per-log delegation leases are obtained lazily)
-	slog.Info("sealer configured for per-log delegation via Custodian",
-		"custodian_url", cfg.CustodianURL,
+	slog.Info("sealer configured for per-log delegation",
+		"trust_root_url", cfg.TrustRootURL,
+		"delegation_issuer_url", cfg.DelegationIssuerURL,
 		"delegation_key_curve", cfg.DelegationKeyCurve,
 	)
+	if cfg.CustodianURL != "" && (cfg.TrustRootURL == cfg.CustodianURL || cfg.DelegationIssuerURL == cfg.CustodianURL) {
+		slog.Warn("CUSTODIAN_URL is deprecated; use TRUST_ROOT_URL and DELEGATION_ISSUER_URL")
+	}
 
 	// Create metrics registry and metrics
 	metricsRegistry := prometheus.NewRegistry()
