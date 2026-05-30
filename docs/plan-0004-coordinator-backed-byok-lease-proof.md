@@ -1,6 +1,6 @@
 # Coordinator-backed BYOK lease proof
 
-**Status:** DRAFT  
+**Status:** ACCEPTED  
 **Date:** 2026-05-25  
 **Related:** [plan-0003](plan-0003-non-custodial-checkpoint-support.md),
 [canopy plan-0021](../../canopy/docs/plans/plan-0021-delegation-coordinator-apis.md),
@@ -96,3 +96,47 @@ Promote `HTTPTrustRootClient` to production wiring once `services/univocity`
 exposes a non-mock `/api/logs/{logId}/public-root`. Then promote the Canopy
 resolver to a production `UnivocityTrustRootAdapter`, and move Mandate from
 bootstrap signing to real COSE delegation certificate assembly.
+
+## Verification record
+
+**Date:** 2026-05-30
+
+- Arbor PR [#7](https://github.com/forestrie/arbor/pull/7) merged via merge
+  commit `29f08dc`. Branch `fix/custodian-docker-delegationcert`.
+  - `681f58b` HTTP trust-root seam + coordinator proxy
+  - `5f8f320` single-source-of-truth routing + drop chain fields
+- Arbor pre-flight (local): `go vet ./services/...` clean across sealer,
+  custodian, univocity, delegationcert; `task test:unit` and
+  `task test:integration` both green.
+- GitHub Actions Build and Deploy run
+  [#26683837980](https://github.com/forestrie/arbor/actions/runs/26683837980)
+  succeeded. Pushed `ranger`, `scout`, `sealer`, `custodian` images at tag
+  `main-29f08dc-411`.
+- Flux ImageUpdateAutomation pushed 4 bumps to
+  `arbor-flux/flux/image-updates`, each touching only `clusters/ledger-a/`;
+  arbor-flux PR
+  [#12](https://github.com/forestrie/arbor-flux/pull/12) merged via merge
+  commit `93ce464`.
+- `kubectl -n forestrie-a` confirms `sealer` and `custodian` Deployments
+  rolled out to tag `main-29f08dc-411`. Startup logs show:
+  - `sealer`: `TRUST_ROOT_URL=http://custodian:9092`,
+    `DELEGATION_ISSUER_URL=http://custodian:9092`,
+    `CUSTODIAN_URL` retained as deprecated alias with a warning.
+  - `custodian`: `DELEGATION_COORDINATOR_URL=https://coordinator.forest-2.forestrie.dev`,
+    `DELEGATION_COORDINATOR_TOKEN` populated.
+- Canopy e2e against `api-forest-2.forestrie.dev` (ledger-a catalog
+  hostname):
+  - `task test:e2e:doppler` → 13 passed (3 integration, 2 custodian, 8
+    system) covering bootstrap grant mint, register-grant via
+    forestrie-ingress, child auth grant, and auth→data log delegation
+    chain.
+  - `pnpm --filter @canopy/api-e2e test:e2e:coordinator` → 12 passed
+    covering Phase 3 coordinator APIs, BYOK material miss/store/issue
+    flow, custodian pre-wallet proxy route, and signing-route wallet
+    marking.
+  - `E2E_COORDINATOR_SEALER_STRETCH=1` stretch run of
+    `coordinator-delegation-issuance.spec.ts` → 2 passed (dev + prod
+    projects). Proves: mark wallet-managed → POST `/api/delegations`
+    miss creates pending entry → POST runner-signed BYOK material
+    clears pending → subsequent POST `/api/delegations` returns the
+    stored material via custodian proxy.
