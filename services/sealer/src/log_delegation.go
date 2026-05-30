@@ -74,9 +74,17 @@ func RequestLogDelegationLease(
 		algorithm = "KS256"
 	}
 
+	rootKey, err := trustRoot.LogSigningKey(ctx, logIdHex)
+	if err != nil {
+		return nil, fmt.Errorf("trust root: %w", err)
+	}
+
 	issuerResp, err := issuer.IssueForLog(ctx, IssuerLeaseRequest{
 		LogIDBytes:          logIDBytes,
 		LogIdHex:            logIdHex,
+		Domain:              rootKey.Domain,
+		ChainID:             rootKey.ChainID,
+		ContractAddress:     rootKey.ContractAddress,
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,
@@ -86,11 +94,6 @@ func RequestLogDelegationLease(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("delegation issuer: %w", err)
-	}
-
-	rootKey, err := trustRoot.LogSigningKey(ctx, logIdHex)
-	if err != nil {
-		return nil, fmt.Errorf("trust root: %w", err)
 	}
 
 	info, err := VerifyDelegationLease(rootKey, issuerResp, LeaseVerificationInput{

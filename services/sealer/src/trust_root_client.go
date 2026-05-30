@@ -7,8 +7,11 @@ import (
 
 // LogSigningKey is the expected log signing (trust-root) public key material.
 type LogSigningKey struct {
-	PublicKeyPEM string
-	Alg          string
+	PublicKeyPEM    string
+	Alg             string
+	Domain          string
+	ChainID         string
+	ContractAddress string
 }
 
 // TrustRootClient reads the expected log signing key for delegation verification.
