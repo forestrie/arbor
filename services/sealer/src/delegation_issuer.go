@@ -104,6 +104,9 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 		return nil, fmt.Errorf("read delegation issuer response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if isDelegationPendingResponse(resp.StatusCode, resp.Header.Get("Content-Type"), respBytes) {
+			return nil, ErrDelegationPending
+		}
 		return nil, fmt.Errorf(
 			"delegation issuer returned status=%d: body_sha256=%s",
 			resp.StatusCode,
@@ -124,4 +127,22 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 		IssuedAt:    time.Unix(issueResp.IssuedAt, 0).UTC(),
 		ExpiresAt:   time.Unix(issueResp.ExpiresAt, 0).UTC(),
 	}, nil
+}
+
+func isDelegationPendingResponse(status int, contentType string, body []byte) bool {
+	if status != http.StatusServiceUnavailable {
+		return false
+	}
+	if !strings.Contains(strings.ToLower(contentType), "application/problem+cbor") {
+		return false
+	}
+	var problem map[string]any
+	if err := cbor.Unmarshal(body, &problem); err != nil {
+		return false
+	}
+	detail, _ := problem["detail"].(string)
+	return strings.Contains(
+		strings.ToLower(detail),
+		"delegation material not found",
+	)
 }

@@ -25,6 +25,31 @@ func RequestLogDelegationLease(
 	logIdHex string,
 	mmrStart, mmrEnd uint64,
 ) (*DelegationLease, error) {
+	return requestLogDelegationLeaseWithKeyPair(
+		ctx, httpClient, trustRoot, issuer, curveRaw, ttl,
+		logIdHex, mmrStart, mmrEnd, nil,
+	)
+}
+
+// DelegatedKeyPair is the private/public checkpoint keypair submitted for
+// issuer authorization. BYOK pending retries reuse this process-local keypair
+// until a lease is issued or the pending cache expires.
+type DelegatedKeyPair struct {
+	Private *ecdsa.PrivateKey
+	Public  *ecdsa.PublicKey
+}
+
+func requestLogDelegationLeaseWithKeyPair(
+	ctx context.Context,
+	httpClient *HTTPClient,
+	trustRoot TrustRootClient,
+	issuer DelegationIssuer,
+	curveRaw string,
+	ttl time.Duration,
+	logIdHex string,
+	mmrStart, mmrEnd uint64,
+	keyPair *DelegatedKeyPair,
+) (*DelegationLease, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is nil")
 	}
@@ -46,20 +71,26 @@ func RequestLogDelegationLease(
 		return nil, err
 	}
 
-	priv, pub, err := generateEphemeralKey(curve)
-	if err != nil {
-		return nil, err
+	if keyPair == nil {
+		priv, pub, err := generateEphemeralKey(curve)
+		if err != nil {
+			return nil, err
+		}
+		keyPair = &DelegatedKeyPair{Private: priv, Public: pub}
+	}
+	if keyPair.Private == nil || keyPair.Public == nil {
+		return nil, fmt.Errorf("delegated keypair is incomplete")
 	}
 
 	x := make([]byte, 32)
 	y := make([]byte, 32)
-	pub.X.FillBytes(x)
-	pub.Y.FillBytes(y)
+	keyPair.Public.X.FillBytes(x)
+	keyPair.Public.Y.FillBytes(y)
 	delegatedKey, err := delegationcert.NewDelegatedCoseKey(curve, x, y)
 	if err != nil {
 		return nil, fmt.Errorf("build delegated key: %w", err)
 	}
-	delegatedPubCBOR, err := cbor.Marshal(delegatedKey.ToCBORMap())
+	delegatedPubCBOR, err := marshalDelegatedPublicKeyCBOR(delegatedKey)
 	if err != nil {
 		return nil, fmt.Errorf("encode delegated public key: %w", err)
 	}
@@ -98,7 +129,7 @@ func RequestLogDelegationLease(
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,
-		DelegatedPublicKey:  pub,
+		DelegatedPublicKey:  keyPair.Public,
 		RequestedTTLSeconds: uint64(ttl.Seconds()),
 	})
 	if err != nil {
@@ -109,11 +140,19 @@ func RequestLogDelegationLease(
 		CertBytes:  issuerResp.Certificate,
 		Info:       info,
 		Curve:      curve,
-		PrivateKey: priv,
-		PublicKey:  pub,
+		PrivateKey: keyPair.Private,
+		PublicKey:  keyPair.Public,
 		IssuedAt:   issuerResp.IssuedAt,
 		ExpiresAt:  issuerResp.ExpiresAt,
 	}, nil
+}
+
+func marshalDelegatedPublicKeyCBOR(key *delegationcert.DelegatedCoseKey) ([]byte, error) {
+	encMode, err := cbor.EncOptions{Sort: cbor.SortCanonical}.EncMode()
+	if err != nil {
+		return nil, fmt.Errorf("create delegated key cbor mode: %w", err)
+	}
+	return encMode.Marshal(key.ToCBORMap())
 }
 
 func generateEphemeralKey(curve delegationcert.Curve) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {

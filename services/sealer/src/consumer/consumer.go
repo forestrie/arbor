@@ -398,9 +398,9 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				if q.metrics != nil {
 					q.metrics.ObserveCheckpointDuration(time.Since(checkpointStart).Seconds())
 				}
-				if errors.Is(err, sealer.ErrDelegationExpired) {
-					// Expected retry path: do not ack messages for this log so the queue will redeliver.
-					q.logger.Info("log checkpointing aborted due to expiring delegation; will retry",
+				if errors.Is(err, sealer.ErrDelegationExpired) || errors.Is(err, sealer.ErrDelegationPending) {
+					// Expected retry paths: do not ack messages for this log so the queue will redeliver.
+					q.logger.Info("log checkpointing deferred; will retry",
 						"logID", keyFromLogIDBytes(w.logIDBytes),
 						"massifHeight", w.massifHeight,
 						"error", err,

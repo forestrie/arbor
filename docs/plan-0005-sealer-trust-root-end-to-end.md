@@ -4,6 +4,7 @@
 **Date:** 2026-05-30  
 **Related:** [plan-0003](plan-0003-non-custodial-checkpoint-support.md),
 [plan-0004 (ACCEPTED)](plan-0004-coordinator-backed-byok-lease-proof.md),
+[plan-0006](plan-0006-byok-checkpoint-seal-end-to-end.md),
 [canopy plan-0023 (ACCEPTED)](../canopy/docs/plans/plan-0023-coordinator-public-root.md)
 
 ## Goal
@@ -14,13 +15,14 @@ reads `TRUST_ROOT_URL` from the public delegation-coordinator
 404, and keeps delegation issuance on in-cluster Custodian (proxy to coordinator
 for wallet-managed logs).
 
-North-star (plan-0003): full BYOK checkpoint seal — see plan-0003 and follow-on
-plan for gap 4 (Ranger → Sealer → MMRS).
+North-star (plan-0003): full BYOK checkpoint seal — continued in
+[plan-0006](plan-0006-byok-checkpoint-seal-end-to-end.md) for gap 4
+(Ranger → Sealer → MMRS).
 
 ## Scope status
 
 | § | Item | Status |
-|---|------|--------|
+| --- | ---- | ------ |
 | 1 | Coordinator `public-root` endpoint | **Done** (canopy plan-0023) |
 | 2 | `SelectingTrustRootClient` + `HTTPTrustRootClient` bearer | **Done** |
 | 3 | Deployed BYOK lease stretch (`E2E_COORDINATOR_SEALER_STRETCH=1`) | **Done** (Go test) |
@@ -40,7 +42,8 @@ plan for gap 4 (Ranger → Sealer → MMRS).
 
 ## Out of scope (this plan)
 
-- Full Ranger → Sealer → MMRS BYOK seal e2e (next plan toward plan-0003 north-star).
+- Full Ranger → Sealer → MMRS BYOK seal e2e
+  ([plan-0006](plan-0006-byok-checkpoint-seal-end-to-end.md)).
 - Univocity contracts and on-chain root publication.
 - Canopy receipt authority coordinator-first (canopy plan-0024 suggested).
 - SCRAPI non-custodial bootstrap grant.
@@ -69,5 +72,6 @@ doppler run --project canopy --config dev -- \
 ## Follow-up
 
 Replace coordinator KV `public-root` with Univocity chain-derived roots (same CBOR
-shape). Enable full BYOK checkpoint seal on deployed stack once Sealer trust +
-delegation path is stable in production.
+shape). Continue from the deployed BYOK seal proof in
+[plan-0006](plan-0006-byok-checkpoint-seal-end-to-end.md) toward on-chain
+checkpoint publishing.

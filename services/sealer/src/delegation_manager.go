@@ -3,10 +3,13 @@ package sealer
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 )
 
 const (
@@ -26,6 +29,11 @@ type leaseEntry struct {
 	lease *DelegationLease
 }
 
+type pendingKeyEntry struct {
+	keyPair   *DelegatedKeyPair
+	createdAt time.Time
+}
+
 // DelegationLeaseManager manages per-log, time-limited delegation leases
 // for the sealer process. Uses LRU eviction when the cache is full.
 type DelegationLeaseManager struct {
@@ -33,7 +41,8 @@ type DelegationLeaseManager struct {
 	issuer      DelegationIssuer
 	mu          sync.Mutex
 	leases      map[string]*list.Element // logIdHex -> list element
-	lru         *list.List               // LRU order (front = most recent)
+	pendingKeys map[string]*pendingKeyEntry
+	lru         *list.List // LRU order (front = most recent)
 	maxLeases   int
 	ttl         time.Duration
 	renewBefore time.Duration
@@ -54,6 +63,7 @@ func NewDelegationLeaseManager(
 		trustRoot:   trustRoot,
 		issuer:      issuer,
 		leases:      make(map[string]*list.Element),
+		pendingKeys: make(map[string]*pendingKeyEntry),
 		lru:         list.New(),
 		maxLeases:   defaultMaxLeases,
 		ttl:         ttl,
@@ -100,11 +110,19 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		delete(m.leases, logIdHex)
 	}
 
-	lease, err := RequestLogDelegationLease(
+	keyPair, err := m.pendingKeyForLogLocked(curve, logIdHex, now)
+	if err != nil {
+		return nil, err
+	}
+
+	lease, err := requestLogDelegationLeaseWithKeyPair(
 		ctx, httpClient, m.trustRoot, m.issuer, curve, m.ttl,
-		logIdHex, mmrStart, mmrEnd,
+		logIdHex, mmrStart, mmrEnd, keyPair,
 	)
 	if err != nil {
+		if !errors.Is(err, ErrDelegationPending) {
+			delete(m.pendingKeys, logIdHex)
+		}
 		return nil, err
 	}
 
@@ -144,12 +162,41 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 	entry := &leaseEntry{key: logIdHex, lease: lease}
 	elem := m.lru.PushFront(entry)
 	m.leases[logIdHex] = elem
+	delete(m.pendingKeys, logIdHex)
 
 	return lease, nil
 }
 
 func (m *DelegationLeaseManager) RenewBefore() time.Duration {
 	return m.renewBefore
+}
+
+func (m *DelegationLeaseManager) pendingKeyForLogLocked(
+	curveRaw string,
+	logIdHex string,
+	now time.Time,
+) (*DelegatedKeyPair, error) {
+	if entry, ok := m.pendingKeys[logIdHex]; ok {
+		if now.Sub(entry.createdAt) < m.ttl {
+			return entry.keyPair, nil
+		}
+		delete(m.pendingKeys, logIdHex)
+	}
+
+	curve, err := delegationcert.ParseCurve(curveRaw)
+	if err != nil {
+		return nil, err
+	}
+	priv, pub, err := generateEphemeralKey(curve)
+	if err != nil {
+		return nil, err
+	}
+	keyPair := &DelegatedKeyPair{Private: priv, Public: pub}
+	m.pendingKeys[logIdHex] = &pendingKeyEntry{
+		keyPair:   keyPair,
+		createdAt: now,
+	}
+	return keyPair, nil
 }
 
 // NOTE: We intentionally avoid package-level global state. Construct a
