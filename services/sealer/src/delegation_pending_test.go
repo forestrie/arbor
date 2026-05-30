@@ -101,36 +101,43 @@ func TestDelegationLeaseManager_RefreshesPendingKeyAfterTTL(t *testing.T) {
 }
 
 func TestHTTPDelegationIssuer_MapsMaterialMissing503ToPending(t *testing.T) {
-	body, err := cbor.Marshal(map[string]any{
-		"type":   "about:blank",
-		"title":  "Service Unavailable",
-		"status": 503,
-		"detail": "delegation material not found for requested range and key",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/problem+cbor")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write(body)
-	}))
-	defer srv.Close()
+	for _, detail := range []string{
+		"delegation material not found for requested range and key",
+		"delegation material not available",
+	} {
+		t.Run(detail, func(t *testing.T) {
+			body, err := cbor.Marshal(map[string]any{
+				"type":   "about:blank",
+				"title":  "Service Unavailable",
+				"status": 503,
+				"detail": detail,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/problem+cbor")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write(body)
+			}))
+			defer srv.Close()
 
-	issuer := &HTTPDelegationIssuer{
-		BaseURL:    srv.URL,
-		Token:      "token",
-		HTTPClient: NewHTTPClient(nil),
-	}
-	_, err = issuer.IssueForLog(context.Background(), IssuerLeaseRequest{
-		LogIDBytes:          make([]byte, 16),
-		MMRStart:            0,
-		MMREnd:              1,
-		Algorithm:           "ES256",
-		DelegatedPublicKey:  []byte{1, 2, 3},
-		RequestedTTLSeconds: 3600,
-	})
-	if !errors.Is(err, ErrDelegationPending) {
-		t.Fatalf("got %v want ErrDelegationPending", err)
+			issuer := &HTTPDelegationIssuer{
+				BaseURL:    srv.URL,
+				Token:      "token",
+				HTTPClient: NewHTTPClient(nil),
+			}
+			_, err = issuer.IssueForLog(context.Background(), IssuerLeaseRequest{
+				LogIDBytes:          make([]byte, 16),
+				MMRStart:            0,
+				MMREnd:              1,
+				Algorithm:           "ES256",
+				DelegatedPublicKey:  []byte{1, 2, 3},
+				RequestedTTLSeconds: 3600,
+			})
+			if !errors.Is(err, ErrDelegationPending) {
+				t.Fatalf("got %v want ErrDelegationPending", err)
+			}
+		})
 	}
 }

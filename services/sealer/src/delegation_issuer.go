@@ -141,8 +141,7 @@ func isDelegationPendingResponse(status int, contentType string, body []byte) bo
 		return false
 	}
 	detail, _ := problem["detail"].(string)
-	return strings.Contains(
-		strings.ToLower(detail),
-		"delegation material not found",
-	)
+	detail = strings.ToLower(detail)
+	return strings.Contains(detail, "delegation material not found") ||
+		strings.Contains(detail, "delegation material not available")
 }
