@@ -57,10 +57,7 @@ func main() {
 	defer stop()
 
 	httpClient := sealer.NewHTTPClient(logger)
-	trustRoot := &sealer.CustodianPublicTrustRootClient{
-		BaseURL:    cfg.TrustRootURL,
-		HTTPClient: httpClient,
-	}
+	trustRoot := sealer.NewSelectingTrustRootClient(cfg, httpClient)
 	issuer := &sealer.HTTPDelegationIssuer{
 		BaseURL:    cfg.DelegationIssuerURL,
 		Token:      cfg.DelegationIssuerToken,
