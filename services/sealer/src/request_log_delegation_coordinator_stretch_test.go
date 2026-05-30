@@ -67,7 +67,12 @@ func TestRequestLogDelegationLease_BYOKCoordinatorStretch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	delegatedPubCBOR, err := buildTestDelegatedPublicKeyCBOR(delegationcert.Secp256r1)
+	curve := delegationcert.Secp256r1
+	_, delegatedPub, err := generateEphemeralKey(curve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delegatedPubCBOR, err := delegatedPublicKeyCBOR(curve, delegatedPub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,24 +108,41 @@ func TestRequestLogDelegationLease_BYOKCoordinatorStretch(t *testing.T) {
 		HTTPClient: httpClient,
 	}
 
-	lease, err := RequestLogDelegationLease(
-		ctx,
-		httpClient,
-		trustRoot,
-		issuer,
-		"secp256r1",
-		30*time.Minute,
-		logHex32,
-		mmrStart,
-		mmrEnd,
-	)
+	logIDBytes, err := decodeLogIDHex(logHex32)
 	if err != nil {
-		t.Fatalf("expected deployed BYOK lease: %v", err)
+		t.Fatal(err)
 	}
-	if len(lease.CertBytes) == 0 {
+	rootKey, err := trustRoot.LogSigningKey(ctx, logHex32)
+	if err != nil {
+		t.Fatalf("trust root: %v", err)
+	}
+	issuerResp, err := issuer.IssueForLog(ctx, IssuerLeaseRequest{
+		LogIDBytes:          logIDBytes,
+		LogIdHex:            logHex32,
+		MMRStart:            mmrStart,
+		MMREnd:              mmrEnd,
+		Curve:               curve,
+		Algorithm:           "ES256",
+		DelegatedPublicKey:  delegatedPubCBOR,
+		RequestedTTLSeconds: 1800,
+	})
+	if err != nil {
+		t.Fatalf("delegation issuer: %v", err)
+	}
+	if _, err := VerifyDelegationLease(rootKey, issuerResp, LeaseVerificationInput{
+		LogIdHex:            logHex32,
+		MMRStart:            mmrStart,
+		MMREnd:              mmrEnd,
+		Curve:               curve,
+		DelegatedPublicKey:  delegatedPub,
+		RequestedTTLSeconds: 1800,
+	}); err != nil {
+		t.Fatalf("verify delegation lease: %v", err)
+	}
+	if len(issuerResp.Certificate) == 0 {
 		t.Fatal("expected non-empty lease certificate")
 	}
-	if !bytes.Equal(lease.CertBytes, certBytes) {
+	if !bytes.Equal(issuerResp.Certificate, certBytes) {
 		t.Fatal("lease certificate does not match uploaded BYOK material")
 	}
 }
@@ -220,11 +242,7 @@ func normalizeForestrieHexID32(raw string) (string, error) {
 	return s, nil
 }
 
-func buildTestDelegatedPublicKeyCBOR(curve delegationcert.Curve) ([]byte, error) {
-	_, pub, err := generateEphemeralKey(curve)
-	if err != nil {
-		return nil, err
-	}
+func delegatedPublicKeyCBOR(curve delegationcert.Curve, pub *ecdsa.PublicKey) ([]byte, error) {
 	x := make([]byte, 32)
 	y := make([]byte, 32)
 	pub.X.FillBytes(x)
