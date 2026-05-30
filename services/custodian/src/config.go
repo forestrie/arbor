@@ -37,6 +37,14 @@ type Config struct {
 	// LogIDCacheSize caps in-memory log id → key id LRU.
 	// Default 1024 when LOG_ID_CACHE_SIZE is unset; set env to "0" to disable.
 	LogIDCacheSize int
+
+	// DelegationCoordinatorURL is the base URL for the delegation-coordinator Worker
+	// (e.g. https://coordinator-dev.forestrie.dev). When set, wallet-managed logs and
+	// local-key misses proxy POST /api/delegations to the coordinator.
+	DelegationCoordinatorURL string
+	// DelegationCoordinatorToken is the Bearer token for coordinator management/issue APIs.
+	// Defaults to APP_TOKEN when unset.
+	DelegationCoordinatorToken string
 }
 
 const defaultLogIDCacheSize = 1024
@@ -111,6 +119,11 @@ func LoadConfig() Config {
 		GCPLocation:             getEnvOrDefault("GCP_LOCATION", "europe-west2"),
 		RootLogID:               strings.TrimSpace(os.Getenv("ROOT_LOG_ID")),
 		LogIDCacheSize:          logCache,
+		DelegationCoordinatorURL: strings.TrimRight(
+			strings.TrimSpace(os.Getenv("DELEGATION_COORDINATOR_URL")),
+			"/",
+		),
+		DelegationCoordinatorToken: strings.TrimSpace(os.Getenv("DELEGATION_COORDINATOR_TOKEN")),
 	}
 }
 
@@ -129,6 +142,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "GCP_LOCATION", "value", c.GCPLocation)
 	logger.Warn("config value", "name", "ROOT_LOG_ID", "value", c.RootLogID)
 	logger.Warn("config value", "name", "LOG_ID_CACHE_SIZE", "value", c.LogIDCacheSize)
+	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_URL", "value", c.DelegationCoordinatorURL)
+	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_TOKEN", "value", secretDigest(c.DelegationCoordinatorToken))
 }
 
 func secretDigest(value string) string {
