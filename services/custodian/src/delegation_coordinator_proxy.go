@@ -31,7 +31,9 @@ func (a *API) coordinatorConfigured() bool {
 }
 
 // proxyDelegationIssue forwards CBOR body to coordinator POST /api/delegations.
-func (a *API) proxyDelegationIssue(ctx context.Context, body []byte, inboundAuth string) (*delegationcert.DelegationIssueResponse, int, error) {
+// inboundAuth is ignored for the outbound coordinator call; coordinator auth uses
+// DELEGATION_COORDINATOR_TOKEN (or AppToken fallback) from custodian config.
+func (a *API) proxyDelegationIssue(ctx context.Context, body []byte, _ string) (*delegationcert.DelegationIssueResponse, int, error) {
 	base := a.coordinatorBaseURL()
 	if base == "" {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("delegation coordinator URL not configured")
@@ -42,13 +44,7 @@ func (a *API) proxyDelegationIssue(ctx context.Context, body []byte, inboundAuth
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/cbor")
-	token := strings.TrimSpace(inboundAuth)
-	if strings.HasPrefix(strings.ToLower(token), "bearer ") {
-		token = strings.TrimSpace(token[7:])
-	}
-	if token == "" {
-		token = a.coordinatorAuthToken()
-	}
+	token := a.coordinatorAuthToken()
 	if token == "" {
 		return nil, http.StatusUnauthorized, fmt.Errorf("coordinator proxy: no bearer token")
 	}
