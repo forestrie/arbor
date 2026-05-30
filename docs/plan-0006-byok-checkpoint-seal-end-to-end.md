@@ -69,17 +69,24 @@ retry cache. This is out of scope for the gap-4 proof. Open questions:
 
 ```sh
 cd arbor/services/sealer/src
-go test -v ./... -run 'DelegationLeaseManager_|HTTPDelegationIssuer_MapsMaterialMissing503ToPending'
+go test -v ./... -run 'DelegationLeaseManager_|HTTPDelegationIssuer_MapsMaterialMissing'
 
 cd ../../../../canopy
-pnpm --filter @canopy/delegation-coordinator test -- pending-delegation
+pnpm --filter @canopy/delegation-coordinator test
 pnpm --filter @canopy/api test -- receipt-authority-resolver
+pnpm --filter @canopy/api-e2e test -- byok-delegation-cbor
 pnpm --filter @canopy/api-e2e typecheck
-pnpm --filter @canopy/api-e2e test:e2e:system -- tests/system/byok-checkpoint-seal.spec.ts
 ```
 
-Deployed stretch:
+Deployed stretch (catalog host, not `api-dev`):
 
 ```sh
-E2E_BYOK_SEAL_STRETCH=1 task test:e2e:doppler
+E2E_BYOK_SEAL_STRETCH=1 \
+  CANOPY_BASE_URL=https://api-forest-2.forestrie.dev \
+  CUSTODIAN_URL=https://api-forest-2.forestrie.dev \
+  task test:e2e:doppler -- tests/system/byok-checkpoint-seal.spec.ts
 ```
+
+See [canopy plan-0024](../../canopy/docs/plans/plan-0024-byok-checkpoint-seal-rca.md) and
+[ADR-0003](../../canopy/docs/adr-0003-delegation-pending-202-accepted.md) for pending
+**202 Accepted** and coordinator material validation.

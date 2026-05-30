@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
+	"github.com/fxamacker/cbor/v2"
 )
 
 const coordinatorHTTPTimeout = 30 * time.Second
@@ -62,8 +63,11 @@ func (a *API) proxyDelegationIssue(ctx context.Context, body []byte, _ string) (
 		return nil, 0, err
 	}
 
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		return nil, http.StatusServiceUnavailable, fmt.Errorf("delegation material not available")
+	if resp.StatusCode == http.StatusAccepted ||
+		resp.StatusCode == http.StatusServiceUnavailable {
+		if isCoordinatorDelegationPendingBody(respBody) {
+			return nil, resp.StatusCode, fmt.Errorf("delegation material not available")
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode, fmt.Errorf("coordinator issue: status=%d", resp.StatusCode)
@@ -78,4 +82,15 @@ func (a *API) proxyDelegationIssue(ctx context.Context, body []byte, _ string) (
 
 func bearerFromRequest(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("Authorization"))
+}
+
+func isCoordinatorDelegationPendingBody(body []byte) bool {
+	var problem map[string]any
+	if err := cbor.Unmarshal(body, &problem); err != nil {
+		return false
+	}
+	detail, _ := problem["detail"].(string)
+	detail = strings.ToLower(detail)
+	return strings.Contains(detail, "delegation material not found") ||
+		strings.Contains(detail, "delegation material not available")
 }

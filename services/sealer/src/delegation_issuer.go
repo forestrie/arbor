@@ -130,7 +130,7 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 }
 
 func isDelegationPendingResponse(status int, contentType string, body []byte) bool {
-	if status != http.StatusServiceUnavailable {
+	if status != http.StatusAccepted && status != http.StatusServiceUnavailable {
 		return false
 	}
 	if !strings.Contains(strings.ToLower(contentType), "application/problem+cbor") {

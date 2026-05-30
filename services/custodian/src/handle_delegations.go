@@ -82,6 +82,9 @@ func (a *API) proxyAndWriteDelegation(w http.ResponseWriter, r *http.Request, bo
 		if st == http.StatusServiceUnavailable {
 			title = "service unavailable"
 		}
+		if st == http.StatusAccepted {
+			title = "accepted"
+		}
 		if st >= http.StatusInternalServerError {
 			a.Logger.Error("coordinator delegation proxy", "error", err)
 		}
