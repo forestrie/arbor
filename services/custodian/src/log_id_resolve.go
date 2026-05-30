@@ -36,7 +36,12 @@ func (a *API) ResolveCustodianKeyIDForLogID(ctx context.Context, rawLogID string
 		}
 	}
 	labels := map[string]string{ForestrieLogIDLabelKey: norm}
-	entries, err := a.ListKeysWithLabels(ctx, labels, "and")
+	var entries []KeyListEntry
+	if a.listKeysOverride != nil {
+		entries, err = a.listKeysOverride(ctx, labels, "and")
+	} else {
+		entries, err = a.ListKeysWithLabels(ctx, labels, "and")
+	}
 	if err != nil {
 		return "", err
 	}

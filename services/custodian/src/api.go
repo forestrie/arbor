@@ -1,6 +1,7 @@
 package custodian
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,12 @@ type API struct {
 	logIDKeyCache  *logIDKeyLRU
 	publicKeyMu    sync.RWMutex
 	publicKeyCache map[string]publicKeyCacheEntry
+
+	// listKeysOverride is a test-only seam. When set it replaces the real
+	// GCP KMS list call in ResolveCustodianKeyIDForLogID; production never
+	// sets this. The default (nil) routes through ListKeysWithLabels which
+	// talks to the configured CUSTODY_KEY_RING_ID.
+	listKeysOverride func(ctx context.Context, labels map[string]string, predicate string) ([]KeyListEntry, error)
 }
 
 // NewAPI builds an API with the given logger and config.

@@ -213,11 +213,11 @@ func TestAPI_ResponseShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("GET /api/logs/{logId}/signing-key 404 when not initialized", func(t *testing.T) {
+	t.Run("GET /api/logs/{logId}/public-root 404 when not initialized", func(t *testing.T) {
 		api := API{Logger: logger, Chain: cfgNotInitialized}
 		mux := http.NewServeMux()
 		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/signing-key", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/public-root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
@@ -225,11 +225,11 @@ func TestAPI_ResponseShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("GET /api/logs/{logId}/signing-key 200 and shape", func(t *testing.T) {
+	t.Run("GET /api/logs/{logId}/public-root 200 and shape", func(t *testing.T) {
 		api := API{Logger: logger, Chain: cfgInitialized}
 		mux := http.NewServeMux()
 		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/signing-key", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/public-root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {

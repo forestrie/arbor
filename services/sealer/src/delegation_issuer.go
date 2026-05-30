@@ -18,9 +18,6 @@ import (
 type IssuerLeaseRequest struct {
 	LogIDBytes          []byte
 	LogIdHex            string
-	Domain              string
-	ChainID             string
-	ContractAddress     string
 	MMRStart            uint64
 	MMREnd              uint64
 	Curve               delegationcert.Curve
@@ -74,9 +71,6 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 
 	issueReq := delegationcert.DelegationIssueRequest{
 		Version:             1,
-		Domain:              req.Domain,
-		ChainID:             req.ChainID,
-		ContractAddress:     req.ContractAddress,
 		LogID:               logID,
 		MMRStart:            req.MMRStart,
 		MMREnd:              req.MMREnd,

@@ -115,7 +115,7 @@ func (a API) handleLogConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func (a API) handleSigningKey(w http.ResponseWriter, r *http.Request) {
+func (a API) handlePublicRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		a.writeProblem(w, r, http.StatusMethodNotAllowed, "about:blank", "method not allowed", "")
 		return
@@ -124,7 +124,7 @@ func (a API) handleSigningKey(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank", "auth-log service unavailable", "")
 		return
 	}
-	logId, ok := logIDFromPath(r.URL.Path, "/signing-key")
+	logId, ok := logIDFromPath(r.URL.Path, "/public-root")
 	if !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId", "expect 0x-prefixed hex (32 or 64 chars)")
 		return

@@ -2,36 +2,39 @@ package custodian
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 )
 
-func TestHandleDelegations_proxiesWhenWalletManaged(t *testing.T) {
+// TestHandleDelegations_proxiesOnKeyNotFound drives the only routing path:
+// local KMS returns ErrNoCustodianKeyForLogID, the coordinator is
+// configured, so the request proxies to coordinator POST /api/delegations.
+// Asserts no signing-route probe is attempted (stage 1 is gone).
+func TestHandleDelegations_proxiesOnKeyNotFound(t *testing.T) {
 	logBytes := logIDBytes16(t)
-	logHex, _ := logIDHexFromWire(logBytes)
 	var coordinatorIssue bool
 	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/logs/"+logHex+"/signing-route":
-			_ = json.NewEncoder(w).Encode(map[string]string{"mode": "wallet"})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/delegations":
-			coordinatorIssue = true
-			resp := delegationcert.DelegationIssueResponse{
-				IssuedAt:    1,
-				ExpiresAt:   999,
-				Certificate: []byte{0x01},
-			}
-			b, _ := custodianCBORem.Marshal(resp)
-			w.Header().Set("Content-Type", "application/cbor")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(b)
-		default:
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/signing-route") {
+			t.Fatalf("unexpected signing-route probe: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/api/delegations" {
 			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
 		}
+		coordinatorIssue = true
+		resp := delegationcert.DelegationIssueResponse{
+			IssuedAt:    1,
+			ExpiresAt:   999,
+			Certificate: []byte{0x01},
+		}
+		b, _ := custodianCBORem.Marshal(resp)
+		w.Header().Set("Content-Type", "application/cbor")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(b)
 	}))
 	defer coord.Close()
 
@@ -40,6 +43,9 @@ func TestHandleDelegations_proxiesWhenWalletManaged(t *testing.T) {
 		AppToken:                 "app-token",
 		DelegationCoordinatorURL: coord.URL,
 	})
+	api.listKeysOverride = func(ctx context.Context, labels map[string]string, predicate string) ([]KeyListEntry, error) {
+		return nil, nil
+	}
 
 	body, _ := custodianCBORem.Marshal(delegationcert.DelegationIssueRequest{
 		LogID:              logBytes,
@@ -55,7 +61,7 @@ func TestHandleDelegations_proxiesWhenWalletManaged(t *testing.T) {
 	api.handleDelegations(rec, req)
 
 	if !coordinatorIssue {
-		t.Fatal("expected coordinator issue call for wallet-managed log")
+		t.Fatal("expected coordinator issue call when local KMS has no key")
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
@@ -66,6 +72,43 @@ func TestHandleDelegations_proxiesWhenWalletManaged(t *testing.T) {
 	}
 	if len(out.Certificate) != 1 {
 		t.Fatalf("cert=%v", out.Certificate)
+	}
+}
+
+// TestHandleDelegations_404WhenNoLocalKeyAndNoCoordinator covers the hard
+// error path: local KMS has no key AND no coordinator URL is configured.
+// Custodian must return 404 with the not-found problem detail. No silent
+// fallback to anything else.
+func TestHandleDelegations_404WhenNoLocalKeyAndNoCoordinator(t *testing.T) {
+	logBytes := logIDBytes16(t)
+
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, Config{
+		AppToken: "app-token",
+		// DelegationCoordinatorURL deliberately unset.
+	})
+	api.listKeysOverride = func(ctx context.Context, labels map[string]string, predicate string) ([]KeyListEntry, error) {
+		return nil, nil
+	}
+
+	body, _ := custodianCBORem.Marshal(delegationcert.DelegationIssueRequest{
+		LogID:              logBytes,
+		DelegatedPublicKey: []byte{1},
+		Algorithm:          "ES256",
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/delegations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/cbor")
+	req.Header.Set("Authorization", "Bearer app-token")
+	rec := httptest.NewRecorder()
+
+	api.handleDelegations(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d want 404 body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(strings.ToLower(rec.Body.String()), "not found") {
+		t.Fatalf("expected not-found problem detail; got %s", rec.Body.String())
 	}
 }
 
@@ -111,10 +154,8 @@ func logIDBytes16(t *testing.T) []byte {
 	for i := range raw {
 		raw[i] = byte(i)
 	}
-	hex, err := logIDHexFromWire(raw)
-	if err != nil {
+	if _, err := logIDHexFromWire(raw); err != nil {
 		t.Fatal(err)
 	}
-	_ = hex
 	return raw
 }

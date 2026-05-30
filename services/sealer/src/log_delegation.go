@@ -82,9 +82,6 @@ func RequestLogDelegationLease(
 	issuerResp, err := issuer.IssueForLog(ctx, IssuerLeaseRequest{
 		LogIDBytes:          logIDBytes,
 		LogIdHex:            logIdHex,
-		Domain:              rootKey.Domain,
-		ChainID:             rootKey.ChainID,
-		ContractAddress:     rootKey.ContractAddress,
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,

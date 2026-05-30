@@ -17,7 +17,7 @@ type API struct {
 //	GET /api/root              — root exists and rootLogId
 //	GET /api/logs              — list known auth logs (at least root)
 //	GET /api/logs/{logId}/config      — log kind and config
-//	GET /api/logs/{logId}/signing-key — sealer key resolution
+//	GET /api/logs/{logId}/public-root — sealer trust-root public key
 func (a API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/root", a.handleRoot)
 	mux.HandleFunc("/api/logs", a.handleLogsList)
@@ -30,8 +30,8 @@ func (a API) routeHandler(w http.ResponseWriter, r *http.Request) {
 		a.handleLogConfig(w, r)
 		return
 	}
-	if strings.HasSuffix(path, "/signing-key") {
-		a.handleSigningKey(w, r)
+	if strings.HasSuffix(path, "/public-root") {
+		a.handlePublicRoot(w, r)
 		return
 	}
 	a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")

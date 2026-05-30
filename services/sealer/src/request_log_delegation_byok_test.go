@@ -28,12 +28,7 @@ import (
 // Sealer fetches the root over HTTP, fetches the delegation over HTTP from
 // a *different* URL, and verifies one against the other.
 
-const (
-	byokIssuerToken = "issuer-token"
-	byokDomain      = "forestrie.test.delegation"
-	byokChainID     = "31337"
-	byokContract    = "0x0000000000000000000000000000000000000001"
-)
+const byokIssuerToken = "issuer-token"
 
 func TestRequestLogDelegationLease_BYOKHTTPTrustRoot(t *testing.T) {
 	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -43,11 +38,10 @@ func TestRequestLogDelegationLease_BYOKHTTPTrustRoot(t *testing.T) {
 	logID := "0123456789abcdef0123456789abcdef"
 
 	var trustRootCalledFor string
-	trustSrv := newBYOKTrustRootServer(t, logID, &rootPriv.PublicKey, byokDomain, byokChainID, byokContract, &trustRootCalledFor)
+	trustSrv := newBYOKTrustRootServer(t, logID, &rootPriv.PublicKey, &trustRootCalledFor)
 	defer trustSrv.Close()
 
-	var seen delegationcert.DelegationIssueRequest
-	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, &seen)
+	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
 	defer issuerSrv.Close()
 
 	trustRoot := &HTTPTrustRootClient{
@@ -80,15 +74,6 @@ func TestRequestLogDelegationLease_BYOKHTTPTrustRoot(t *testing.T) {
 	if trustRootCalledFor != logID {
 		t.Fatalf("trust root not fetched for log: got %q want %q", trustRootCalledFor, logID)
 	}
-	if seen.Domain != byokDomain {
-		t.Fatalf("domain not propagated: %q", seen.Domain)
-	}
-	if seen.ChainID != byokChainID {
-		t.Fatalf("chain id not propagated: %q", seen.ChainID)
-	}
-	if seen.ContractAddress != byokContract {
-		t.Fatalf("contract address not propagated: %q", seen.ContractAddress)
-	}
 }
 
 func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongRoot(t *testing.T) {
@@ -103,7 +88,7 @@ func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongRoot(t *testing.T) {
 	}
 	logID := "1123456789abcdef0123456789abcdef"
 
-	trustSrv := newBYOKTrustRootServer(t, logID, &wrongRootPriv.PublicKey, "", "", "", nil)
+	trustSrv := newBYOKTrustRootServer(t, logID, &wrongRootPriv.PublicKey, nil)
 	defer trustSrv.Close()
 
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
@@ -136,7 +121,7 @@ func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongLog(t *testing.T) {
 	}
 	logID := "2123456789abcdef0123456789abcdef"
 
-	trustSrv := newBYOKTrustRootServer(t, logID, &rootPriv.PublicKey, "", "", "", nil)
+	trustSrv := newBYOKTrustRootServer(t, logID, &rootPriv.PublicKey, nil)
 	defer trustSrv.Close()
 
 	// Issuer signs a certificate for a different log id than the caller asked for.
@@ -172,7 +157,6 @@ func newBYOKTrustRootServer(
 	t *testing.T,
 	logIDHex string,
 	pub *ecdsa.PublicKey,
-	domain, chainID, contract string,
 	gotLog *string,
 ) *httptest.Server {
 	t.Helper()
@@ -186,7 +170,7 @@ func newBYOKTrustRootServer(
 	pub.Y.FillBytes(y)
 
 	prefix := "/api/logs/"
-	suffix := "/signing-key"
+	suffix := "/public-root"
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -211,13 +195,10 @@ func newBYOKTrustRootServer(
 		}
 
 		body, err := cbor.Marshal(TrustRootResponse{
-			LogID:           logIDBytes,
-			Alg:             "ES256",
-			X:               x,
-			Y:               y,
-			ChainID:         chainID,
-			ContractAddress: contract,
-			Domain:          domain,
+			LogID: logIDBytes,
+			Alg:   "ES256",
+			X:     x,
+			Y:     y,
 		})
 		if err != nil {
 			t.Errorf("encode trust root: %v", err)

@@ -37,19 +37,13 @@ func (a *API) handleDelegations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logIdHex, err := logIDHexFromWire(req.LogID)
-	if err != nil {
+	if _, err := logIDHexFromWire(req.LogID); err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", err.Error())
 		return
 	}
 
 	ctx := r.Context()
 	auth := bearerFromRequest(r)
-
-	if a.coordinatorConfigured() && a.isWalletManagedLog(ctx, logIdHex) {
-		a.proxyAndWriteDelegation(w, r, body, auth)
-		return
-	}
 
 	resp, err := a.issueDelegationForLog(ctx, &req)
 	if err != nil {

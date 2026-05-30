@@ -36,23 +36,33 @@ either can be non-Custodian.
 ## Scope
 
 1. Add a Sealer `HTTPTrustRootClient` that fetches the plan-0003 CBOR shape
-   (`{logId, alg, x, y, chainId, contractAddress, domain, ...}`) from
-   `GET {TRUST_ROOT_URL}/api/logs/{logId}/signing-key` and adapts it into the
-   existing `LogSigningKey` (PEM) for the lease verify path.
-2. Carry trust-root domain data into Sealer's generic delegation issuer request.
-3. Add an Arbor BYOK lease test that drives Sealer against two independent
-   HTTP fakes: a fake trust-root server (returns the test-owned root's x,y as
-   CBOR) and a fake issuer server (signs the delegation cert with the same
-   non-Custodian root). Sealer is wired with `HTTPTrustRootClient` and
-   `HTTPDelegationIssuer` pointing at the two URLs; positive, wrong-root, and
-   wrong-log cases are covered, and the test asserts ABI metadata
-   (domain / chainId / contractAddress) propagates from the trust-root fake
-   into the issuer request.
+   from `GET {TRUST_ROOT_URL}/api/logs/{logId}/public-root` and adapts the
+   `{logId, alg, x, y}` portion into the existing `LogSigningKey` (PEM) for
+   the lease verify path. The CBOR response also carries optional
+   `chainId`, `contractAddress`, `domain` fields, but **these are wire-only
+   forward-compat placeholders today**: no internal sealer type consumes
+   them and no signer or verifier reads them. They are reserved for future
+   cryptographic binding of chain provenance, which is expected to flow
+   through log data itself rather than transport metadata. See the comment
+   on `TrustRootResponse` and `delegationcert.DelegationIssueRequest`.
+2. Add an Arbor BYOK lease test that drives Sealer against two independent
+   HTTP fakes: a fake trust-root server (returns the test-owned root's x,y
+   as CBOR) and a fake issuer server (signs the delegation cert with the
+   same non-Custodian root). Sealer is wired with `HTTPTrustRootClient` and
+   `HTTPDelegationIssuer` pointing at the two URLs; positive, wrong-root,
+   and wrong-log cases are covered.
+3. Custodian routing for `POST /api/delegations` uses a single source of
+   truth — the local KMS. If the log has a custody key, sign locally; if
+   the key is absent (`ErrNoCustodianKeyForLogID`) and
+   `DELEGATION_COORDINATOR_URL` is set, proxy the request to the
+   coordinator; if neither path resolves, return 404 with the not-found
+   problem detail. The coordinator never declares routing — there is no
+   per-request `signing-route.mode` probe.
 4. Add a Canopy coordinator e2e that exercises pending miss, BYOK material
-   submit, successful issue, and pending clearance through deployed coordinator
-   APIs.
-5. Add a Canopy unit fixture proving delegated receipt verification can use an
-   injected non-Custodian root without Custodian HTTP.
+   submit, successful issue, and pending clearance through deployed
+   coordinator APIs.
+5. Add a Canopy unit fixture proving delegated receipt verification can use
+   an injected non-Custodian root without Custodian HTTP.
 
 ## Out of scope
 
@@ -83,6 +93,6 @@ task test:e2e:doppler
 ## Follow-up
 
 Promote `HTTPTrustRootClient` to production wiring once `services/univocity`
-exposes a non-mock `/api/logs/{logId}/signing-key`. Then promote the Canopy
+exposes a non-mock `/api/logs/{logId}/public-root`. Then promote the Canopy
 resolver to a production `UnivocityTrustRootAdapter`, and move Mandate from
 bootstrap signing to real COSE delegation certificate assembly.

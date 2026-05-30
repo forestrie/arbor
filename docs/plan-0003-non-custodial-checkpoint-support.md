@@ -182,7 +182,7 @@ Suggested endpoints:
 - `GET /api/root`: root contract initialization state.
 - `GET /api/logs/{logId}/config`: log kind, owner/auth log, and
   initialization state.
-- `GET /api/logs/{logId}/signing-key`: root key for initialized logs.
+- `GET /api/logs/{logId}/public-root`: root public key for initialized logs.
 - `GET /api/chain`: chain id, contract address, and latest safe/finalized block
   metadata.
 
@@ -315,7 +315,7 @@ sequenceDiagram
 
     Queue->>Sealer: Checkpoint logId, MMR range
     Sealer->>Sealer: Generate or load delegated checkpoint key
-    Sealer->>UnivocitySvc: GET /api/logs/{logId}/signing-key (Accept: application/cbor)
+    Sealer->>UnivocitySvc: GET /api/logs/{logId}/public-root (Accept: application/cbor)
     UnivocitySvc->>Contract: Read logConfig, logRootKey, block context
     Contract-->>UnivocitySvc: Root key and chain metadata
     UnivocitySvc-->>Sealer: TrustRootResponse (application/cbor)
@@ -818,24 +818,35 @@ Concern: the Univocity service returns an old or wrong root key. This should not
 allow on-chain poisoning, but can cause Sealer to waste work or sign invalid
 checkpoints.
 
-Mitigation:
+Mitigation (future work; not implemented in the current slice):
 
-- Trust-root responses include `chainId`, `contractAddress`, `blockNumber`,
-  `blockHash`, and finality.
-- Sealer checks chain id and contract address against config.
-- Sealer rejects stale responses beyond a freshness window.
+- Trust-root responses already define `chainId`, `contractAddress`,
+  `blockNumber`, `blockHash`, and finality as wire fields (omitempty
+  placeholders). Today no signer or verifier consumes them.
+- Sealer is intended to check chain id and contract address, and to reject
+  stale responses beyond a freshness window. The current implementation
+  does not yet wire either check.
 - High-value deployments may query multiple RPC/proxy sources.
 - Publisher and contract remain final enforcement.
+
+The eventual cryptographic binding of chain provenance is most likely to
+flow through the public log data rather than through transport-only wire
+fields, so the eventual implementation may obtain `chainId` /
+`contractAddress` from log data itself and treat the trust-root proxy as
+purely a public-key oracle.
 
 ### Replay across chains or contract deployments
 
 Concern: a delegation for one deployment is reused on another.
 
-Mitigation:
+Mitigation (future work; not implemented in the current slice):
 
-- Delegation payload binds `chainId` and `contractAddress`.
-- Sealer request includes both values.
-- Sealer verifies issuer response includes and signs those values.
+- Delegation payload will bind `chainId` and `contractAddress` once the
+  binding direction is decided (log-data-embedded vs signed-into-cert).
+- The `DelegationIssueRequest` wire shape already reserves `domain`,
+  `chainId`, `contractAddress` as omitempty fields for this purpose;
+  Sealer's internal types do not carry them today and the COSE
+  to-be-signed payload does not include them.
 - Contract-side proof format should include the same domain fields where
   feasible.
 
@@ -943,6 +954,32 @@ Operators must provision:
 - delegation issuer configuration;
 - delegated checkpoint signer strategy;
 - optional static proof material or user-operated delegation service.
+
+### Custodian routing: single source of truth
+
+When Sealer (or any caller) posts `POST /api/delegations` to Custodian,
+Custodian routes the request from one source of truth — **the local KMS**:
+
+1. Try the local KMS key resolver. If a custody key exists for the log id,
+   sign the delegation locally and return it.
+2. If the resolver returns the specific sentinel `ErrNoCustodianKeyForLogID`
+   and `DELEGATION_COORDINATOR_URL` is configured, proxy the inbound CBOR
+   request to the coordinator's `POST /api/delegations` and return the
+   coordinator's response.
+3. If the resolver returns `ErrNoCustodianKeyForLogID` and no coordinator
+   is configured, return **404** with the "not found" problem detail. No
+   silent fallback.
+4. Any other local error (KMS unavailable, malformed key, signing failed)
+   propagates as today.
+
+Custodian does **not** consult the coordinator for routing. There is no
+per-request `signing-route.mode` probe. Whether a log is BYOK is a fact
+about KMS presence, not a coordinator-declared mode. Operators express
+intent by labeling KMS keys (custodial) or by leaving KMS empty for that
+log id and registering material with the coordinator (BYOK). The
+coordinator's `signing-route` registration remains useful as a
+coordinator-internal record of which logs may upload material, but
+Custodian never reads it for routing.
 
 ### Rotation
 

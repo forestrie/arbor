@@ -18,12 +18,12 @@ import (
 
 // HTTPTrustRootClient resolves trust roots from a generic HTTP trust-root
 // service. The wire format is the plan-0003 CBOR shape returned by
-// GET {BaseURL}/api/logs/{logIdHex}/signing-key.
+// GET {BaseURL}/api/logs/{logIdHex}/public-root.
 //
 // The client treats the upstream as an untrusted read proxy of contract
 // state: it never talks to contracts directly. Production wiring will point
 // BaseURL at services/univocity once that service exposes a non-mock
-// signing-key endpoint; tests inject an httptest.Server URL.
+// public-root endpoint; tests inject an httptest.Server URL.
 type HTTPTrustRootClient struct {
 	BaseURL    string
 	HTTPClient *HTTPClient
@@ -48,7 +48,7 @@ func (c *HTTPTrustRootClient) LogSigningKey(
 		return LogSigningKey{}, fmt.Errorf("log id is empty")
 	}
 
-	endpoint := fmt.Sprintf("%s/api/logs/%s/signing-key", base, url.PathEscape(logID))
+	endpoint := fmt.Sprintf("%s/api/logs/%s/public-root", base, url.PathEscape(logID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return LogSigningKey{}, fmt.Errorf("build request: %w", err)
@@ -86,11 +86,8 @@ func (c *HTTPTrustRootClient) LogSigningKey(
 	}
 
 	return LogSigningKey{
-		PublicKeyPEM:    pemStr,
-		Alg:             strings.TrimSpace(record.Alg),
-		Domain:          strings.TrimSpace(record.Domain),
-		ChainID:         strings.TrimSpace(record.ChainID),
-		ContractAddress: strings.TrimSpace(record.ContractAddress),
+		PublicKeyPEM: pemStr,
+		Alg:          strings.TrimSpace(record.Alg),
 	}, nil
 }
 
