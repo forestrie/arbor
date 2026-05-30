@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -15,6 +16,10 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 )
+
+// ErrTrustRootNotFound indicates the primary trust-root service has no root
+// for the log (HTTP 404). SelectingTrustRootClient may fall back to Custodian.
+var ErrTrustRootNotFound = errors.New("trust root not found")
 
 // HTTPTrustRootClient resolves trust roots from a generic HTTP trust-root
 // service. The wire format is the plan-0003 CBOR shape returned by
@@ -26,6 +31,7 @@ import (
 // public-root endpoint; tests inject an httptest.Server URL.
 type HTTPTrustRootClient struct {
 	BaseURL    string
+	Token      string
 	HTTPClient *HTTPClient
 }
 
@@ -54,6 +60,9 @@ func (c *HTTPTrustRootClient) LogSigningKey(
 		return LogSigningKey{}, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/cbor")
+	if token := strings.TrimSpace(c.Token); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := c.HTTPClient.Do(ctx, req)
 	if err != nil {
@@ -65,7 +74,15 @@ func (c *HTTPTrustRootClient) LogSigningKey(
 	if err != nil {
 		return LogSigningKey{}, fmt.Errorf("read trust root response: %w", err)
 	}
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// continue below
+	case http.StatusNotFound:
+		return LogSigningKey{}, fmt.Errorf(
+			"%w: log %s",
+			ErrTrustRootNotFound, logID,
+		)
+	default:
 		return LogSigningKey{}, fmt.Errorf(
 			"trust root returned status=%d for log %s",
 			resp.StatusCode, logID,

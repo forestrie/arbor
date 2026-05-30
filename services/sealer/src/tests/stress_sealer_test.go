@@ -282,10 +282,7 @@ func runCheckpointLogs(
 	ctx := t.Context()
 
 	leaseMgr := sealer.NewDelegationLeaseManager(
-		&sealer.CustodianPublicTrustRootClient{
-			BaseURL:    cfg.TrustRootURL,
-			HTTPClient: httpClient,
-		},
+		sealer.NewSelectingTrustRootClient(cfg, httpClient),
 		&sealer.HTTPDelegationIssuer{
 			BaseURL:    cfg.DelegationIssuerURL,
 			Token:      cfg.DelegationIssuerToken,

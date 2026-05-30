@@ -32,8 +32,9 @@ type Config struct {
 	PollIntervalMax   time.Duration
 	VisibilityTimeout time.Duration
 
-	// Delegation seams (pilot: Custodian adapters for trust root + issuer)
+	// Delegation seams (coordinator trust root + Custodian issuer proxy)
 	TrustRootURL          string
+	TrustRootToken        string
 	DelegationIssuerURL   string
 	DelegationIssuerToken string
 
@@ -146,6 +147,7 @@ func LoadConfig() Config {
 		CustodianURL:       os.Getenv("CUSTODIAN_URL"),
 		CustodianAppToken:  os.Getenv("CUSTODIAN_APP_TOKEN"),
 		TrustRootURL:          os.Getenv("TRUST_ROOT_URL"),
+		TrustRootToken:        os.Getenv("TRUST_ROOT_TOKEN"),
 		DelegationIssuerURL:   os.Getenv("DELEGATION_ISSUER_URL"),
 		DelegationIssuerToken: os.Getenv("DELEGATION_ISSUER_TOKEN"),
 		DelegationKeyCurve: getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
@@ -180,6 +182,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 	logConfigValue(logger, "TRUST_ROOT_URL", c.TrustRootURL)
+	logSecretDigest(logger, "TRUST_ROOT_TOKEN", c.TrustRootToken)
 	logConfigValue(logger, "DELEGATION_ISSUER_URL", c.DelegationIssuerURL)
 	logSecretDigest(logger, "DELEGATION_ISSUER_TOKEN", c.DelegationIssuerToken)
 	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
@@ -213,6 +216,11 @@ func (c Config) Validate() error {
 	if err := validateHTTPSURL(c.TrustRootURL); err != nil {
 		return fmt.Errorf("TRUST_ROOT_URL is invalid: %w", err)
 	}
+	if c.trustRootUsesCoordinator() && strings.TrimSpace(c.TrustRootToken) == "" {
+		return fmt.Errorf(
+			"TRUST_ROOT_TOKEN is required when TRUST_ROOT_URL differs from CUSTODIAN_URL",
+		)
+	}
 	if c.DelegationIssuerURL == "" {
 		return fmt.Errorf("DELEGATION_ISSUER_URL is required (or set CUSTODIAN_URL during migration)")
 	}
@@ -237,6 +245,12 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (c Config) trustRootUsesCoordinator() bool {
+	trust := strings.TrimRight(strings.TrimSpace(c.TrustRootURL), "/")
+	cust := strings.TrimRight(strings.TrimSpace(c.CustodianURL), "/")
+	return trust != "" && trust != cust
 }
 
 func validateHTTPSURL(raw string) error {

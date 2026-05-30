@@ -1,98 +1,73 @@
 # Sealer trust-root end-to-end via a real non-Custodian proxy
 
-**Status:** DRAFT  
+**Status:** DRAFT (§2–3 implemented; §4 canopy e2e done via plan-0023)  
 **Date:** 2026-05-30  
 **Related:** [plan-0003](plan-0003-non-custodial-checkpoint-support.md),
-[plan-0004](plan-0004-coordinator-backed-byok-lease-proof.md),
-[canopy plan-0021](../../canopy/docs/plans/plan-0021-delegation-coordinator-apis.md)
+[plan-0004 (ACCEPTED)](plan-0004-coordinator-backed-byok-lease-proof.md),
+[canopy plan-0023 (ACCEPTED)](../canopy/docs/plans/plan-0023-coordinator-public-root.md)
 
 ## Goal
 
-Cut the Sealer trust-root proxy out of Custodian. Today every deployed
-sealer reads `TRUST_ROOT_URL` and `DELEGATION_ISSUER_URL` from the same
-Custodian host. plan-0004 proved the two-seam architecture exists end to
-end and the coordinator can proxy delegation issuance for wallet-managed
-logs, but Sealer's trust root is still a Custodian public-key endpoint
-adapted by `CustodianPublicTrustRootClient`. The next slice points
-`TRUST_ROOT_URL` at a real non-Custodian service that returns the
-CBOR `TrustRootResponse` directly, so that an entire BYOK checkpoint
-round trip can be proven without Custodian holding the trust-root key.
+Cut the Sealer trust-root proxy out of Custodian for BYOK logs. Deployed Sealer
+reads `TRUST_ROOT_URL` from the public delegation-coordinator
+(`GET /api/logs/{logId}/public-root`), falls back to Custodian public-key lookup on
+404, and keeps delegation issuance on in-cluster Custodian (proxy to coordinator
+for wallet-managed logs).
 
-This is still the **lease and verify** slice. It does not deploy
-Univocity contracts, does not implement an on-chain publisher, and does
-not move chain-provenance binding into the COSE to-be-signed payload.
+North-star (plan-0003): full BYOK checkpoint seal — see plan-0003 and follow-on
+plan for gap 4 (Ranger → Sealer → MMRS).
 
-## Scope
+## Scope status
 
-1. Deploy a small non-Custodian trust-root proxy that serves
-   `GET /api/logs/{logId}/public-root` returning the same CBOR shape
-   defined in `services/sealer/src/trust_root_response.go`. Production
-   wiring uses `delegation-coordinator` as the proxy host (it already
-   stores BYOK material per log id; the public-root endpoint is added
-   beside the existing `/api/material` and `/api/signing-route` routes).
-   The endpoint is explicitly marked as a stop-gap until Univocity is
-   live; comments in the worker source name it as such.
-2. Promote Sealer to use `HTTPTrustRootClient` against
-   `TRUST_ROOT_URL=https://coordinator.{env}.forestrie.dev` for any log
-   whose `public-root` lookup succeeds, falling back to
-   `CustodianPublicTrustRootClient` (current behaviour) for logs whose
-   root is still Custodian-held. The selector is presence-based: try
-   `TRUST_ROOT_URL/api/logs/{logId}/public-root`; on 404 fall back. This
-   keeps custodial logs working without operator-per-log config.
-3. Wire the BYOK lease test in
-   `services/sealer/src/request_log_delegation_byok_test.go` to drive
-   the **deployed** coordinator's `public-root` endpoint with a runner-
-   provisioned test root, then verify the issuance proxy chain end to
-   end. Replace the in-test `httptest` trust-root fake with a coordinator
-   roundtrip when `E2E_COORDINATOR_SEALER_STRETCH=1`.
-4. Add a Canopy coordinator e2e covering BYOK `public-root` upload,
-   custody-keys absent, and `POST /api/delegations` returning material
-   that verifies against the uploaded public root. Reuses
-   `coordinator-byok-material.spec.ts` setup.
-5. Mark `CUSTODIAN_URL` for removal from sealer config and add a CHANGELOG
-   note describing the two-seam migration path. The deprecation warning
-   already logs at startup.
+| § | Item | Status |
+|---|------|--------|
+| 1 | Coordinator `public-root` endpoint | **Done** (canopy plan-0023) |
+| 2 | `SelectingTrustRootClient` + `HTTPTrustRootClient` bearer | **Done** |
+| 3 | Deployed BYOK lease stretch (`E2E_COORDINATOR_SEALER_STRETCH=1`) | **Done** (Go test) |
+| 4 | Canopy coordinator e2e BYOK public-root | **Done** (plan-0023 / `coordinator-byok-public-root.spec.ts`) |
+| 5 | arbor-flux `TRUST_ROOT_URL` + `TRUST_ROOT_TOKEN` | **Done** |
+| — | `CUSTODIAN_URL` deprecation note at startup | **Done** (existing warning) |
 
-## Out of scope
+## Implementation notes
 
-- Univocity contracts and any on-chain root publication.
-- Replacing the coordinator's public-root endpoint with an RPC adapter.
-- Moving chain-provenance binding (`Domain`, `ChainID`,
-  `ContractAddress`) from wire-only into the COSE to-be-signed payload.
-- Productionizing Mandate COSE delegation certificate assembly.
-- Hardware-backed BYOK root key custody.
+- `HTTPTrustRootClient` sends `Authorization: Bearer` when `TRUST_ROOT_TOKEN` is set.
+- `ErrTrustRootNotFound` (HTTP 404) triggers Custodian fallback; other coordinator
+  errors fail closed.
+- `main.go` wires `NewSelectingTrustRootClient`.
+- arbor-flux: sealer `TRUST_ROOT_URL=https://coordinator.{DNS_SUB}.{DNS_APEX}`;
+  `TRUST_ROOT_TOKEN` copied from `canopy-{lane}` `COORDINATOR_APP_TOKEN`;
+  `DELEGATION_ISSUER_URL=http://custodian:9092`.
+
+## Out of scope (this plan)
+
+- Full Ranger → Sealer → MMRS BYOK seal e2e (next plan toward plan-0003 north-star).
+- Univocity contracts and on-chain root publication.
+- Canopy receipt authority coordinator-first (canopy plan-0024 suggested).
+- SCRAPI non-custodial bootstrap grant.
+- Mandate / hardware-backed root productionization.
 
 ## Verification
 
 ```sh
 cd arbor/services/sealer/src
-go test -race -v ./... -run 'BYOK|Delegation|TrustRoot'
+go test -race -v ./... -run 'BYOK|Delegation|TrustRoot|Selecting|Config'
 
-cd ../../../..
-task test:unit && task test:integration
+# Deployed stretch (after coordinator + custodian + sealer rollout)
+E2E_COORDINATOR_SEALER_STRETCH=1 \
+  TRUST_ROOT_URL=https://coordinator.forest-2.forestrie.dev \
+  TRUST_ROOT_TOKEN=<from doppler canopy-{lane}> \
+  DELEGATION_ISSUER_URL=https://custodian.../v1 \
+  DELEGATION_ISSUER_TOKEN=<custodian app token> \
+  go test -race -v ./... -run 'BYOKCoordinatorStretch'
 
 cd ../canopy
 pnpm --filter @canopy/delegation-coordinator run test
 doppler run --project canopy --config dev -- \
   pnpm --filter @canopy/api-e2e test:e2e:coordinator
-E2E_COORDINATOR_SEALER_STRETCH=1 \
-  CANOPY_FQDN=api-forest-2.forestrie.dev \
-  CANOPY_BASE_URL=https://api-forest-2.forestrie.dev \
-  doppler run --project canopy --config dev -- \
-  pnpm --filter @canopy/api-e2e exec playwright test \
-    tests/system/coordinator-delegation-issuance.spec.ts
-task test:e2e:doppler
 ```
-
-After ledger-a rollout, exercise a wallet-managed log through the deployed
-sealer (currently blocked behind sealer's per-log selector landing in
-step 2 above).
 
 ## Follow-up
 
-Once the coordinator-hosted `public-root` proxy is exercised, the next
-plan replaces it with a Univocity-backed adapter: same CBOR shape, but
-the public root is derived from chain state rather than a coordinator
-KV. At that point the chain-provenance fields on the wire types stop
-being placeholders and become inputs to the freshness check described
-in plan-0003 "Stale or malicious trust-root proxy response".
+Replace coordinator KV `public-root` with Univocity chain-derived roots (same CBOR
+shape). Enable full BYOK checkpoint seal on deployed stack once Sealer trust +
+delegation path is stable in production.
