@@ -110,11 +110,11 @@ func decodeTransparentStatement(raw []byte) (TransparentStatement, error) {
 
 // decodeGrantPayload decodes the inner grant v0 CBOR map (keys 1-6).
 func decodeGrantPayload(b []byte) (Grant, error) {
-	var raw map[interface{}]interface{}
-	if err := cbor.Unmarshal(b, &raw); err != nil {
+	var top interface{}
+	if err := cbor.Unmarshal(b, &top); err != nil {
 		return Grant{}, fmt.Errorf("decode grant payload: %w", err)
 	}
-	m := decodeIntKeyMap(raw)
+	m := decodeCBORIntKeyMap(top)
 	if m == nil {
 		return Grant{}, errors.New("grant payload must be an int-keyed CBOR map")
 	}
@@ -172,10 +172,7 @@ func decodeCoseSign1(raw []byte) (coseSign1, genesisIntMap, error) {
 	if !ok {
 		return coseSign1{}, nil, errors.New("COSE signature is not bstr")
 	}
-	var unprotected genesisIntMap
-	if rawMap, ok := arr[1].(map[interface{}]interface{}); ok {
-		unprotected = decodeIntKeyMap(rawMap)
-	}
+	unprotected := decodeCBORIntKeyMap(arr[1])
 	if unprotected == nil {
 		unprotected = genesisIntMap{}
 	}

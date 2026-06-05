@@ -24,11 +24,11 @@ func parseChainIDString(s string) (uint64, error) {
 
 // parseGenesisV1 decodes a v1 forest genesis document from CBOR bytes.
 func parseGenesisV1(bytes []byte) (ForestEntry, error) {
-	var raw map[interface{}]interface{}
-	if err := cbor.Unmarshal(bytes, &raw); err != nil {
+	var top interface{}
+	if err := cbor.Unmarshal(bytes, &top); err != nil {
 		return ForestEntry{}, fmt.Errorf("decode genesis cbor: %w", err)
 	}
-	m := decodeIntKeyMap(raw)
+	m := decodeCBORIntKeyMap(top)
 	if m == nil {
 		return ForestEntry{}, fmt.Errorf("genesis body must be a CBOR map")
 	}
@@ -63,6 +63,23 @@ func parseGenesisV1(bytes []byte) (ForestEntry, error) {
 }
 
 type genesisIntMap map[int]interface{}
+
+// decodeCBORIntKeyMap unwraps cbor.Tag wrappers (cbor-x Map/Uint8Array tags)
+// and decodes a CBOR int-keyed map into genesisIntMap.
+func decodeCBORIntKeyMap(v interface{}) genesisIntMap {
+	for {
+		if tag, ok := v.(cbor.Tag); ok {
+			v = tag.Content
+			continue
+		}
+		break
+	}
+	raw, ok := v.(map[interface{}]interface{})
+	if !ok {
+		return nil
+	}
+	return decodeIntKeyMap(raw)
+}
 
 func decodeIntKeyMap(raw map[interface{}]interface{}) genesisIntMap {
 	out := make(genesisIntMap)

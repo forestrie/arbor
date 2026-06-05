@@ -28,11 +28,11 @@ func (g GenesisDoc) GenesisKeyBytes() []byte {
 // and genesis key. It enforces the same v1 invariants as parseGenesisV1 and
 // additionally requires a well-formed EC2/P-256 COSE_Key.
 func parseGenesisDoc(body []byte) (GenesisDoc, error) {
-	var raw map[interface{}]interface{}
-	if err := cbor.Unmarshal(body, &raw); err != nil {
+	var top interface{}
+	if err := cbor.Unmarshal(body, &top); err != nil {
 		return GenesisDoc{}, errors.New("decode genesis cbor")
 	}
-	m := decodeIntKeyMap(raw)
+	m := decodeCBORIntKeyMap(top)
 	if m == nil {
 		return GenesisDoc{}, errors.New("genesis body must be a CBOR map")
 	}
