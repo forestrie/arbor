@@ -45,7 +45,13 @@ is permissionless — `_msgSender()` is event-only). See [ADR-0002](adr/adr-0002
 - Off-chain anchor is bound to chain: univocity verifies
   `genesis.key == contract.bootstrapConfig()` per forest (cached).
 
-## Hybrid resolution (the authorize decision)
+## Hybrid resolution (the authority lookup)
+
+Authority resolution is a non-mutating lookup keyed by `logId`. Univocity returns
+the authoritative root key + chain binding; the sealer verifies the (untrusted)
+delegation certificate **locally** against that key. The certificate is never
+sent to univocity and there is no allow/deny verdict on the wire — the
+authorization decision is the sealer's local verification.
 
 ```mermaid
 sequenceDiagram
@@ -54,16 +60,16 @@ sequenceDiagram
     participant Issuer as Untrusted issuer
     participant Univ as Univocity (trusted)
     participant Chain as Univocity contract
-    Sealer->>Issuer: request delegation for ephemeral key (logId, mmr range)
-    Issuer-->>Sealer: delegation cert (signed by D root key, unverified)
-    Sealer->>Univ: POST /api/authorize { certificate }
-    Univ->>Univ: index logId(D) -> R; load D grant; verify cert sig vs grantData_D
+    Sealer->>Univ: GET /api/logs/{logId(D)}/authority
+    Univ->>Univ: index logId(D) -> R; load forest
     alt D on-chain
-        Univ->>Chain: logRootKey(D) == grantData_D ?
+        Univ->>Chain: logRootKey(D)
     else D cold
         Univ->>Univ: verify D grant envelope vs K(O); resolve K(O) = logRootKey(O) [chain] or recurse grant store; root anchors at bootstrapConfig()
     end
-    Univ-->>Sealer: 200 { authorized, authLogId, rootKey{alg,x,y}, chainId, contract, source } | 401
+    Univ-->>Sealer: 200 { logId, rootLogId, alg, x, y, chainId, contract, source } | 503/502
+    Sealer->>Issuer: request delegation for ephemeral key (logId, mmr range)
+    Issuer-->>Sealer: delegation cert (signed by D root key, unverified)
     Sealer->>Sealer: local VerifyDelegationLease vs returned rootKey; bind chainId/contract; sign checkpoint
 ```
 
@@ -86,14 +92,17 @@ storage.
   chain (envelope vs `K(O)` via chain-or-recursion; bootstrap vs
   `bootstrapConfig()`); store per-forest grant. Reject (4xx) invalid chains so
   only chain-valid grants persist.
-- `POST /api/authorize` (token-auth; the trusted endpoint; POST carries the cert):
-  CBOR `{ certificate, logId? }`; resolve `R` via index; verify cert signature vs
-  `grantData_D`; establish `K(O)` / anchor by the hybrid rule; respond
-  `200 { authorized, logId, rootLogId, alg, x, y, chainId, contract, source }`
-  or `401`. ES256 delegated path only.
+- `GET /api/logs/{logId}/authority` (the trusted lookup; non-mutating, no token,
+  no cert): resolve `R` via index; establish `K(D)` / anchor by the hybrid rule
+  (chain `logRootKey` when initialized, else the chain-valid stored `grantData`);
+  respond CBOR `{ logId, rootLogId, alg, x, y, chainId, contract, source }`.
+  Resolution failures are `503` (not resolvable) / `502` (chain or store
+  unavailable). The sealer verifies the certificate locally against the returned
+  key. ES256 only.
 - Resolver: `resolve(logId)` = index → R, then chain (`logRootKey`) or grant-store
   recursion. `GET /api/logs/{logId}/public-root` keeps the same CBOR
-  `TrustRootResponse` shape, now backed by chain-or-grant.
+  `TrustRootResponse` shape (on-chain only); `/authority` adds cold-log
+  resolution + chain binding + `source`.
 - GC: none. Admin `DELETE /api/forest/{R}` and
   `DELETE /api/forest/{R}/grants/{subject}` (admin-token) for explicit cleanup.
 - Config: `UNIVOCITY_API_TOKEN`, `UNIVOCITY_ADMIN_TOKEN`,
@@ -102,12 +111,14 @@ storage.
 
 ## Sealer (`services/sealer/src`)
 
-- After obtaining the (untrusted) delegation from `DELEGATION_ISSUER_URL`, call
-  univocity `POST /api/authorize`; gate sealing on `200`. Keep local
-  `VerifyDelegationLease` against the returned `rootKey` (defense in depth); bind
+- Resolve the log's authority from univocity `GET /api/logs/{logId}/authority`
+  (cold-log capable), then request the (untrusted) delegation from
+  `DELEGATION_ISSUER_URL` and run local `VerifyDelegationLease` against the
+  returned `rootKey` — that local verification is the authorization gate. Bind
   returned `chainId`/`contract` into the lease (closes the plan-0003
   cross-deployment replay gap).
-- Enabled when `UNIVOCITY_AUTHORIZE_URL` is set (`UNIVOCITY_API_TOKEN` bearer).
+- Enabled when `UNIVOCITY_AUTHORITY_URL` is set (`UNIVOCITY_API_TOKEN` bearer,
+  optional since the key material is public).
 - Follow-up (not v1): refuse checkpointing a log whose authoritative `R`
   disagrees with a known binding.
 
@@ -119,7 +130,7 @@ storage.
   (UNIVOCITY_API_TOKEN/ADMIN_TOKEN; distribute API token to the sealer),
   `service:populate-config:univocity` (GENESIS_R2_URL, UNIVOCITY_RPC_URLS,
   UNIVOCITY_ALLOW_UNANCHORED_GENESIS), provision-cloudflare R2 creds.
-- Sealer populate adds `UNIVOCITY_AUTHORIZE_URL=http://univocity:9091`.
+- Sealer populate adds `UNIVOCITY_AUTHORITY_URL=http://univocity:9091`.
 
 ## Out of scope / deferred
 

@@ -33,7 +33,9 @@ throughput, and removes the central-trust fallback. Grant storage is ephemeral â
 it need only persist until a log's first checkpoint â€” so there is no long-term
 backup/recovery requirement.
 
-**Consequences:** Univocity needs write/authorize token auth and grants-bucket
-credentials; canopy delegates creation-grant validation to univocity and stops
-owning genesis storage (R2 becomes a transitional compat shim). GC is explicit
-(admin delete), not automatic.
+**Consequences:** Univocity needs write-endpoint token auth (genesis/grants) and
+grants-bucket credentials; the authority lookup is a public, non-mutating GET.
+Canopy delegates creation-grant validation to univocity and stops owning genesis
+storage; its local R2 copy stays authoritative for reads only until a log's first
+checkpoint, after which it may be expired. GC is explicit (admin delete), not
+automatic.

@@ -47,12 +47,14 @@ profile (`forestrie.univocity.delegation.v1`) is **checkpoint-signing only** —
 it never authorizes issuing grants.
 _Avoid_: conflating delegation certs with grant issuance authority.
 
-**Authority resolver (authorize)**:
-Univocity's trusted decision `POST /api/authorize`: resolve `logId → R` (global
-index), verify the delegation cert against `grantData_D`, establish `K(O)` by the
-hybrid rule (on-chain `logRootKey` or grant-store recursion, anchored at
-`bootstrapConfig()`), and return `{ rootKey, chainId, contract, source }` or 401.
-_Avoid_: "trust-root lookup" for the cert decision (that is the public-root read).
+**Authority resolver**:
+Univocity's trusted lookup `GET /api/logs/{logId}/authority`: resolve `logId → R`
+(global index), establish `K(logId)` by the hybrid rule (on-chain `logRootKey`
+when initialized, else the chain-valid stored `grantData`, anchored at
+`bootstrapConfig()`), and return `{ rootKey, chainId, contract, source }`. It is
+non-mutating and carries no certificate; the sealer verifies the delegation
+locally against the returned key (that local verify is the authorization gate).
+_Avoid_: sending the cert to univocity or expecting a 401 allow/deny verdict.
 
 **Owned grant store**:
 Univocity-owned S3/R2 objects: genesis (`forest/{hex64(R)}/genesis.cbor`), grants

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -17,25 +16,6 @@ const maxRequestBody = 512 * 1024
 type postGrantRequest struct {
 	RootLogID []byte `cbor:"rootLogId,omitempty"`
 	Statement []byte `cbor:"statement"`
-}
-
-// authorizeRequest carries a delegation certificate (and optional logId hint).
-type authorizeRequest struct {
-	Certificate []byte `cbor:"certificate"`
-	LogID       []byte `cbor:"logId,omitempty"`
-}
-
-// authorizeResponse is the CBOR trust decision returned to the sealer.
-type authorizeResponse struct {
-	Authorized bool   `cbor:"authorized"`
-	LogID      []byte `cbor:"logId,omitempty"`
-	RootLogID  []byte `cbor:"rootLogId,omitempty"`
-	Alg        string `cbor:"alg,omitempty"`
-	X          []byte `cbor:"x,omitempty"`
-	Y          []byte `cbor:"y,omitempty"`
-	ChainID    string `cbor:"chainId,omitempty"`
-	Contract   string `cbor:"contract,omitempty"`
-	Source     string `cbor:"source,omitempty"`
 }
 
 func readBody(r *http.Request) ([]byte, error) {
@@ -247,72 +227,6 @@ func (a API) deriveForestRoot(
 		return [32]byte{}, false
 	}
 	return root, true
-}
-
-func (a API) handleAuthorize(w http.ResponseWriter, r *http.Request) {
-	if !a.requireToken(w, r) {
-		return
-	}
-	body, err := readBody(r)
-	if err != nil {
-		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "read body failed", err.Error())
-		return
-	}
-	var req authorizeRequest
-	if err := cbor.Unmarshal(body, &req); err != nil || len(req.Certificate) == 0 {
-		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid request",
-			"expect CBOR { certificate, logId? }")
-		return
-	}
-	var hint [32]byte
-	hasHint := false
-	if len(req.LogID) > 0 {
-		if h, ok := wireFrom(req.LogID); ok {
-			hint, hasHint = h, true
-		}
-	}
-	res, err := a.authorizeCertificate(r.Context(), req.Certificate, hint, hasHint)
-	if err != nil {
-		a.writeAuthorizeError(w, r, err)
-		return
-	}
-	resp := authorizeResponse{
-		Authorized: true,
-		LogID:      res.LogID[:],
-		RootLogID:  res.RootLogID[:],
-		Alg:        "ES256",
-		X:          res.KeyX[:],
-		Y:          res.KeyY[:],
-		ChainID:    strconv.FormatUint(res.ChainID, 10),
-		Contract:   res.Contract.Hex(),
-		Source:     res.Source,
-	}
-	out, err := cbor.Marshal(resp)
-	if err != nil {
-		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "encode failed", err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", "application/cbor")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(out)
-}
-
-func (a API) writeAuthorizeError(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, ErrLogNotResolved), errors.Is(err, ErrAmbiguousForest):
-		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
-			"log not resolved", err.Error())
-	case errors.Is(err, ErrBootstrapUnavailable), errors.Is(err, ErrStoreNotConfigured):
-		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
-			"authority resolution failed", err.Error())
-	default:
-		// Signature/chain failures are unauthorized.
-		out, _ := cbor.Marshal(authorizeResponse{Authorized: false})
-		w.Header().Set("Content-Type", "application/cbor")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write(out)
-		a.Logger.Info("authorize denied", "error", err)
-	}
 }
 
 func (a API) handleDeleteGrant(w http.ResponseWriter, r *http.Request) {

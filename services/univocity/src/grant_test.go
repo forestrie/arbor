@@ -7,7 +7,6 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -94,23 +93,6 @@ func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []b
 	out, err := cbor.Marshal(cose)
 	if err != nil {
 		t.Fatalf("encode cose: %v", err)
-	}
-	return out
-}
-
-func buildCert(t *testing.T, signer *ecdsa.PrivateKey, logID [32]byte) []byte {
-	t.Helper()
-	payload := map[int]interface{}{1: hex.EncodeToString(logID[:])}
-	pb, err := cbor.Marshal(payload)
-	if err != nil {
-		t.Fatalf("encode cert payload: %v", err)
-	}
-	protected := protectedES256(t)
-	sig := signSign1(t, signer, protected, pb)
-	cose := []interface{}{protected, map[interface{}]interface{}{}, pb, sig}
-	out, err := cbor.Marshal(cose)
-	if err != nil {
-		t.Fatalf("encode cert: %v", err)
 	}
 	return out
 }
@@ -289,7 +271,7 @@ func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 	}
 }
 
-func TestAuthorizeCertificate_ColdChild(t *testing.T) {
+func TestResolveAuthority_ColdChild(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)
 	child := mustKey(t)
@@ -309,10 +291,11 @@ func TestAuthorizeCertificate_ColdChild(t *testing.T) {
 
 	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
 
-	cert := buildCert(t, child, A)
-	res, err := api.authorizeCertificate(context.Background(), cert, [32]byte{}, false)
+	// resolveAuthority returns the chain-valid grant-derived key for the cold
+	// child; the sealer verifies the delegation certificate locally against it.
+	res, err := api.resolveAuthority(context.Background(), A)
 	if err != nil {
-		t.Fatalf("authorize failed: %v", err)
+		t.Fatalf("resolve authority failed: %v", err)
 	}
 	if res.LogID != A || res.RootLogID != R || res.Source != "grant" {
 		t.Fatalf("unexpected result %+v", res)
@@ -321,10 +304,11 @@ func TestAuthorizeCertificate_ColdChild(t *testing.T) {
 		t.Fatal("returned key does not match child grantData")
 	}
 
-	// Certificate signed by an unauthorized key must be denied.
-	rogue := mustKey(t)
-	if _, err := api.authorizeCertificate(context.Background(), buildCert(t, rogue, A), [32]byte{}, false); err == nil {
-		t.Fatal("expected rogue certificate to be denied")
+	// An unknown log has no resolvable authority.
+	var unknown [32]byte
+	unknown[31] = 99
+	if _, err := api.resolveAuthority(context.Background(), unknown); err == nil {
+		t.Fatal("expected unknown log to fail authority resolution")
 	}
 }
 
@@ -391,32 +375,32 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		t.Fatalf("cross-forest reuse want 409 got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Authorize the cold child via HTTP.
-	cert := buildCert(t, child, A)
-	authBody, _ := cbor.Marshal(authorizeRequest{Certificate: cert})
-	authReq := httptest.NewRequest(http.MethodPost, "/api/authorize", bytes.NewReader(authBody))
-	authReq.Header.Set("Authorization", "Bearer secret")
+	// Resolve the cold child's authority via the GET endpoint (no token, no
+	// certificate): the sealer verifies the delegation locally against this key.
+	authReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+hex64(A)+"/authority", nil)
 	authRec := httptest.NewRecorder()
 	mux.ServeHTTP(authRec, authReq)
 	if authRec.Code != http.StatusOK {
-		t.Fatalf("authorize want 200 got %d: %s", authRec.Code, authRec.Body.String())
+		t.Fatalf("authority want 200 got %d: %s", authRec.Code, authRec.Body.String())
 	}
-	var resp authorizeResponse
+	var resp authorityResponse
 	if err := cbor.Unmarshal(authRec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode authorize resp: %v", err)
+		t.Fatalf("decode authority resp: %v", err)
 	}
-	if !resp.Authorized || !bytes.Equal(resp.RootLogID, R[:]) || resp.Source != "grant" {
-		t.Fatalf("unexpected authorize resp %+v", resp)
+	if !bytes.Equal(resp.RootLogID, R[:]) || resp.Source != "grant" {
+		t.Fatalf("unexpected authority resp %+v", resp)
+	}
+	if cx, cy := pubXY(child); !bytes.Equal(resp.X, cx[:]) || !bytes.Equal(resp.Y, cy[:]) {
+		t.Fatal("authority key does not match child grantData")
 	}
 
-	// Rogue certificate -> 401.
-	rogue := mustKey(t)
-	rogueBody, _ := cbor.Marshal(authorizeRequest{Certificate: buildCert(t, rogue, A)})
-	rogueReq := httptest.NewRequest(http.MethodPost, "/api/authorize", bytes.NewReader(rogueBody))
-	rogueReq.Header.Set("Authorization", "Bearer secret")
-	rogueRec := httptest.NewRecorder()
-	mux.ServeHTTP(rogueRec, rogueReq)
-	if rogueRec.Code != http.StatusUnauthorized {
-		t.Fatalf("rogue authorize want 401 got %d", rogueRec.Code)
+	// An unregistered log has no resolvable authority -> 503.
+	var unknown [32]byte
+	unknown[31] = 77
+	unkReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+hex64(unknown)+"/authority", nil)
+	unkRec := httptest.NewRecorder()
+	mux.ServeHTTP(unkRec, unkReq)
+	if unkRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unknown authority want 503 got %d", unkRec.Code)
 	}
 }

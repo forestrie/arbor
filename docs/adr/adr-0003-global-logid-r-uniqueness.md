@@ -19,7 +19,7 @@ genesis POST.
 
 **Why:** O(1) per-grant uniqueness with no scan; closes cross-forest `logId`
 reuse; gives the resolver a single authoritative `logId → R` lookup that both the
-public-root read and the authorize decision share. Ranger still simply appends to
+public-root read and the authority resolution share. Ranger still simply appends to
 (or creates) the log it is told to; the sealer may later be hardened to refuse a
 log whose authoritative `R` disagrees with a known binding (follow-up).
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/fxamacker/cbor/v2"
 )
 
 const maxGrantChainDepth = 32
@@ -16,8 +15,9 @@ const maxGrantChainDepth = 32
 // read (chain not configured or contract call failed).
 var ErrBootstrapUnavailable = errors.New("on-chain bootstrap anchor unavailable")
 
-// AuthorizeResult is the trust decision for a delegation certificate.
-type AuthorizeResult struct {
+// AuthorityResult is the resolved authority for a logId: the authoritative
+// ES256 root key plus the forest root and chain binding.
+type AuthorityResult struct {
 	LogID     [32]byte
 	RootLogID [32]byte
 	KeyX      [32]byte
@@ -209,38 +209,24 @@ func (a API) logRootKeyXY(
 	return kx, ky, "grant", nil
 }
 
-// authorizeCertificate performs the hybrid trust decision for a delegation cert.
-func (a API) authorizeCertificate(
+// resolveAuthority resolves the authoritative root key + chain binding for a
+// logId via the hybrid path (index -> forest, then chain logRootKey or the
+// chain-valid stored grant chain). It performs no certificate verification: the
+// sealer verifies the (untrusted) delegation certificate locally against the
+// returned key.
+func (a API) resolveAuthority(
 	ctx context.Context,
-	certBytes []byte,
-	hintLogID [32]byte,
-	hasHint bool,
-) (AuthorizeResult, error) {
-	cose, _, err := decodeCoseSign1(certBytes)
-	if err != nil {
-		return AuthorizeResult{}, fmt.Errorf("decode certificate: %w", err)
-	}
-	logID, ok := certLogID(cose)
-	if !ok {
-		if !hasHint {
-			return AuthorizeResult{}, errors.New("certificate missing logId (payload label 1)")
-		}
-		logID = hintLogID
-	} else if hasHint && logID != hintLogID {
-		return AuthorizeResult{}, errors.New("certificate logId does not match request hint")
-	}
+	logID [32]byte,
+) (AuthorityResult, error) {
 	forest, reader, err := a.resolveForestForLog(ctx, logID)
 	if err != nil {
-		return AuthorizeResult{}, err
+		return AuthorityResult{}, err
 	}
 	kx, ky, source, err := a.logRootKeyXY(ctx, forest, reader, logID)
 	if err != nil {
-		return AuthorizeResult{}, err
+		return AuthorityResult{}, err
 	}
-	if err := verifyCoseSign1ES256(cose, kx, ky); err != nil {
-		return AuthorizeResult{}, fmt.Errorf("certificate not signed by authorized key: %w", err)
-	}
-	return AuthorizeResult{
+	return AuthorityResult{
 		LogID:     logID,
 		RootLogID: forest.R,
 		KeyX:      kx,
@@ -303,20 +289,3 @@ func (a API) loadForest(ctx context.Context, r [32]byte) (ForestEntry, error) {
 	return doc.Forest, nil
 }
 
-// certLogID extracts the subject logId (payload label 1, hex string) from a
-// delegation certificate's COSE Sign1 payload.
-func certLogID(cose coseSign1) ([32]byte, bool) {
-	var raw map[interface{}]interface{}
-	if err := cbor.Unmarshal(cose.payload, &raw); err != nil {
-		return [32]byte{}, false
-	}
-	m := decodeIntKeyMap(raw)
-	if m == nil {
-		return [32]byte{}, false
-	}
-	s, ok := m.string(1)
-	if !ok || s == "" {
-		return [32]byte{}, false
-	}
-	return LogIDFromHex(s)
-}

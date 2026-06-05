@@ -44,12 +44,16 @@ func (a API) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/logs/{logId}/root", a.handleLogIDRoot)
 	mux.HandleFunc("GET /api/logs/{logId}/public-root", a.handleLogIDPublicRoot)
+	// Authority resolution for a (possibly cold) log: the authoritative root key
+	// (chain logRootKey when initialized, else the chain-valid stored grantData)
+	// plus chain binding. Non-mutating GET; the sealer verifies the delegation
+	// certificate locally against the returned key.
+	mux.HandleFunc("GET /api/logs/{logId}/authority", a.handleLogIDAuthority)
 
-	// Owned store: genesis, grants, authorize (token-auth).
+	// Owned store: genesis + grants (token-auth).
 	mux.HandleFunc("POST /api/forest/{logId}/genesis", a.handlePostGenesis)
 	mux.HandleFunc("GET /api/forest/{logId}/genesis", a.handleGetGenesis)
 	mux.HandleFunc("POST /api/grants", a.handlePostGrant)
-	mux.HandleFunc("POST /api/authorize", a.handleAuthorize)
 
 	// Admin (admin-token): explicit, no automatic GC.
 	mux.HandleFunc("DELETE /api/forest/{logId}/grants/{subject}", a.handleDeleteGrant)
