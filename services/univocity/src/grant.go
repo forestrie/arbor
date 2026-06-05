@@ -238,6 +238,9 @@ func asByteSlice(v interface{}) ([]byte, bool) {
 		return b, true
 	case string:
 		return []byte(b), true
+	case cbor.Tag:
+		// cbor-x (canopy) encodes Uint8Array fields as tagged byte strings.
+		return asByteSlice(b.Content)
 	default:
 		return nil, false
 	}

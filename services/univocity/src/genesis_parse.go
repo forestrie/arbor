@@ -140,13 +140,7 @@ func (m genesisIntMap) byteSlice(label int) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	switch b := v.(type) {
-	case []byte:
-		return b, true
-	case string:
-		return []byte(b), true
-	}
-	return nil, false
+	return asByteSlice(v)
 }
 
 // wireLogIDFromHex64 parses a 64-char hex log id (no 0x) into 32 wire bytes.
