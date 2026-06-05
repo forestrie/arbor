@@ -31,6 +31,14 @@ type DelegationLease struct {
 
 	IssuedAt  time.Time
 	ExpiresAt time.Time
+
+	// Authority binding from the univocity authorize decision (empty when the
+	// legacy trust-root path is used). Binds the lease to a specific chain /
+	// contract, closing the cross-deployment replay gap (plan-0003).
+	RootLogIDHex    string
+	ChainID         string
+	ContractAddress string
+	AuthSource      string // "chain" | "grant"
 }
 
 // COSESigner returns a veraison/go-cose Signer + kid + public key to use with

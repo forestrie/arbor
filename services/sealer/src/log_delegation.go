@@ -26,7 +26,7 @@ func RequestLogDelegationLease(
 	mmrStart, mmrEnd uint64,
 ) (*DelegationLease, error) {
 	return requestLogDelegationLeaseWithKeyPair(
-		ctx, httpClient, trustRoot, issuer, curveRaw, ttl,
+		ctx, httpClient, trustRoot, nil, issuer, curveRaw, ttl,
 		logIdHex, mmrStart, mmrEnd, nil,
 	)
 }
@@ -43,6 +43,7 @@ func requestLogDelegationLeaseWithKeyPair(
 	ctx context.Context,
 	httpClient *HTTPClient,
 	trustRoot TrustRootClient,
+	authorizer AuthorizeClient,
 	issuer DelegationIssuer,
 	curveRaw string,
 	ttl time.Duration,
@@ -53,7 +54,7 @@ func requestLogDelegationLeaseWithKeyPair(
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is nil")
 	}
-	if trustRoot == nil {
+	if authorizer == nil && trustRoot == nil {
 		return nil, fmt.Errorf("trust root client is nil")
 	}
 	if issuer == nil {
@@ -105,9 +106,15 @@ func requestLogDelegationLeaseWithKeyPair(
 		algorithm = "KS256"
 	}
 
-	rootKey, err := trustRoot.LogSigningKey(ctx, logIdHex)
-	if err != nil {
-		return nil, fmt.Errorf("trust root: %w", err)
+	// Legacy path resolves the trust root by logId before the issuer call. The
+	// authorize path defers key resolution until after the (untrusted) issuer
+	// returns the certificate, so univocity can decide authority from the cert.
+	var rootKey LogSigningKey
+	if authorizer == nil {
+		rootKey, err = trustRoot.LogSigningKey(ctx, logIdHex)
+		if err != nil {
+			return nil, fmt.Errorf("trust root: %w", err)
+		}
 	}
 
 	issuerResp, err := issuer.IssueForLog(ctx, IssuerLeaseRequest{
@@ -124,6 +131,18 @@ func requestLogDelegationLeaseWithKeyPair(
 		return nil, fmt.Errorf("delegation issuer: %w", err)
 	}
 
+	var binding AuthorizeBinding
+	if authorizer != nil {
+		binding, err = authorizer.Authorize(ctx, issuerResp.Certificate, logIdHex)
+		if err != nil {
+			return nil, fmt.Errorf("authorize: %w", err)
+		}
+		if !binding.Authorized {
+			return nil, fmt.Errorf("univocity denied delegation authorization for log %s", logIdHex)
+		}
+		rootKey = binding.SigningKey
+	}
+
 	info, err := VerifyDelegationLease(rootKey, issuerResp, LeaseVerificationInput{
 		LogIdHex:            logIdHex,
 		MMRStart:            mmrStart,
@@ -137,13 +156,17 @@ func requestLogDelegationLeaseWithKeyPair(
 	}
 
 	return &DelegationLease{
-		CertBytes:  issuerResp.Certificate,
-		Info:       info,
-		Curve:      curve,
-		PrivateKey: keyPair.Private,
-		PublicKey:  keyPair.Public,
-		IssuedAt:   issuerResp.IssuedAt,
-		ExpiresAt:  issuerResp.ExpiresAt,
+		CertBytes:       issuerResp.Certificate,
+		Info:            info,
+		Curve:           curve,
+		PrivateKey:      keyPair.Private,
+		PublicKey:       keyPair.Public,
+		IssuedAt:        issuerResp.IssuedAt,
+		ExpiresAt:       issuerResp.ExpiresAt,
+		RootLogIDHex:    binding.RootLogIDHex,
+		ChainID:         binding.ChainID,
+		ContractAddress: binding.ContractAddress,
+		AuthSource:      binding.Source,
 	}, nil
 }
 

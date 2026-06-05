@@ -38,6 +38,12 @@ type Config struct {
 	DelegationIssuerURL   string
 	DelegationIssuerToken string
 
+	// Univocity trusted authority resolver. When UnivocityAuthorizeURL is set,
+	// the sealer authorizes delegations via univocity (cert -> authoritative
+	// root key + chain binding) instead of the legacy trust-root-by-logId path.
+	UnivocityAuthorizeURL string
+	UnivocityAPIToken     string
+
 	// Deprecated migration aliases (fall back when seam URLs/tokens unset).
 	CustodianURL      string
 	CustodianAppToken string
@@ -150,6 +156,8 @@ func LoadConfig() Config {
 		TrustRootToken:        os.Getenv("TRUST_ROOT_TOKEN"),
 		DelegationIssuerURL:   os.Getenv("DELEGATION_ISSUER_URL"),
 		DelegationIssuerToken: os.Getenv("DELEGATION_ISSUER_TOKEN"),
+		UnivocityAuthorizeURL: os.Getenv("UNIVOCITY_AUTHORIZE_URL"),
+		UnivocityAPIToken:     os.Getenv("UNIVOCITY_API_TOKEN"),
 		DelegationKeyCurve: getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
 		R2URL:                               os.Getenv("R2_URL"),
 		R2Token:                             r2Token,
@@ -185,6 +193,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logSecretDigest(logger, "TRUST_ROOT_TOKEN", c.TrustRootToken)
 	logConfigValue(logger, "DELEGATION_ISSUER_URL", c.DelegationIssuerURL)
 	logSecretDigest(logger, "DELEGATION_ISSUER_TOKEN", c.DelegationIssuerToken)
+	logConfigValue(logger, "UNIVOCITY_AUTHORIZE_URL", c.UnivocityAuthorizeURL)
+	logSecretDigest(logger, "UNIVOCITY_API_TOKEN", c.UnivocityAPIToken)
 	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
 	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
