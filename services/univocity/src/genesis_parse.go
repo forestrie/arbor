@@ -13,6 +13,15 @@ import (
 
 var chainIDStringRE = regexp.MustCompile(`^[0-9]{1,10}$`)
 
+// parseChainIDString converts a decimal EIP-155 chain id string to uint64.
+func parseChainIDString(s string) (uint64, error) {
+	id, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("chain-id out of range")
+	}
+	return id, nil
+}
+
 // parseGenesisV1 decodes a v1 forest genesis document from CBOR bytes.
 func parseGenesisV1(bytes []byte) (ForestEntry, error) {
 	var raw map[interface{}]interface{}

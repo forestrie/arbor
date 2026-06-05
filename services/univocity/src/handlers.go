@@ -54,39 +54,30 @@ func (a API) resolveForest(
 	r *http.Request,
 	logID [32]byte,
 ) (ForestEntry, ChainReader, bool) {
-	if a.Resolver == nil {
+	if a.Resolver == nil && a.Store == nil {
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 			"forest resolver unavailable", "")
 		return ForestEntry{}, nil, false
 	}
-	entry, err := a.Resolver.Resolve(r.Context(), logID)
+	// Index (owned store) first, then genesis-identity + on-chain probe resolver.
+	entry, reader, err := a.resolveForestForLog(r.Context(), logID)
 	if err != nil {
-		if errors.Is(err, ErrAmbiguousForest) {
+		switch {
+		case errors.Is(err, ErrAmbiguousForest):
 			a.Logger.Error("ambiguous forest resolution", "logId", LogIDToHex(logID))
 			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 				"ambiguous log forest", err.Error())
-			return ForestEntry{}, nil, false
-		}
-		if errors.Is(err, ErrLogNotResolved) {
+		case errors.Is(err, ErrLogNotResolved):
 			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 				"log not resolved", "forest unknown or log not yet on-chain")
-			return ForestEntry{}, nil, false
-		}
-		a.Logger.Error("resolve failed", "error", err, "logId", LogIDToHex(logID))
-		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
-			"resolve failed", err.Error())
-		return ForestEntry{}, nil, false
-	}
-	reader, err := a.Pool.Reader(entry.ChainID, entry.Contract)
-	if err != nil {
-		if errors.Is(err, ErrChainNotConfigured) {
+		case errors.Is(err, ErrChainNotConfigured):
 			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 				"chain not configured", err.Error())
-			return ForestEntry{}, nil, false
+		default:
+			a.Logger.Error("resolve failed", "error", err, "logId", LogIDToHex(logID))
+			a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
+				"resolve failed", err.Error())
 		}
-		a.Logger.Error("rpc reader failed", "error", err)
-		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
-			"rpc connection failed", err.Error())
 		return ForestEntry{}, nil, false
 	}
 	return entry, reader, true

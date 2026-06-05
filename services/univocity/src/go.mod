@@ -7,6 +7,7 @@ toolchain go1.24.4
 require (
 	github.com/ethereum/go-ethereum v1.17.1
 	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0-00010101000000-000000000000
+	github.com/forestrie/go-merklelog/massifs v0.0.3
 	github.com/fxamacker/cbor/v2 v2.9.0
 )
 
@@ -30,7 +31,6 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
-	github.com/forestrie/go-merklelog/massifs v0.0.3 // indirect
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

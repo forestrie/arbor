@@ -1,0 +1,322 @@
+package univocity
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/fxamacker/cbor/v2"
+)
+
+const maxGrantChainDepth = 32
+
+// ErrBootstrapUnavailable indicates the on-chain bootstrap anchor could not be
+// read (chain not configured or contract call failed).
+var ErrBootstrapUnavailable = errors.New("on-chain bootstrap anchor unavailable")
+
+// AuthorizeResult is the trust decision for a delegation certificate.
+type AuthorizeResult struct {
+	LogID     [32]byte
+	RootLogID [32]byte
+	KeyX      [32]byte
+	KeyY      [32]byte
+	ChainID   uint64
+	Contract  common.Address
+	Source    string // "chain" | "grant"
+}
+
+// bootstrapKey returns the 64-byte on-chain bootstrap key (x||y) for a forest,
+// cached per (chainId, contract).
+func (a API) bootstrapKey(
+	ctx context.Context,
+	forest ForestEntry,
+	reader ChainReader,
+) ([]byte, error) {
+	cacheKey := fmt.Sprintf("%d|%s", forest.ChainID, forest.Contract.Hex())
+	if a.Bootstrap != nil {
+		if k, ok := a.Bootstrap.get(cacheKey); ok {
+			return k, nil
+		}
+	}
+	_, key, err := reader.BootstrapConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
+	}
+	if len(key) != 64 {
+		return nil, fmt.Errorf("bootstrap key must be 64 bytes, got %d", len(key))
+	}
+	if a.Bootstrap != nil {
+		a.Bootstrap.put(cacheKey, key)
+	}
+	return key, nil
+}
+
+// verifyGrantChain verifies a creation grant's envelope is signed by its owner's
+// root key and that the chain anchors at the forest bootstrap key. Returns nil
+// when the grant is a chain-valid creation grant.
+func (a API) verifyGrantChain(
+	ctx context.Context,
+	forest ForestEntry,
+	reader ChainReader,
+	ts TransparentStatement,
+) error {
+	return a.verifyGrantChainDepth(ctx, forest, reader, ts, 0)
+}
+
+func (a API) verifyGrantChainDepth(
+	ctx context.Context,
+	forest ForestEntry,
+	reader ChainReader,
+	ts TransparentStatement,
+	depth int,
+) error {
+	g := ts.Grant
+	ox, oy, err := a.ownerKeyXY(ctx, forest, reader, g.OwnerLogID, depth)
+	if err != nil {
+		return err
+	}
+	if err := verifyCoseSign1ES256(ts.cose, ox, oy); err != nil {
+		return fmt.Errorf("grant envelope not signed by owner root key: %w", err)
+	}
+	if g.LogID == forest.R {
+		if g.OwnerLogID != forest.R {
+			return errors.New("root grant must be self-owned (owner == R)")
+		}
+		key, err := a.bootstrapKey(ctx, forest, reader)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(g.GrantData, key) {
+			return errors.New("root grantData does not match on-chain bootstrap key")
+		}
+	}
+	return nil
+}
+
+// ownerKeyXY resolves an owner/authority log's ES256 root key (x,y), preferring
+// the on-chain logRootKey and falling back to the off-chain grant chain. The
+// recursion anchors at the forest bootstrap key (owner == R).
+func (a API) ownerKeyXY(
+	ctx context.Context,
+	forest ForestEntry,
+	reader ChainReader,
+	owner [32]byte,
+	depth int,
+) (x, y [32]byte, err error) {
+	if depth > maxGrantChainDepth {
+		return [32]byte{}, [32]byte{}, errors.New("grant chain exceeds max depth")
+	}
+	if owner == forest.R {
+		key, err := a.bootstrapKey(ctx, forest, reader)
+		if err != nil {
+			return [32]byte{}, [32]byte{}, err
+		}
+		bx, by, ok := grantDataToXY(key)
+		if !ok {
+			return [32]byte{}, [32]byte{}, errors.New("bootstrap key is not 64 bytes")
+		}
+		return bx, by, nil
+	}
+	initialized, err := reader.IsLogInitialized(ctx, owner)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, fmt.Errorf("isLogInitialized(owner): %w", err)
+	}
+	if initialized {
+		kx, ky, err := reader.LogRootKey(ctx, owner)
+		if err != nil {
+			return [32]byte{}, [32]byte{}, fmt.Errorf("logRootKey(owner): %w", err)
+		}
+		return kx, ky, nil
+	}
+	if a.Store == nil {
+		return [32]byte{}, [32]byte{}, ErrStoreNotConfigured
+	}
+	body, err := a.Store.GetGrant(ctx, forest.R, owner)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, fmt.Errorf("owner grant unavailable: %w", err)
+	}
+	ts, err := decodeTransparentStatement(body)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, fmt.Errorf("decode owner grant: %w", err)
+	}
+	if ts.Grant.LogID != owner {
+		return [32]byte{}, [32]byte{}, errors.New("owner grant subject mismatch")
+	}
+	if err := a.verifyGrantChainDepth(ctx, forest, reader, ts, depth+1); err != nil {
+		return [32]byte{}, [32]byte{}, err
+	}
+	kx, ky, ok := grantDataToXY(ts.Grant.GrantData)
+	if !ok {
+		return [32]byte{}, [32]byte{}, errors.New("owner grantData is not a 64-byte ES256 key")
+	}
+	return kx, ky, nil
+}
+
+// logRootKeyXY resolves the ES256 root key that signs a log's delegation /
+// checkpoint: on-chain logRootKey when initialized, else the (chain-valid)
+// stored grantData. For the forest root it is the on-chain bootstrap key.
+func (a API) logRootKeyXY(
+	ctx context.Context,
+	forest ForestEntry,
+	reader ChainReader,
+	logID [32]byte,
+) (x, y [32]byte, source string, err error) {
+	if logID == forest.R {
+		key, err := a.bootstrapKey(ctx, forest, reader)
+		if err != nil {
+			return [32]byte{}, [32]byte{}, "", err
+		}
+		bx, by, ok := grantDataToXY(key)
+		if !ok {
+			return [32]byte{}, [32]byte{}, "", errors.New("bootstrap key is not 64 bytes")
+		}
+		return bx, by, "chain", nil
+	}
+	initialized, err := reader.IsLogInitialized(ctx, logID)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, "", fmt.Errorf("isLogInitialized: %w", err)
+	}
+	if initialized {
+		kx, ky, err := reader.LogRootKey(ctx, logID)
+		if err != nil {
+			return [32]byte{}, [32]byte{}, "", fmt.Errorf("logRootKey: %w", err)
+		}
+		return kx, ky, "chain", nil
+	}
+	if a.Store == nil {
+		return [32]byte{}, [32]byte{}, "", ErrStoreNotConfigured
+	}
+	body, err := a.Store.GetGrant(ctx, forest.R, logID)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, "", fmt.Errorf("grant unavailable: %w", err)
+	}
+	ts, err := decodeTransparentStatement(body)
+	if err != nil {
+		return [32]byte{}, [32]byte{}, "", fmt.Errorf("decode grant: %w", err)
+	}
+	if ts.Grant.LogID != logID {
+		return [32]byte{}, [32]byte{}, "", errors.New("grant subject mismatch")
+	}
+	if err := a.verifyGrantChain(ctx, forest, reader, ts); err != nil {
+		return [32]byte{}, [32]byte{}, "", err
+	}
+	kx, ky, ok := grantDataToXY(ts.Grant.GrantData)
+	if !ok {
+		return [32]byte{}, [32]byte{}, "", errors.New("grantData is not a 64-byte ES256 key")
+	}
+	return kx, ky, "grant", nil
+}
+
+// authorizeCertificate performs the hybrid trust decision for a delegation cert.
+func (a API) authorizeCertificate(
+	ctx context.Context,
+	certBytes []byte,
+	hintLogID [32]byte,
+	hasHint bool,
+) (AuthorizeResult, error) {
+	cose, _, err := decodeCoseSign1(certBytes)
+	if err != nil {
+		return AuthorizeResult{}, fmt.Errorf("decode certificate: %w", err)
+	}
+	logID, ok := certLogID(cose)
+	if !ok {
+		if !hasHint {
+			return AuthorizeResult{}, errors.New("certificate missing logId (payload label 1)")
+		}
+		logID = hintLogID
+	} else if hasHint && logID != hintLogID {
+		return AuthorizeResult{}, errors.New("certificate logId does not match request hint")
+	}
+	forest, reader, err := a.resolveForestForLog(ctx, logID)
+	if err != nil {
+		return AuthorizeResult{}, err
+	}
+	kx, ky, source, err := a.logRootKeyXY(ctx, forest, reader, logID)
+	if err != nil {
+		return AuthorizeResult{}, err
+	}
+	if err := verifyCoseSign1ES256(cose, kx, ky); err != nil {
+		return AuthorizeResult{}, fmt.Errorf("certificate not signed by authorized key: %w", err)
+	}
+	return AuthorizeResult{
+		LogID:     logID,
+		RootLogID: forest.R,
+		KeyX:      kx,
+		KeyY:      ky,
+		ChainID:   forest.ChainID,
+		Contract:  forest.Contract,
+		Source:    source,
+	}, nil
+}
+
+// resolveForestForLog finds the forest for a subject log: index->R (owned store)
+// first, then the genesis-identity + on-chain-probe resolver as a fallback.
+func (a API) resolveForestForLog(
+	ctx context.Context,
+	logID [32]byte,
+) (ForestEntry, ChainReader, error) {
+	if a.Store != nil {
+		if r, found, err := a.Store.IndexGet(ctx, logID); err == nil && found {
+			forest, err := a.loadForest(ctx, r)
+			if err != nil {
+				return ForestEntry{}, nil, fmt.Errorf("load forest for index: %w", err)
+			}
+			reader, err := a.Pool.Reader(forest.ChainID, forest.Contract)
+			if err != nil {
+				return ForestEntry{}, nil, err
+			}
+			return forest, reader, nil
+		}
+	}
+	if a.Resolver != nil {
+		forest, err := a.Resolver.Resolve(ctx, logID)
+		if err != nil {
+			return ForestEntry{}, nil, err
+		}
+		reader, err := a.Pool.Reader(forest.ChainID, forest.Contract)
+		if err != nil {
+			return ForestEntry{}, nil, err
+		}
+		return forest, reader, nil
+	}
+	return ForestEntry{}, nil, ErrLogNotResolved
+}
+
+// loadForest reads and parses a forest genesis document from the owned store.
+func (a API) loadForest(ctx context.Context, r [32]byte) (ForestEntry, error) {
+	if a.Store == nil {
+		return ForestEntry{}, ErrStoreNotConfigured
+	}
+	body, err := a.Store.GetGenesis(ctx, r)
+	if err != nil {
+		return ForestEntry{}, err
+	}
+	doc, err := parseGenesisDoc(body)
+	if err != nil {
+		return ForestEntry{}, err
+	}
+	if doc.Forest.R != r {
+		return ForestEntry{}, errors.New("genesis bootstrap-logid does not match object key")
+	}
+	return doc.Forest, nil
+}
+
+// certLogID extracts the subject logId (payload label 1, hex string) from a
+// delegation certificate's COSE Sign1 payload.
+func certLogID(cose coseSign1) ([32]byte, bool) {
+	var raw map[interface{}]interface{}
+	if err := cbor.Unmarshal(cose.payload, &raw); err != nil {
+		return [32]byte{}, false
+	}
+	m := decodeIntKeyMap(raw)
+	if m == nil {
+		return [32]byte{}, false
+	}
+	s, ok := m.string(1)
+	if !ok || s == "" {
+		return [32]byte{}, false
+	}
+	return LogIDFromHex(s)
+}

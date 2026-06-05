@@ -104,9 +104,14 @@ func main() {
 	setupHealthChecks(mux)
 
 	api := univocity.API{
-		Logger:   logger,
-		Pool:     pool,
-		Resolver: forestResolver,
+		Logger:                 logger,
+		Pool:                   pool,
+		Resolver:               forestResolver,
+		Store:                  univocity.NewS3Store(s3Client),
+		APIToken:               cfg.APIToken,
+		AdminToken:             cfg.AdminToken,
+		AllowUnanchoredGenesis: cfg.AllowUnanchoredGenesis,
+		Bootstrap:              univocity.NewBootstrapCache(),
 	}
 	api.RegisterRoutes(mux)
 

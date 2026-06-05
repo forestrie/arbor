@@ -29,6 +29,14 @@ type Config struct {
 
 	GenesisScanMinInterval time.Duration
 	LogForestCacheSize     int
+
+	// APIToken authenticates canopy->univocity write/authorize calls.
+	APIToken string
+	// AdminToken authenticates destructive admin endpoints.
+	AdminToken string
+	// AllowUnanchoredGenesis permits storing genesis/grants without an on-chain
+	// bootstrap anchor (local/dev/e2e only). Never enable in production.
+	AllowUnanchoredGenesis bool
 }
 
 var levelAliases = map[string]slog.Level{
@@ -105,7 +113,22 @@ func LoadConfig() (Config, error) {
 		AWSRegion:              getEnvOrDefault("AWS_REGION", "auto"),
 		GenesisScanMinInterval: scanInterval,
 		LogForestCacheSize:     cacheSize,
+		APIToken:               strings.TrimSpace(os.Getenv("UNIVOCITY_API_TOKEN")),
+		AdminToken:             strings.TrimSpace(os.Getenv("UNIVOCITY_ADMIN_TOKEN")),
+		AllowUnanchoredGenesis: getBool("UNIVOCITY_ALLOW_UNANCHORED_GENESIS", false),
 	}, nil
+}
+
+func getBool(key string, defaultVal bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultVal
+	}
 }
 
 func parseRPCURLs(raw string) (map[uint64]string, error) {
@@ -147,6 +170,9 @@ func (c Config) LogConfig(logger *slog.Logger) {
 		"GENESIS_R2_URL", nonSecret(c.GenesisR2URL),
 		"GENESIS_SCAN_MIN_INTERVAL", c.GenesisScanMinInterval,
 		"LOG_FOREST_CACHE_SIZE", c.LogForestCacheSize,
+		"UNIVOCITY_API_TOKEN", nonSecret(c.APIToken),
+		"UNIVOCITY_ADMIN_TOKEN", nonSecret(c.AdminToken),
+		"UNIVOCITY_ALLOW_UNANCHORED_GENESIS", c.AllowUnanchoredGenesis,
 	)
 }
 

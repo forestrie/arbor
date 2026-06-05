@@ -87,6 +87,7 @@ func (p *ContractClients) Close() {
 
 const univocityViewABI = `[
 	{"inputs":[],"name":"rootLogId","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},
+	{"inputs":[],"name":"bootstrapConfig","outputs":[{"internalType":"int64","name":"bootstrapAlg","type":"int64"},{"internalType":"bytes","name":"bootstrapKey","type":"bytes"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logConfig","outputs":[{"internalType":"uint8","name":"kind","type":"uint8"},{"internalType":"bytes32","name":"authLogId","type":"bytes32"},{"internalType":"bytes","name":"rootKey","type":"bytes"},{"internalType":"uint256","name":"initializedAt","type":"uint256"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"isLogInitialized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logRootKey","outputs":[{"internalType":"bytes32","name":"rootKeyX","type":"bytes32"},{"internalType":"bytes32","name":"rootKeyY","type":"bytes32"}],"stateMutability":"view","type":"function"}
@@ -121,6 +122,7 @@ type LogConfig struct {
 // ChainReader is the contract read interface used by the API. It allows tests to inject a mock.
 type ChainReader interface {
 	RootLogId(ctx context.Context) ([32]byte, error)
+	BootstrapConfig(ctx context.Context) (alg int64, key []byte, err error)
 	IsLogInitialized(ctx context.Context, logId [32]byte) (bool, error)
 	LogConfig(ctx context.Context, logId [32]byte) (LogConfig, error)
 	LogRootKey(ctx context.Context, logId [32]byte) (rootKeyX, rootKeyY [32]byte, err error)
@@ -146,6 +148,35 @@ func (c *UnivocityContract) RootLogId(ctx context.Context) ([32]byte, error) {
 		return [32]byte{}, err
 	}
 	return vals[0].([32]byte), nil
+}
+
+// BootstrapConfig returns the immutable on-chain bootstrap (alg, key) that
+// anchors a forest's authority chain. key is the SEC1/uncompressed-less
+// concatenated x||y for ES256 (64 bytes).
+func (c *UnivocityContract) BootstrapConfig(ctx context.Context) (int64, []byte, error) {
+	data, err := c.contract.Pack("bootstrapConfig")
+	if err != nil {
+		return 0, nil, err
+	}
+	out, err := c.call(ctx, data)
+	if err != nil {
+		return 0, nil, err
+	}
+	vals, err := c.contract.Unpack("bootstrapConfig", out)
+	if err != nil || len(vals) < 2 {
+		return 0, nil, err
+	}
+	var alg int64
+	switch v := vals[0].(type) {
+	case int64:
+		alg = v
+	case *big.Int:
+		if v != nil {
+			alg = v.Int64()
+		}
+	}
+	key, _ := vals[1].([]byte)
+	return alg, key, nil
 }
 
 func (c *UnivocityContract) IsLogInitialized(ctx context.Context, logId [32]byte) (bool, error) {

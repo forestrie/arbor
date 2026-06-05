@@ -9,6 +9,8 @@ import (
 
 type mockChain struct {
 	rootLogId                [32]byte
+	bootstrapAlg             int64
+	bootstrapKey             []byte
 	logInitialized           bool
 	logConfig                LogConfig
 	logRootKeyX, logRootKeyY [32]byte
@@ -16,6 +18,10 @@ type mockChain struct {
 
 func (m *mockChain) RootLogId(context.Context) ([32]byte, error) {
 	return m.rootLogId, nil
+}
+
+func (m *mockChain) BootstrapConfig(context.Context) (int64, []byte, error) {
+	return m.bootstrapAlg, m.bootstrapKey, nil
 }
 
 func (m *mockChain) IsLogInitialized(_ context.Context, _ [32]byte) (bool, error) {
