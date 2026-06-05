@@ -38,7 +38,7 @@ type pendingKeyEntry struct {
 // for the sealer process. Uses LRU eviction when the cache is full.
 type DelegationLeaseManager struct {
 	trustRoot   TrustRootClient
-	authorizer  AuthorizeClient
+	resolver    AuthorityResolver
 	issuer      DelegationIssuer
 	mu          sync.Mutex
 	leases      map[string]*list.Element // logIdHex -> list element
@@ -72,11 +72,12 @@ func NewDelegationLeaseManager(
 	}
 }
 
-// SetAuthorizer enables the trusted univocity authorize path. When set, the
-// manager resolves a log's root key (and chain binding) from the certificate
-// via univocity rather than the legacy trust-root-by-logId lookup.
-func (m *DelegationLeaseManager) SetAuthorizer(a AuthorizeClient) {
-	m.authorizer = a
+// SetAuthorityResolver enables the trusted univocity authority path. When set,
+// the manager resolves a log's root key (and chain binding) by logId from
+// univocity (which can resolve cold logs from the grant chain) rather than the
+// legacy trust-root-by-logId lookup.
+func (m *DelegationLeaseManager) SetAuthorityResolver(a AuthorityResolver) {
+	m.resolver = a
 }
 
 // EnsureValidForLog returns a delegation lease for a specific log that is not
@@ -94,7 +95,7 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if m.issuer == nil || (m.trustRoot == nil && m.authorizer == nil) {
+	if m.issuer == nil || (m.trustRoot == nil && m.resolver == nil) {
 		return nil, fmt.Errorf("delegation seams not configured")
 	}
 
@@ -124,7 +125,7 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 	}
 
 	lease, err := requestLogDelegationLeaseWithKeyPair(
-		ctx, httpClient, m.trustRoot, m.authorizer, m.issuer, curve, m.ttl,
+		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, curve, m.ttl,
 		logIdHex, mmrStart, mmrEnd, keyPair,
 	)
 	if err != nil {

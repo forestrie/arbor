@@ -7,15 +7,16 @@ import (
 	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
-// newAuthorizeServer stands up a fake univocity authorize endpoint that returns
-// the supplied public key as the authoritative root key (or 401 when deny).
-func newAuthorizeServer(t *testing.T, pub *ecdsa.PublicKey, deny bool) *httptest.Server {
+// newAuthorityServer stands up a fake univocity authority endpoint that returns
+// the supplied public key as the authoritative root key (or 503 when notFound).
+func newAuthorityServer(t *testing.T, pub *ecdsa.PublicKey, notFound bool) *httptest.Server {
 	t.Helper()
 	x := make([]byte, 32)
 	y := make([]byte, 32)
@@ -24,33 +25,31 @@ func newAuthorizeServer(t *testing.T, pub *ecdsa.PublicKey, deny bool) *httptest
 		pub.Y.FillBytes(y)
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/authorize" || r.Method != http.MethodPost {
+		if r.Method != http.MethodGet ||
+			!strings.HasPrefix(r.URL.Path, "/api/logs/") ||
+			!strings.HasSuffix(r.URL.Path, "/authority") {
 			http.NotFound(w, r)
 			return
 		}
-		if deny {
-			body, _ := cbor.Marshal(authorizeResponse{Authorized: false})
-			w.Header().Set("Content-Type", "application/cbor")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write(body)
+		if notFound {
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		body, _ := cbor.Marshal(authorizeResponse{
-			Authorized: true,
-			RootLogID:  make([]byte, 32),
-			Alg:        "ES256",
-			X:          x,
-			Y:          y,
-			ChainID:    "84532",
-			Contract:   "0x000000000000000000000000000000000000abcd",
-			Source:     "grant",
+		body, _ := cbor.Marshal(authorityResponse{
+			RootLogID: make([]byte, 32),
+			Alg:       "ES256",
+			X:         x,
+			Y:         y,
+			ChainID:   "84532",
+			Contract:  "0x000000000000000000000000000000000000abcd",
+			Source:    "grant",
 		})
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write(body)
 	}))
 }
 
-func TestRequestLogDelegationLease_UnivocityAuthorize(t *testing.T) {
+func TestRequestLogDelegationLease_UnivocityAuthority(t *testing.T) {
 	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -59,10 +58,10 @@ func TestRequestLogDelegationLease_UnivocityAuthorize(t *testing.T) {
 
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
 	defer issuerSrv.Close()
-	authSrv := newAuthorizeServer(t, &rootPriv.PublicKey, false)
+	authSrv := newAuthorityServer(t, &rootPriv.PublicKey, false)
 	defer authSrv.Close()
 
-	authorizer := &HTTPAuthorizeClient{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)}
+	resolver := &HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)}
 	issuer := &HTTPDelegationIssuer{
 		BaseURL:    issuerSrv.URL,
 		Token:      byokIssuerToken,
@@ -70,11 +69,11 @@ func TestRequestLogDelegationLease_UnivocityAuthorize(t *testing.T) {
 	}
 
 	lease, err := requestLogDelegationLeaseWithKeyPair(
-		context.Background(), NewHTTPClient(nil), nil, authorizer, issuer,
+		context.Background(), NewHTTPClient(nil), nil, resolver, issuer,
 		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
 	)
 	if err != nil {
-		t.Fatalf("expected authorize lease, got %v", err)
+		t.Fatalf("expected authority lease, got %v", err)
 	}
 	if lease.ChainID != "84532" || lease.AuthSource != "grant" {
 		t.Fatalf("expected chain binding in lease, got %+v", lease)
@@ -84,7 +83,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorize(t *testing.T) {
 	}
 }
 
-func TestRequestLogDelegationLease_UnivocityAuthorizeDenied(t *testing.T) {
+func TestRequestLogDelegationLease_UnivocityAuthorityUnresolved(t *testing.T) {
 	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -92,21 +91,21 @@ func TestRequestLogDelegationLease_UnivocityAuthorizeDenied(t *testing.T) {
 	logID := "1123456789abcdef0123456789abcdef"
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
 	defer issuerSrv.Close()
-	authSrv := newAuthorizeServer(t, &rootPriv.PublicKey, true)
+	authSrv := newAuthorityServer(t, &rootPriv.PublicKey, true)
 	defer authSrv.Close()
 
 	_, err = requestLogDelegationLeaseWithKeyPair(
 		context.Background(), NewHTTPClient(nil), nil,
-		&HTTPAuthorizeClient{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
+		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
 	)
 	if err == nil {
-		t.Fatal("expected denied authorization to fail")
+		t.Fatal("expected unresolved authority to fail")
 	}
 }
 
-func TestRequestLogDelegationLease_UnivocityAuthorizeWrongKey(t *testing.T) {
+func TestRequestLogDelegationLease_UnivocityAuthorityWrongKey(t *testing.T) {
 	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -118,17 +117,17 @@ func TestRequestLogDelegationLease_UnivocityAuthorizeWrongKey(t *testing.T) {
 	logID := "2123456789abcdef0123456789abcdef"
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
 	defer issuerSrv.Close()
-	// Authorize returns a key that did NOT sign the certificate.
-	authSrv := newAuthorizeServer(t, &wrong.PublicKey, false)
+	// Authority returns a key that did NOT sign the certificate.
+	authSrv := newAuthorityServer(t, &wrong.PublicKey, false)
 	defer authSrv.Close()
 
 	_, err = requestLogDelegationLeaseWithKeyPair(
 		context.Background(), NewHTTPClient(nil), nil,
-		&HTTPAuthorizeClient{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
+		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
 	)
 	if err == nil {
-		t.Fatal("expected mismatched authorize key to fail local verification")
+		t.Fatal("expected mismatched authority key to fail local verification")
 	}
 }

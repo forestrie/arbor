@@ -64,14 +64,14 @@ func main() {
 		HTTPClient: httpClient,
 	}
 	leaseMgr := sealer.NewDelegationLeaseManager(trustRoot, issuer, 0, 0)
-	if cfg.UnivocityAuthorizeURL != "" {
-		leaseMgr.SetAuthorizer(&sealer.HTTPAuthorizeClient{
-			BaseURL:    cfg.UnivocityAuthorizeURL,
+	if cfg.UnivocityAuthorityURL != "" {
+		leaseMgr.SetAuthorityResolver(&sealer.HTTPAuthorityResolver{
+			BaseURL:    cfg.UnivocityAuthorityURL,
 			Token:      cfg.UnivocityAPIToken,
 			HTTPClient: httpClient,
 		})
-		slog.Info("sealer using univocity authorize path",
-			"univocity_authorize_url", cfg.UnivocityAuthorizeURL,
+		slog.Info("sealer using univocity authority resolver",
+			"univocity_authority_url", cfg.UnivocityAuthorityURL,
 		)
 	}
 

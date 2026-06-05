@@ -1,7 +1,6 @@
 package sealer
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -12,9 +11,11 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// AuthorizeBinding is the univocity trust decision for a delegation certificate.
-type AuthorizeBinding struct {
-	Authorized      bool
+// AuthorityBinding is the authority univocity resolves for a log: the
+// authoritative root key plus the chain binding. The sealer verifies the
+// (untrusted) delegation certificate locally against SigningKey; the actual
+// authorization decision is that local verification, not this lookup.
+type AuthorityBinding struct {
 	SigningKey      LogSigningKey
 	RootLogIDHex    string
 	ChainID         string
@@ -22,67 +23,57 @@ type AuthorizeBinding struct {
 	Source          string
 }
 
-// AuthorizeClient asks the trusted univocity service whether a delegation
-// certificate is signed by the authorized key for its log, returning the
-// authoritative root key and chain binding.
-type AuthorizeClient interface {
-	Authorize(ctx context.Context, certBytes []byte, logIdHex string) (AuthorizeBinding, error)
+// AuthorityResolver asks the trusted univocity service for the authoritative
+// root key (and chain binding) of a log, resolving cold logs from the
+// chain-valid grant chain. It is a non-mutating lookup keyed by logId; the
+// delegation certificate is never sent.
+type AuthorityResolver interface {
+	ResolveAuthority(ctx context.Context, logIdHex string) (AuthorityBinding, error)
 }
 
-// authorizeRequest mirrors univocity's POST /api/authorize CBOR input.
-type authorizeRequest struct {
-	Certificate []byte `cbor:"certificate"`
-	LogID       []byte `cbor:"logId,omitempty"`
+// authorityResponse mirrors univocity's GET /api/logs/{logId}/authority output.
+type authorityResponse struct {
+	LogID     []byte `cbor:"logId,omitempty"`
+	RootLogID []byte `cbor:"rootLogId,omitempty"`
+	Alg       string `cbor:"alg,omitempty"`
+	X         []byte `cbor:"x,omitempty"`
+	Y         []byte `cbor:"y,omitempty"`
+	ChainID   string `cbor:"chainId,omitempty"`
+	Contract  string `cbor:"contract,omitempty"`
+	Source    string `cbor:"source,omitempty"`
 }
 
-// authorizeResponse mirrors univocity's POST /api/authorize CBOR output.
-type authorizeResponse struct {
-	Authorized bool   `cbor:"authorized"`
-	LogID      []byte `cbor:"logId,omitempty"`
-	RootLogID  []byte `cbor:"rootLogId,omitempty"`
-	Alg        string `cbor:"alg,omitempty"`
-	X          []byte `cbor:"x,omitempty"`
-	Y          []byte `cbor:"y,omitempty"`
-	ChainID    string `cbor:"chainId,omitempty"`
-	Contract   string `cbor:"contract,omitempty"`
-	Source     string `cbor:"source,omitempty"`
-}
-
-// HTTPAuthorizeClient calls univocity POST {BaseURL}/api/authorize.
-type HTTPAuthorizeClient struct {
+// HTTPAuthorityResolver calls univocity GET {BaseURL}/api/logs/{logId}/authority.
+type HTTPAuthorityResolver struct {
 	BaseURL    string
 	Token      string
 	HTTPClient *HTTPClient
 }
 
-// Authorize posts the (untrusted) certificate to univocity. A 401 returns a
-// binding with Authorized=false (no error) so callers fail closed cleanly.
-func (c *HTTPAuthorizeClient) Authorize(
+// ResolveAuthority fetches the authoritative root key + chain binding for a log.
+// A non-200 response is an error so the caller fails closed; the sealer then
+// verifies the delegation certificate locally against the returned key.
+func (c *HTTPAuthorityResolver) ResolveAuthority(
 	ctx context.Context,
-	certBytes []byte,
 	logIdHex string,
-) (AuthorizeBinding, error) {
+) (AuthorityBinding, error) {
 	if c == nil || c.HTTPClient == nil {
-		return AuthorizeBinding{}, fmt.Errorf("authorize client not configured")
+		return AuthorityBinding{}, fmt.Errorf("authority resolver not configured")
 	}
 	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
 	if base == "" {
-		return AuthorizeBinding{}, fmt.Errorf("authorize base URL is empty")
+		return AuthorityBinding{}, fmt.Errorf("authority base URL is empty")
 	}
-	if len(certBytes) == 0 {
-		return AuthorizeBinding{}, fmt.Errorf("certificate is empty")
+	logIdHex = strings.TrimSpace(logIdHex)
+	if logIdHex == "" {
+		return AuthorityBinding{}, fmt.Errorf("log ID is empty")
 	}
 
-	reqBody, err := cbor.Marshal(authorizeRequest{Certificate: certBytes})
+	endpoint := base + "/api/logs/" + logIdHex + "/authority"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return AuthorizeBinding{}, fmt.Errorf("encode authorize request: %w", err)
+		return AuthorityBinding{}, fmt.Errorf("build authority request: %w", err)
 	}
-	endpoint := base + "/api/authorize"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
-	if err != nil {
-		return AuthorizeBinding{}, fmt.Errorf("build authorize request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/cbor")
 	req.Header.Set("Accept", "application/cbor")
 	if token := strings.TrimSpace(c.Token); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -90,38 +81,28 @@ func (c *HTTPAuthorizeClient) Authorize(
 
 	resp, err := c.HTTPClient.Do(ctx, req)
 	if err != nil {
-		return AuthorizeBinding{}, fmt.Errorf("authorize request failed: %w", err)
+		return AuthorityBinding{}, fmt.Errorf("authority request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
-		return AuthorizeBinding{}, fmt.Errorf("read authorize response: %w", err)
+		return AuthorityBinding{}, fmt.Errorf("read authority response: %w", err)
 	}
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		// continue
-	case http.StatusUnauthorized:
-		return AuthorizeBinding{Authorized: false}, nil
-	default:
-		return AuthorizeBinding{}, fmt.Errorf(
-			"authorize returned status=%d for log %s", resp.StatusCode, logIdHex,
+	if resp.StatusCode != http.StatusOK {
+		return AuthorityBinding{}, fmt.Errorf(
+			"authority returned status=%d for log %s", resp.StatusCode, logIdHex,
 		)
 	}
 
-	var record authorizeResponse
+	var record authorityResponse
 	if err := cbor.Unmarshal(body, &record); err != nil {
-		return AuthorizeBinding{}, fmt.Errorf("decode authorize response: %w", err)
-	}
-	if !record.Authorized {
-		return AuthorizeBinding{Authorized: false}, nil
+		return AuthorityBinding{}, fmt.Errorf("decode authority response: %w", err)
 	}
 	pemStr, err := EncodeECDSAPublicKeyPEMFromXY(record.Alg, record.X, record.Y)
 	if err != nil {
-		return AuthorizeBinding{}, fmt.Errorf("authorize key: %w", err)
+		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
 	}
-	return AuthorizeBinding{
-		Authorized:      true,
+	return AuthorityBinding{
 		SigningKey:      LogSigningKey{PublicKeyPEM: pemStr, Alg: strings.TrimSpace(record.Alg)},
 		RootLogIDHex:    hex.EncodeToString(record.RootLogID),
 		ChainID:         strings.TrimSpace(record.ChainID),

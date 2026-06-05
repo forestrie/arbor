@@ -43,7 +43,7 @@ func requestLogDelegationLeaseWithKeyPair(
 	ctx context.Context,
 	httpClient *HTTPClient,
 	trustRoot TrustRootClient,
-	authorizer AuthorizeClient,
+	resolver AuthorityResolver,
 	issuer DelegationIssuer,
 	curveRaw string,
 	ttl time.Duration,
@@ -54,7 +54,7 @@ func requestLogDelegationLeaseWithKeyPair(
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is nil")
 	}
-	if authorizer == nil && trustRoot == nil {
+	if resolver == nil && trustRoot == nil {
 		return nil, fmt.Errorf("trust root client is nil")
 	}
 	if issuer == nil {
@@ -106,11 +106,19 @@ func requestLogDelegationLeaseWithKeyPair(
 		algorithm = "KS256"
 	}
 
-	// Legacy path resolves the trust root by logId before the issuer call. The
-	// authorize path defers key resolution until after the (untrusted) issuer
-	// returns the certificate, so univocity can decide authority from the cert.
+	// Resolve the authoritative root key by logId. The univocity authority
+	// resolver also returns the chain binding and resolves cold logs from the
+	// grant chain; the legacy trust-root client only resolves logs already on
+	// chain. Either way the certificate is verified locally below.
 	var rootKey LogSigningKey
-	if authorizer == nil {
+	var binding AuthorityBinding
+	if resolver != nil {
+		binding, err = resolver.ResolveAuthority(ctx, logIdHex)
+		if err != nil {
+			return nil, fmt.Errorf("resolve authority: %w", err)
+		}
+		rootKey = binding.SigningKey
+	} else {
 		rootKey, err = trustRoot.LogSigningKey(ctx, logIdHex)
 		if err != nil {
 			return nil, fmt.Errorf("trust root: %w", err)
@@ -129,18 +137,6 @@ func requestLogDelegationLeaseWithKeyPair(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("delegation issuer: %w", err)
-	}
-
-	var binding AuthorizeBinding
-	if authorizer != nil {
-		binding, err = authorizer.Authorize(ctx, issuerResp.Certificate, logIdHex)
-		if err != nil {
-			return nil, fmt.Errorf("authorize: %w", err)
-		}
-		if !binding.Authorized {
-			return nil, fmt.Errorf("univocity denied delegation authorization for log %s", logIdHex)
-		}
-		rootKey = binding.SigningKey
 	}
 
 	info, err := VerifyDelegationLease(rootKey, issuerResp, LeaseVerificationInput{
