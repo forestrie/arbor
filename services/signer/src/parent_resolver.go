@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ type ParentResolver struct {
 	BootstrapKeyID string
 	ParentKeys     map[string]string // log id hex (0x-prefixed or not) -> KMS key id
 	UnivocityURL   string
-	RootLogIDHex   string // cached from univocity GET /api/root when bootstrapped
+	RootLogIDHex   string // cached from univocity GET /api/logs/{id}/root
 	HTTPClient     *http.Client
 }
 
@@ -80,28 +81,41 @@ func (p *ParentResolver) isRoot(ctx context.Context, logIDHex string) bool {
 	if p.UnivocityURL == "" {
 		return false
 	}
-	root := p.fetchRootLogID(ctx)
+	root := p.fetchRootLogID(ctx, logIDHex)
 	if root == "" {
 		return false
 	}
 	p.RootLogIDHex = root
 	normalizedRoot := normalizeLogIDHex(root)
-	return normalizedRoot != "" && normalizedRoot == logIDHex
+	normalizedParent := normalizeLogIDHex(logIDHex)
+	return normalizedRoot != "" && normalizedRoot == normalizedParent
 }
 
-func (p *ParentResolver) fetchRootLogID(ctx context.Context) string {
+func (p *ParentResolver) fetchRootLogID(ctx context.Context, parentLogIDHex string) string {
 	if p.HTTPClient == nil {
 		return ""
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.UnivocityURL+"/api/root", nil)
+	normalized := normalizeLogIDHex(parentLogIDHex)
+	if normalized == "" {
+		return ""
+	}
+	url := p.UnivocityURL + "/api/logs/0x" + normalized + "/root"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return ""
 	}
 	resp, err := p.HTTPClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
+	if err != nil {
 		return ""
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		slog.Warn("univocity root lookup transient", "parentLogId", "0x"+normalized)
+		return ""
+	}
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
 	var out struct {
 		Exists    bool   `json:"exists"`
 		RootLogId string `json:"rootLogId"`
