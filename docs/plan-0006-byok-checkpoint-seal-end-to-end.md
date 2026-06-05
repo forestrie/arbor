@@ -4,7 +4,10 @@
 **Date:** 2026-05-30  
 **Related:** [plan-0003](plan-0003-non-custodial-checkpoint-support.md),
 [plan-0004](plan-0004-coordinator-backed-byok-lease-proof.md),
-[plan-0005](plan-0005-sealer-trust-root-end-to-end.md)
+[plan-0005](plan-0005-sealer-trust-root-end-to-end.md),
+Canopy [plan-0025 — queue-independent grant authorization](https://github.com/forestrie/canopy/blob/main/docs/plans/plan-0025-queue-independent-grant-authorization.md)
+(removes SequencingQueue dependence from grant authorization; supersedes the
+`auth-data-log-chain` MMRS-readiness retry from the BYOK seal RCA)
 
 ## Goal
 

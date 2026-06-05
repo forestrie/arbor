@@ -6,12 +6,84 @@ import (
 	"errors"
 	"math/big"
 	"strings"
+	"sync"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
+
+var ErrChainNotConfigured = errors.New("chainId not configured")
+
+// ChainResolver returns a ChainReader for a (chainId, contract) pair.
+type ChainResolver interface {
+	Reader(chainID uint64, contractAddr common.Address) (ChainReader, error)
+	Close()
+}
+
+// ContractClients lazily dials one ethclient per configured chainId.
+type ContractClients struct {
+	mu       sync.Mutex
+	rpcURLs  map[uint64]string
+	clients  map[uint64]*ethclient.Client
+	contract abi.ABI
+}
+
+// NewContractClients builds a resolver pool from chainId -> rpc url map.
+func NewContractClients(rpcURLs map[uint64]string) (*ContractClients, error) {
+	contract, err := abi.JSON(strings.NewReader(univocityViewABI))
+	if err != nil {
+		return nil, err
+	}
+	return &ContractClients{
+		rpcURLs:  rpcURLs,
+		clients:  make(map[uint64]*ethclient.Client),
+		contract: contract,
+	}, nil
+}
+
+func (p *ContractClients) Reader(
+	chainID uint64,
+	contractAddr common.Address,
+) (ChainReader, error) {
+	url, ok := p.rpcURLs[chainID]
+	if !ok {
+		return nil, ErrChainNotConfigured
+	}
+	client, err := p.clientForChain(chainID, url)
+	if err != nil {
+		return nil, err
+	}
+	return &UnivocityContract{
+		client:   client,
+		addr:     contractAddr,
+		contract: p.contract,
+	}, nil
+}
+
+func (p *ContractClients) clientForChain(chainID uint64, url string) (*ethclient.Client, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.clients[chainID]; ok {
+		return c, nil
+	}
+	client, err := ethclient.Dial(url)
+	if err != nil {
+		return nil, err
+	}
+	p.clients[chainID] = client
+	return client, nil
+}
+
+func (p *ContractClients) Close() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.clients {
+		c.Close()
+	}
+	p.clients = make(map[uint64]*ethclient.Client)
+}
 
 const univocityViewABI = `[
 	{"inputs":[],"name":"rootLogId","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},
@@ -58,27 +130,6 @@ type UnivocityContract struct {
 	client   *ethclient.Client
 	addr     common.Address
 	contract abi.ABI
-}
-
-func NewUnivocityContract(rpcURL, contractAddr string) (*UnivocityContract, error) {
-	if rpcURL == "" || contractAddr == "" {
-		return nil, errors.New("UNIVOCITY_RPC_URL and UNIVOCITY_CONTRACT_ADDRESS are required")
-	}
-	client, err := ethclient.Dial(rpcURL)
-	if err != nil {
-		return nil, err
-	}
-	contract, err := abi.JSON(strings.NewReader(univocityViewABI))
-	if err != nil {
-		client.Close()
-		return nil, err
-	}
-	addr := common.HexToAddress(contractAddr)
-	return &UnivocityContract{client: client, addr: addr, contract: contract}, nil
-}
-
-func (c *UnivocityContract) Close() {
-	c.client.Close()
 }
 
 func (c *UnivocityContract) RootLogId(ctx context.Context) ([32]byte, error) {

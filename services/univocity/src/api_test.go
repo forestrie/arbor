@@ -7,252 +7,205 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/fxamacker/cbor/v2"
 )
 
-// mockChain implements ChainReader for tests (plan §8.2, §8.7 verification).
-type mockChain struct {
-	rootLogId                [32]byte
-	logInitialized           bool
-	logConfig                LogConfig
-	logRootKeyX, logRootKeyY [32]byte
-}
-
-func (m *mockChain) RootLogId(context.Context) ([32]byte, error) {
-	return m.rootLogId, nil
-}
-
-func (m *mockChain) IsLogInitialized(_ context.Context, _ [32]byte) (bool, error) {
-	return m.logInitialized, nil
-}
-
-func (m *mockChain) LogConfig(_ context.Context, _ [32]byte) (LogConfig, error) {
-	return m.logConfig, nil
-}
-
-func (m *mockChain) LogRootKey(_ context.Context, _ [32]byte) ([32]byte, [32]byte, error) {
-	return m.logRootKeyX, m.logRootKeyY, nil
-}
-
-func TestHandleRoot_UnavailableWhenChainNotConfigured(t *testing.T) {
+func TestHandleScopedRoot_ChainNotConfigured(t *testing.T) {
 	logger, _ := NewLogger(0)
-	api := API{Logger: logger, Chain: nil}
+	pool, _ := NewContractClients(map[uint64]string{84532: "http://127.0.0.1:9"})
+	defer pool.Close()
+	api := API{Logger: logger, Pool: pool}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
 
-	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/root", nil)
-	if err != nil {
-		t.Fatalf("NewRequest failed: %v", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("expected status 503 when chain not configured, got %d, body=%s", resp.StatusCode, string(body))
+	req := httptest.NewRequest(http.MethodGet, "/api/99999/0x0000000000000000000000000000000000000001/root", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestAPI_ResponseShapes verifies all endpoints return JSON shapes per plan §7.1 (step 8.7).
-func TestAPI_ResponseShapes(t *testing.T) {
+func TestHandleScopedRoot_InvalidContract(t *testing.T) {
 	logger, _ := NewLogger(0)
-	rootZero := &mockChain{rootLogId: [32]byte{}}
-	rootNonZero := &mockChain{
-		rootLogId: [32]byte{0: 1},
+	pool := &mockPool{chain: &mockChain{}}
+	api := API{Logger: logger, Pool: pool}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/84532/not-an-address/root", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
 	}
-	rootNonZeroHex := LogIDToHex(rootNonZero.rootLogId)
+}
 
-	t.Run("GET /api/root not bootstrapped", func(t *testing.T) {
-		api := API{Logger: logger, Chain: rootZero}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/root", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		var out struct {
-			Exists    bool   `json:"exists"`
-			RootLogId string `json:"rootLogId"`
-		}
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if out.Exists != false || out.RootLogId != "" {
-			t.Errorf("expected exists=false, rootLogId=\"\"; got exists=%v rootLogId=%q", out.Exists, out.RootLogId)
-		}
-	})
+func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
+	logger, _ := NewLogger(0)
+	rootID := [32]byte{0: 1}
+	logID := [32]byte{0: 0, 31: 1}
+	rootHex := LogIDToHex(rootID)
+	logHex := LogIDToHex(logID)
 
-	t.Run("GET /api/root bootstrapped", func(t *testing.T) {
-		api := API{Logger: logger, Chain: rootNonZero}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/root", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		var out struct {
-			Exists    bool   `json:"exists"`
-			RootLogId string `json:"rootLogId"`
-		}
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if !out.Exists || out.RootLogId != rootNonZeroHex {
-			t.Errorf("expected exists=true, rootLogId=%q; got exists=%v rootLogId=%q", rootNonZeroHex, out.Exists, out.RootLogId)
-		}
-	})
-
-	t.Run("GET /api/logs not bootstrapped", func(t *testing.T) {
-		api := API{Logger: logger, Chain: rootZero}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		var out struct {
-			RootLogId *string  `json:"rootLogId"`
-			AuthLogs  []string `json:"authLogs"`
-		}
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if out.RootLogId != nil {
-			t.Errorf("expected rootLogId null when not bootstrapped; got %v", *out.RootLogId)
-		}
-		if len(out.AuthLogs) != 0 {
-			t.Errorf("expected authLogs []; got %v", out.AuthLogs)
-		}
-	})
-
-	t.Run("GET /api/logs bootstrapped", func(t *testing.T) {
-		api := API{Logger: logger, Chain: rootNonZero}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		var out struct {
-			RootLogId *string  `json:"rootLogId"`
-			AuthLogs  []string `json:"authLogs"`
-		}
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if out.RootLogId == nil || *out.RootLogId != rootNonZeroHex {
-			t.Errorf("expected rootLogId %q; got %v", rootNonZeroHex, out.RootLogId)
-		}
-		if len(out.AuthLogs) != 1 || out.AuthLogs[0] != rootNonZeroHex {
-			t.Errorf("expected authLogs [%q]; got %v", rootNonZeroHex, out.AuthLogs)
-		}
-	})
-
-	logIdHex := "0x0000000000000000000000000000000000000000000000000000000000000001"
-	cfgInitialized := &mockChain{
-		rootLogId:      [32]byte{},
+	chain := &mockChain{
+		rootLogId:      rootID,
 		logInitialized: true,
 		logConfig: LogConfig{
 			Kind:          LogKindAuthority,
-			AuthLogId:     [32]byte{},
-			InitializedAt: 12345,
+			AuthLogId:     rootID,
+			RootKey:       make([]byte, 64),
+			InitializedAt: 99,
 		},
 		logRootKeyX: [32]byte{1},
 		logRootKeyY: [32]byte{2},
 	}
-	cfgInitialized.logConfig.AuthLogId[31] = 2
-	cfgNotInitialized := &mockChain{logInitialized: false}
+	pool := &mockPool{chain: chain}
 
-	t.Run("GET /api/logs/{logId}/config 404 when not initialized", func(t *testing.T) {
-		api := API{Logger: logger, Chain: cfgNotInitialized}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/config", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("got status %d", rec.Code)
-		}
-	})
+	registry := NewForestRegistry(logger, nil, map[uint64]string{84532: "http://example"}, time.Minute)
+	registry.mu.Lock()
+	registry.forests = []ForestEntry{{
+		R:        rootID,
+		ChainID:  84532,
+		Contract: common.HexToAddress("0x0000000000000000000000000000000000000001"),
+	}}
+	registry.lastScan = time.Now()
+	registry.mu.Unlock()
 
-	t.Run("GET /api/logs/{logId}/config 200 and shape", func(t *testing.T) {
-		api := API{Logger: logger, Chain: cfgInitialized}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/config", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
-		}
-		var out struct {
-			Kind          string `json:"kind"`
-			AuthLogId     string `json:"authLogId"`
-			InitializedAt uint64 `json:"initializedAt"`
-		}
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if out.Kind != "authority" || out.InitializedAt != 12345 {
-			t.Errorf("expected kind=authority, initializedAt=12345; got kind=%q initializedAt=%d", out.Kind, out.InitializedAt)
-		}
-		if out.AuthLogId != LogIDToHex(cfgInitialized.logConfig.AuthLogId) {
-			t.Errorf("authLogId mismatch: got %q", out.AuthLogId)
-		}
-	})
+	resolver := NewForestResolver(logger, registry, pool, 100, time.Minute)
 
-	t.Run("GET /api/logs/{logId}/public-root 404 when not initialized", func(t *testing.T) {
-		api := API{Logger: logger, Chain: cfgNotInitialized}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/public-root", nil)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("got status %d", rec.Code)
-		}
-	})
+	api := API{Logger: logger, Pool: pool, Resolver: resolver}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
 
-	t.Run("GET /api/logs/{logId}/public-root 200 and shape", func(t *testing.T) {
-		api := API{Logger: logger, Chain: cfgInitialized}
-		mux := http.NewServeMux()
-		api.RegisterRoutes(mux)
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logIdHex+"/public-root", nil)
+	contract := "0x0000000000000000000000000000000000000001"
+
+	t.Run("scoped root", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/84532/"+contract+"/root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("got status %d", rec.Code)
+			t.Fatalf("status %d", rec.Code)
 		}
 		var out struct {
-			LogId      string `json:"logId"`
-			Kind       string `json:"kind"`
-			OwnerLogId string `json:"ownerLogId"`
-			RootKeyX   string `json:"rootKeyX"`
-			RootKeyY   string `json:"rootKeyY"`
+			Exists    bool   `json:"exists"`
+			RootLogId string `json:"rootLogId"`
 		}
-		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if out.LogId != logIdHex || out.Kind != "authority" {
-			t.Errorf("logId or kind mismatch: logId=%q kind=%q", out.LogId, out.Kind)
-		}
-		if out.OwnerLogId != LogIDToHex(cfgInitialized.logConfig.AuthLogId) {
-			t.Errorf("ownerLogId mismatch: got %q", out.OwnerLogId)
-		}
-		if out.RootKeyX != LogIDToHex(cfgInitialized.logRootKeyX) || out.RootKeyY != LogIDToHex(cfgInitialized.logRootKeyY) {
-			t.Errorf("rootKeyX/Y mismatch")
+		_ = json.NewDecoder(rec.Body).Decode(&out)
+		if !out.Exists || out.RootLogId != rootHex {
+			t.Fatalf("unexpected %+v", out)
 		}
 	})
+
+	t.Run("logId root", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+rootHex+"/root", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d body=%s", rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Exists    bool   `json:"exists"`
+			RootLogId string `json:"rootLogId"`
+		}
+		_ = json.NewDecoder(rec.Body).Decode(&out)
+		if !out.Exists || out.RootLogId != rootHex {
+			t.Fatalf("unexpected %+v", out)
+		}
+	})
+
+	t.Run("logId public-root CBOR", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logHex+"/public-root", nil)
+		req.Header.Set("Accept", "application/cbor")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d body=%s", rec.Code, rec.Body.String())
+		}
+		var record TrustRootResponse
+		if err := cbor.Unmarshal(rec.Body.Bytes(), &record); err != nil {
+			t.Fatalf("cbor: %v", err)
+		}
+		if record.Alg != "ES256" || len(record.X) != 32 || len(record.Y) != 32 {
+			t.Fatalf("unexpected record %+v", record)
+		}
+	})
+
+	t.Run("logId root before on-chain init via genesis identity", func(t *testing.T) {
+		freshRoot := [32]byte{0: 9}
+		freshHex := LogIDToHex(freshRoot)
+		registry.mu.Lock()
+		registry.forests = append(registry.forests, ForestEntry{
+			R:        freshRoot,
+			ChainID:  84532,
+			Contract: common.HexToAddress(contract),
+		})
+		registry.mu.Unlock()
+		resolver.OnRegistryScan()
+
+		chain.logInitialized = false
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+freshHex+"/root", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status %d", rec.Code)
+		}
+		var out struct {
+			Exists    bool   `json:"exists"`
+			RootLogId string `json:"rootLogId"`
+		}
+		_ = json.NewDecoder(rec.Body).Decode(&out)
+		if !out.Exists || out.RootLogId != freshHex {
+			t.Fatalf("expected genesis short-circuit %+v", out)
+		}
+	})
+
+	t.Run("logId unresolved 503", func(t *testing.T) {
+		unknown := "0x00000000000000000000000000000000000000000000000000000000000000ab"
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+unknown+"/root", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d", rec.Code)
+		}
+	})
+}
+
+func TestResolver_AmbiguousForest(t *testing.T) {
+	logger, _ := NewLogger(0)
+	logID := [32]byte{31: 1}
+	chain := &mockChain{logInitialized: true}
+	pool := &mockPool{chain: chain}
+	registry := NewForestRegistry(logger, nil, map[uint64]string{84532: "x"}, time.Minute)
+	registry.mu.Lock()
+	registry.forests = []ForestEntry{
+		{R: [32]byte{1}, ChainID: 84532, Contract: common.HexToAddress("0x1")},
+		{R: [32]byte{2}, ChainID: 84532, Contract: common.HexToAddress("0x2")},
+	}
+	registry.lastScan = time.Now()
+	registry.mu.Unlock()
+
+	resolver := NewForestResolver(logger, registry, pool, 10, time.Minute)
+	_, err := resolver.Resolve(context.Background(), logID)
+	if err == nil || err != ErrAmbiguousForest {
+		t.Fatalf("expected ErrAmbiguousForest, got %v", err)
+	}
+}
+
+func TestHandleLogIDPublicRoot_UnavailableWithoutResolver(t *testing.T) {
+	logger, _ := NewLogger(0)
+	api := API{Logger: logger, Pool: &mockPool{chain: &mockChain{logInitialized: true}}}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+	logHex := "0x0000000000000000000000000000000000000000000000000000000000000001"
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logHex+"/public-root", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		body, _ := io.ReadAll(rec.Body)
+		t.Fatalf("expected 503, got %d %s", rec.Code, body)
+	}
 }

@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/arbor/services/univocity"
 )
 
@@ -18,8 +20,20 @@ var (
 	buildDate string
 )
 
+type stdHTTPDoer struct {
+	client *http.Client
+}
+
+func (d stdHTTPDoer) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
+	return d.client.Do(req.WithContext(ctx))
+}
+
 func main() {
-	cfg := univocity.LoadConfig()
+	cfg, err := univocity.LoadConfig()
+	if err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
 	level, recognized := univocity.ParseLogLevel(cfg.LogLevel)
 	logger, _ := univocity.NewLogger(level)
 
@@ -32,7 +46,7 @@ func main() {
 	}
 
 	slog.SetDefault(logger)
-	slog.Info("starting univocity auth-log status service",
+	slog.Info("starting univocity trust-root service",
 		"version", version,
 		"commit", commit,
 		"buildDate", buildDate,
@@ -40,18 +54,31 @@ func main() {
 	logger.Info("resolved log level", "input", cfg.LogLevel, "level", level.String())
 	cfg.LogConfig(logger)
 
-	if cfg.UnivocityRPCURL == "" || cfg.UnivocityContractAddress == "" {
-		slog.Error("UNIVOCITY_RPC_URL and UNIVOCITY_CONTRACT_ADDRESS are required")
-		os.Exit(1)
-	}
-
-	chain, err := univocity.NewUnivocityContract(cfg.UnivocityRPCURL, cfg.UnivocityContractAddress)
+	pool, err := univocity.NewContractClients(cfg.RPCURLs)
 	if err != nil {
-		slog.Error("failed to connect to univocity contract", "error", err)
+		slog.Error("failed to build RPC client pool", "error", err)
 		os.Exit(1)
 	}
-	defer chain.Close()
+	defer pool.Close()
 
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	s3Client, err := s3.NewClientWithCredentials(
+		cfg.GenesisR2URL,
+		cfg.GenesisR2Token,
+		cfg.AWSAccessKeyID,
+		cfg.AWSSecretAccessKey,
+		cfg.AWSRegion,
+		stdHTTPDoer{client: httpClient},
+		logger,
+	)
+	if err != nil {
+		slog.Error("failed to create genesis R2 client", "error", err)
+		os.Exit(1)
+	}
+
+	registry := univocity.NewForestRegistry(
+		logger, s3Client, cfg.RPCURLs, cfg.GenesisScanMinInterval,
+	)
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -60,10 +87,27 @@ func main() {
 	)
 	defer stop()
 
+	if err := registry.Scan(ctx); err != nil {
+		slog.Error("startup genesis registry scan failed", "error", err)
+		os.Exit(1)
+	}
+
+	forestResolver := univocity.NewForestResolver(
+		logger,
+		registry,
+		pool,
+		cfg.LogForestCacheSize,
+		cfg.GenesisScanMinInterval,
+	)
+
 	mux := http.NewServeMux()
 	setupHealthChecks(mux)
 
-	api := univocity.API{Logger: logger, Chain: chain}
+	api := univocity.API{
+		Logger:   logger,
+		Pool:     pool,
+		Resolver: forestResolver,
+	}
 	api.RegisterRoutes(mux)
 
 	server := &http.Server{

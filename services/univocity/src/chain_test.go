@@ -3,6 +3,8 @@ package univocity
 import (
 	"context"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // TestMockChain_RootLogId_ZeroAndNonZero satisfies plan §8.2 verification:
@@ -56,6 +58,18 @@ func TestLogIDFromHex_Invalid(t *testing.T) {
 	}
 	if _, ok := LogIDFromHex("0xgg"); ok {
 		t.Error("expected false for invalid hex chars")
+	}
+}
+
+func TestContractClients_UnknownChain(t *testing.T) {
+	pool, err := NewContractClients(map[uint64]string{84532: "http://127.0.0.1:9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	_, err = pool.Reader(1, common.HexToAddress("0x1"))
+	if err != ErrChainNotConfigured {
+		t.Fatalf("expected ErrChainNotConfigured, got %v", err)
 	}
 }
 

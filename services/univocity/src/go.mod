@@ -4,7 +4,20 @@ go 1.24.0
 
 toolchain go1.24.4
 
-require github.com/ethereum/go-ethereum v1.17.1
+require (
+	github.com/ethereum/go-ethereum v1.17.1
+	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0-00010101000000-000000000000
+	github.com/fxamacker/cbor/v2 v2.9.0
+)
+
+replace (
+	github.com/forestrie/arbor/services/pkgs/s3storage => ../../pkgs/s3storage
+	github.com/forestrie/go-merklelog/bloom => ../../_deps/go-merklelog/bloom
+	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs
+	github.com/forestrie/go-merklelog/mmr => ../../_deps/go-merklelog/mmr
+	github.com/forestrie/go-merklelog/urkle => ../../_deps/go-merklelog/urkle
+	github.com/forestrie/go-sigv4 => ../../_deps/go-sigv4
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -17,15 +30,19 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
+	github.com/forestrie/go-merklelog/massifs v0.0.3 // indirect
+	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/supranational/blst v0.3.16 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect
 	go.opentelemetry.io/otel/metric v1.39.0 // indirect

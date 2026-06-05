@@ -1,10 +1,12 @@
 ---
 Status: DRAFT
 Date: 2026-05-19
-Related: ../services/sealer/src/sealer.go, ../services/sealer/src/delegation_manager.go, ../services/sealer/src/log_delegation.go, ../services/univocity/src/chain.go; external [Univocity ADR-0006](../../univocity/docs/adr/adr-0006-cose-shaped-delegation-proof.md)
+Related: ../services/sealer/src/sealer.go, ../services/sealer/src/delegation_manager.go, ../services/sealer/src/log_delegation.go, ../services/univocity/src/chain.go; external [Univocity ADR-0006](../../univocity/docs/adr/adr-0006-cose-shaped-delegation-proof.md); superseded endpoint list — [plan-0007](plan-0007-univocity-genesis-trust-root-resolver.md)
 ---
 
 # Plan 0003: Non-custodial checkpoint support
+
+> **Univocity HTTP paths (2026-06):** The endpoint list under **Trust-root service** below is superseded by [plan-0007](plan-0007-univocity-genesis-trust-root-resolver.md): scoped `GET /api/{chainId}/{contract}/…`, logId-only `GET /api/logs/{logId}/root` and `GET /api/logs/{logId}/public-root` (CBOR), genesis-driven `resolve(logId)`.
 
 ## Goal
 
@@ -470,6 +472,17 @@ authority resolver:
 Custodian-backed deployments can remain one resolver implementation, but
 `register-grant` and `register-signed-statement` should depend on the generic
 resolver, not on Custodian.
+
+> **Follow-up landed:** Canopy
+> [plan-0025](https://github.com/forestrie/canopy/blob/main/docs/plans/plan-0025-queue-independent-grant-authorization.md)
+> makes grant authorization depend only on the SCITT receipt (MMR inclusion +
+> checkpoint signature against the owner-log receipt authority), with no
+> SequencingQueue Durable Object state. It removes the redundant queue inclusion
+> check from `grantAuthorize`, replaces the child-data-first parent gate with parent
+> creation-grant receipt verification (the parent grant is carried in the register-grant
+> POST body `{ parentGrant }`), and retires the `verify-grant-inclusion` primitive. This
+> is the queue-independent foundation the generic receipt-authority resolver above plugs
+> into.
 
 ### Add a grant-authoring convenience surface
 
