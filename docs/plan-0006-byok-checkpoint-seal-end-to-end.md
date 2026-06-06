@@ -91,5 +91,5 @@ E2E_BYOK_SEAL_STRETCH=1 \
 ```
 
 See [canopy plan-0024](../../canopy/docs/plans/plan-0024-byok-checkpoint-seal-rca.md) and
-[ADR-0003](../../canopy/docs/adr-0003-delegation-pending-202-accepted.md) for pending
+[ADR-0003](../../canopy/docs/adr/adr-0003-delegation-pending-202-accepted.md) for pending
 **202 Accepted** and coordinator material validation.
