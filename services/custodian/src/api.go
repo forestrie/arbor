@@ -29,6 +29,8 @@ type API struct {
 	// sets this. The default (nil) routes through ListKeysWithLabels which
 	// talks to the configured CUSTODY_KEY_RING_ID.
 	listKeysOverride func(ctx context.Context, labels map[string]string, predicate string) ([]KeyListEntry, error)
+	// ensureKeyOverride is a test-only seam for POST /api/keys without GCP KMS.
+	ensureKeyOverride func(ctx context.Context, keyOwnerID, selfLogID, alg, protectionLevel string, labels map[string]string) (keyName, publicKeyPEM string, created bool, err error)
 }
 
 // NewAPI builds an API with the given logger and config.
@@ -74,7 +76,7 @@ func (a *API) publicKeyCacheDelete(shortKey string) {
 // Endpoints:
 //   - GET  /api/keys/{keyId}/public              (no auth); optional ?log-id=true;
 //     {keyId} is the same as POST .../sign: short CryptoKey id under CUSTODY_KEY_RING_ID or full projects/.../cryptoKeys/... name
-//   - POST /api/keys                             (normal app token) — create key
+//   - POST /api/keys                             (normal app token) — ensure custody key
 //   - GET  /api/keys/list / POST …/list          (normal app token) — list keys (labels)
 //   - GET  /api/keys/curator/log-key              (normal app token) — ?logId=… → { keyId }
 //   - POST /api/keys/{keyId}/delete              (bootstrap app token) — destroy all key versions
@@ -86,17 +88,17 @@ func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/delegations", a.handleDelegations)
 	mux.HandleFunc("/api/keys/list", a.handleListKeys)
 	mux.HandleFunc("/api/keys/curator/log-key", a.handleCuratorLogKey)
-	mux.HandleFunc("/api/keys", a.routeKeysCreate)
+	mux.HandleFunc("/api/keys", a.routeKeysEnsure)
 	mux.HandleFunc("/api/keys/", a.routeKeys)
 }
 
-// routeKeysCreate: POST /api/keys (exact match).
-func (a *API) routeKeysCreate(w http.ResponseWriter, r *http.Request) {
+// routeKeysEnsure: POST /api/keys (exact match).
+func (a *API) routeKeysEnsure(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/api/keys" {
 		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "not found", "")
 		return
 	}
-	a.handleCreateKey(w, r)
+	a.handleEnsureKey(w, r)
 }
 
 // routeKeys: /api/keys/{keyId}/public | .../delete | .../versions/delete-from | .../sign

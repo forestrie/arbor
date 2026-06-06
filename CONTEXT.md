@@ -73,6 +73,19 @@ _Avoid_: "canopy grant storage" (canopy no longer owns it).
 A subject `logId` belongs to exactly one forest `R` globally, enforced atomically
 at grant POST (201 new / 200 idempotent / 409 conflict).
 
+**Custody key**:
+Asymmetric KMS key in the custody ring for a log's root signing material; CryptoKey
+id equals the normalized log id (32 lowercase hex).
+_Avoid_: conflating with the bootstrap KMS root key (`:bootstrap`).
+
+**Ensure (custodian)**:
+Idempotent get-or-create of a custody key in KMS via HTTP `POST /api/keys`.
+_Avoid_: "create key" when meaning ensure semantics.
+
+**Bootstrap KMS root key**:
+Terraform-managed asymmetric key in the root key ring, used for `:bootstrap` sign
+and public routes — distinct from per-log custody keys in the custody ring.
+
 ## Example dialogue
 
 **Dev:** Sealer got a massif event with only `logId` — how does it pick the contract?
@@ -92,3 +105,5 @@ unless it chooses to read optional CBOR fields later.
 - [ADR-0003](docs/adr/adr-0003-global-logid-r-uniqueness.md)
 - [ADR-0004](docs/adr/adr-0004-forests-storage-and-uuid-log-ids.md)
 - [plan-0009](docs/plan-0009-forests-storage-and-uuid-logid.md)
+- [plan-0010](docs/plan-0010-custodian-kms-ensure-and-e2e-key-hygiene.md)
+- [ADR-0005](docs/adr/adr-0005-custodian-kms-ensure-and-e2e-software-keys.md)

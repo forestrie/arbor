@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// handleCreateKey implements POST /api/keys — create a key for a log owner.
-func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
+// handleEnsureKey implements POST /api/keys — ensure a custody key for a log (idempotent).
+func (a *API) handleEnsureKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		a.writeProblem(w, r, http.StatusMethodNotAllowed, "about:blank", "method not allowed", "")
 		return
@@ -15,7 +15,7 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 	if !a.RequireNormalApp(w, r) {
 		return
 	}
-	var req CreateKeyRequest
+	var req EnsureKeyRequest
 	if !a.readCBORBody(w, r, &req) {
 		return
 	}
@@ -37,43 +37,51 @@ func (a *API) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "invalid selfLogId")
 		return
 	}
-	cryptoKeyShort := normSelf
-	if info, ok := a.store.Get(normOwner); ok {
-		if keyIDFromName(info.KeyID) != cryptoKeyShort {
-			a.writeProblem(w, r, http.StatusConflict, "about:blank", "conflict", "keyOwnerId already has a key for a different selfLogId")
-			return
-		}
+	alg := req.Alg
+	if alg == "" {
+		alg = "ES256"
+	}
+	if info, ok := a.store.Get(normSelf); ok {
 		a.publicKeyCachePut(keyIDFromName(info.KeyID), info.PublicKeyPEM, info.Alg)
-		a.writeCBOR(w, http.StatusOK, CreateKeyResponse{
+		a.writeCBOR(w, http.StatusOK, EnsureKeyResponse{
 			KeyID:     info.KeyID,
 			PublicKey: info.PublicKeyPEM,
 			Alg:       info.Alg,
+			Created:   false,
 		})
 		return
 	}
-	keyName, publicKeyPEM, err := a.CreateKeyForOwner(r.Context(), normOwner, normSelf, req.Alg, req.ProtectionLevel, req.Labels)
+
+	var keyName, publicKeyPEM string
+	var created bool
+	if a.ensureKeyOverride != nil {
+		keyName, publicKeyPEM, created, err = a.ensureKeyOverride(r.Context(), normOwner, normSelf, req.Alg, req.ProtectionLevel, req.Labels)
+	} else {
+		keyName, publicKeyPEM, created, err = a.EnsureKeyForOwner(r.Context(), normOwner, normSelf, req.Alg, req.ProtectionLevel, req.Labels)
+	}
 	if err != nil {
 		if errors.Is(err, ErrForbiddenUserLabelKey) {
 			a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "user label key uses reserved Forestrie operator prefix")
 			return
 		}
-		a.Logger.Error("failed to create key", "key_owner_id", normOwner, "error", err)
-		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key creation failed")
+		a.Logger.Error("failed to ensure key", "self_log_id", normSelf, "key_owner_id", normOwner, "error", err)
+		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank", "internal error", "key ensure failed")
 		return
 	}
-	alg := req.Alg
-	if alg == "" {
-		alg = "ES256"
-	}
-	a.store.Set(normOwner, KeyInfo{
+	a.store.Set(normSelf, KeyInfo{
 		KeyID:        keyName,
 		PublicKeyPEM: publicKeyPEM,
 		Alg:          alg,
 	})
 	a.publicKeyCachePut(keyIDFromName(keyName), publicKeyPEM, alg)
-	a.writeCBOR(w, http.StatusCreated, CreateKeyResponse{
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	a.writeCBOR(w, status, EnsureKeyResponse{
 		KeyID:     keyName,
 		PublicKey: publicKeyPEM,
 		Alg:       alg,
+		Created:   created,
 	})
 }

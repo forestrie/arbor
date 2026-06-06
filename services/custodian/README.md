@@ -1,6 +1,6 @@
 # Custodian
 
-Key custody and KMS signing service for Forestrie. See [ADR-0033](https://github.com/forestrie/devdocs/blob/main/adr/adr-0033-custodian-key-service.md) and [Plan 0013](https://github.com/forestrie/devdocs/blob/main/plans/plan-0013-custodian-implementation.md).
+Key custody and KMS signing service for Forestrie. See [ADR-0033](https://github.com/forestrie/devdocs/blob/main/adr/adr-0033-custodian-key-service.md), [ADR-0005](../../docs/adr/adr-0005-custodian-kms-ensure-and-e2e-software-keys.md), and [Plan 0013](https://github.com/forestrie/devdocs/blob/main/plans/plan-0013-custodian-implementation.md).
 
 ## Wire format
 
@@ -14,15 +14,23 @@ Requests with a body must send **`Content-Type: application/cbor`**. Otherwise t
 
 ## Endpoints
 
-- `GET /api/keys/{keyId}/public` — Public key (no auth). CBOR: `keyId`, `publicKey`, `alg`. Custody keys are served from the in-memory store (same ids as create/list). **`GET .../:bootstrap/public`** is **not** in the store; it reads the PEM from **`BOOTSTRAP_KMS_CRYPTO_KEY_ID`** via Cloud KMS `GetPublicKey` (same resource as `POST .../:bootstrap/sign`). If that env is unset, the server returns **503** (same as bootstrap sign when unset). Integration against real KMS is not covered by unit tests; verify manually with curl against a deployed instance.
+- `GET /api/keys/{keyId}/public` — Public key (no auth). CBOR: `keyId`, `publicKey`, `alg`. Custody keys are read from **Cloud KMS** (`GetPublicKey`); an in-process PEM cache avoids repeat calls. **`GET .../:bootstrap/public`** uses **`BOOTSTRAP_KMS_CRYPTO_KEY_ID`** (root ring, not custody). If that env is unset, the server returns **503**.
 - Optional query **`log-id=true`** (or **`log-id=1`**) on **`/api/keys/{keyId}/…`** treats **`{keyId}`** as a **log id** (hex); Custodian resolves to a custody **`keyId`** or **`:bootstrap`** using KMS labels `fo-log_id=<normalized 32-hex>`. **`ROOT_LOG_ID`** env enables list-miss → **`:bootstrap`** when the root key is not listed in the custody ring.
-- `POST /api/keys` — Create key (normal app token). CBOR body: `keyOwnerId`, optional `alg` (`ES256`|`KS256`), optional `labels`. Response: `keyId`, `publicKey`, `alg`.
+- `POST /api/keys` — **Ensure** custody key (normal app token). Idempotent: **201** if KMS created a new key, **200** if it already existed. CBOR body: **`keyOwnerId`**, **`selfLogId`** (required; KMS CryptoKey id), optional `alg` (`ES256`|`KS256`), optional `labels`, optional `protectionLevel` (`SOFTWARE` default, `HSM`). Response: `keyId`, `publicKey`, `alg`, optional `created` (bool).
 - `GET /api/keys/list` — List keys (normal app token). Query: one or more label parameters (e.g. `fo-log_id=<32-hex>`), optional `predicate` (`and`|`or`). Response: same CBOR as POST.
 - `POST /api/keys/list` — List keys (normal app token). CBOR body: `labels`, optional `predicate` (`and`|`or`). Response: `keys` array of `{keyId, version, count?}`.
 - `GET /api/keys/curator/log-key` — Resolve **log id → Custodian `keyId`** (normal app token). Query: **`logId=<hex>`**. Response CBOR: `keyId` (custody short id or **`:bootstrap`**).
 - `POST /api/keys/{keyId}/delete` — Destroy all versions (bootstrap app token). Response: `keyId`, `destroyedCount`.
 - `POST /api/keys/{keyId}/versions/delete-from` — Destroy versions ≤ N (bootstrap app token). CBOR body: `version` (int ≥ 1). Response: `keyId`, `destroyedCount`.
 - `POST /api/keys/{keyId}/sign` — Returns **COSE_Sign1** bytes (see above), or **raw signature** CBOR when **`rawSignatureOnly`** is true. CBOR body: exactly one of **`payloadHash`** (bstr, 32 bytes) or **`payload`** (bstr; server computes SHA-256 for the committed digest); optional **`rawSignatureOnly`** (bool). **`APP_TOKEN`** for custody keys; key id **`:bootstrap`** requires **`BOOTSTRAP_APP_TOKEN`** and **`BOOTSTRAP_KMS_CRYPTO_KEY_ID`**.
+
+## E2e cost guard
+
+Automated Playwright e2e must pass **`protectionLevel: "SOFTWARE"`** when ensuring
+custody keys. Dev Terraform defaults the bootstrap P-256 root to SOFTWARE
+(`forest-1` `kms_protection_level`). The optional secp256k1 root (HSM-only in GCP)
+is disabled by default (`kms_enable_secp256k1 = false`). Do not enable HSM custody
+keys in e2e — per-key HSM cost is unsuitable for high-volume test runs.
 
 ## Configuration
 

@@ -2,6 +2,7 @@ package custodian
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -84,7 +85,7 @@ func TestRegisterRoutes_BootstrapPublic_503WhenBootstrapKeyIDEmpty(t *testing.T)
 	}
 }
 
-func TestRegisterRoutes_CreateKey_Unauthorized(t *testing.T) {
+func TestRegisterRoutes_EnsureKey_Unauthorized(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
 	logger, _ := NewLogger(0)
@@ -92,7 +93,7 @@ func TestRegisterRoutes_CreateKey_Unauthorized(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{KeyOwnerID: "owner1"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", cborContentType)
 	rec := httptest.NewRecorder()
@@ -102,7 +103,7 @@ func TestRegisterRoutes_CreateKey_Unauthorized(t *testing.T) {
 	}
 }
 
-func TestRegisterRoutes_CreateKey_UnsupportedMediaType(t *testing.T) {
+func TestRegisterRoutes_EnsureKey_UnsupportedMediaType(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
 	logger, _ := NewLogger(0)
@@ -110,7 +111,7 @@ func TestRegisterRoutes_CreateKey_UnsupportedMediaType(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{KeyOwnerID: "owner1"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer secret")
@@ -121,7 +122,7 @@ func TestRegisterRoutes_CreateKey_UnsupportedMediaType(t *testing.T) {
 	}
 }
 
-func TestRegisterRoutes_CreateKey_BadRequestInvalidSelfLogId(t *testing.T) {
+func TestRegisterRoutes_EnsureKey_BadRequestInvalidSelfLogId(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
 	logger, _ := NewLogger(0)
@@ -129,7 +130,7 @@ func TestRegisterRoutes_CreateKey_BadRequestInvalidSelfLogId(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1", SelfLogID: "not-a-uuid"})
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{KeyOwnerID: "owner1", SelfLogID: "not-a-uuid"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", cborContentType)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -140,7 +141,7 @@ func TestRegisterRoutes_CreateKey_BadRequestInvalidSelfLogId(t *testing.T) {
 	}
 }
 
-func TestRegisterRoutes_CreateKey_BadRequestReservedUserLabelPrefix(t *testing.T) {
+func TestRegisterRoutes_EnsureKey_BadRequestReservedUserLabelPrefix(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
 	logger, _ := NewLogger(0)
@@ -148,7 +149,7 @@ func TestRegisterRoutes_CreateKey_BadRequestReservedUserLabelPrefix(t *testing.T
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := custodianCBORem.Marshal(CreateKeyRequest{
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{
 		KeyOwnerID: "11111111111111111111111111111111",
 		SelfLogID:  "22222222-2222-2222-2222-222222222222",
 		Labels:     map[string]string{"FO-test": "1"},
@@ -163,7 +164,7 @@ func TestRegisterRoutes_CreateKey_BadRequestReservedUserLabelPrefix(t *testing.T
 	}
 }
 
-func TestRegisterRoutes_CreateKey_BadRequestMissingSelfLogId(t *testing.T) {
+func TestRegisterRoutes_EnsureKey_BadRequestMissingSelfLogId(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
 	logger, _ := NewLogger(0)
@@ -171,7 +172,7 @@ func TestRegisterRoutes_CreateKey_BadRequestMissingSelfLogId(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	body, _ := custodianCBORem.Marshal(CreateKeyRequest{KeyOwnerID: "owner1"})
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{KeyOwnerID: "owner1"})
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
 	req.Header.Set("Content-Type", cborContentType)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -368,8 +369,8 @@ func TestSignRequest_RawSignatureOnly_CBORRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCBORCodec_RoundTripCreateKeyRequest(t *testing.T) {
-	in := CreateKeyRequest{
+func TestCBORCodec_RoundTripEnsureKeyRequest(t *testing.T) {
+	in := EnsureKeyRequest{
 		KeyOwnerID: "o1",
 		SelfLogID:  "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
 		Alg:        "ES256",
@@ -379,13 +380,122 @@ func TestCBORCodec_RoundTripCreateKeyRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out CreateKeyRequest
+	var out EnsureKeyRequest
 	if err := custodianCBORdm.Unmarshal(b, &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.KeyOwnerID != in.KeyOwnerID || out.SelfLogID != in.SelfLogID ||
 		out.Alg != in.Alg || out.Labels["k"] != "v" {
 		t.Fatalf("round trip mismatch: %+v", out)
+	}
+}
+
+const testEnsureSelfLogID = "11111111111111111111111111111111"
+
+func TestRegisterRoutes_EnsureKey_CacheHitReturns200(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	cfg.CustodyKeyRingID = "projects/test/locations/loc/keyRings/ring"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	keyName := cfg.CustodyKeyRingID + "/cryptoKeys/" + testEnsureSelfLogID
+	api.store.Set(testEnsureSelfLogID, KeyInfo{
+		KeyID:        keyName,
+		PublicKeyPEM: "-----BEGIN FAKE-----",
+		Alg:          "ES256",
+	})
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{
+		KeyOwnerID: testEnsureSelfLogID,
+		SelfLogID:  testEnsureSelfLogID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", cborContentType)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from cache, got %d", rec.Code)
+	}
+	var resp EnsureKeyResponse
+	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	if resp.Created {
+		t.Error("expected created=false from cache hit")
+	}
+	if resp.PublicKey != "-----BEGIN FAKE-----" {
+		t.Errorf("publicKey: got %q", resp.PublicKey)
+	}
+}
+
+func TestRegisterRoutes_EnsureKey_OverrideExistingReturns200(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	cfg.CustodyKeyRingID = "projects/test/locations/loc/keyRings/ring"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	keyName := cfg.CustodyKeyRingID + "/cryptoKeys/" + testEnsureSelfLogID
+	api.ensureKeyOverride = func(ctx context.Context, keyOwnerID, selfLogID, alg, protectionLevel string, labels map[string]string) (string, string, bool, error) {
+		return keyName, "-----BEGIN OVERRIDE-----", false, nil
+	}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{
+		KeyOwnerID: testEnsureSelfLogID,
+		SelfLogID:  testEnsureSelfLogID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", cborContentType)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for existing key, got %d", rec.Code)
+	}
+	var resp EnsureKeyResponse
+	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	if resp.Created {
+		t.Error("expected created=false")
+	}
+}
+
+func TestRegisterRoutes_EnsureKey_OverrideNewReturns201(t *testing.T) {
+	cfg := LoadConfig()
+	cfg.AppToken = "secret"
+	cfg.CustodyKeyRingID = "projects/test/locations/loc/keyRings/ring"
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, cfg)
+	keyName := cfg.CustodyKeyRingID + "/cryptoKeys/" + testEnsureSelfLogID
+	api.ensureKeyOverride = func(ctx context.Context, keyOwnerID, selfLogID, alg, protectionLevel string, labels map[string]string) (string, string, bool, error) {
+		return keyName, "-----BEGIN NEW-----", true, nil
+	}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	body, _ := custodianCBORem.Marshal(EnsureKeyRequest{
+		KeyOwnerID: testEnsureSelfLogID,
+		SelfLogID:  testEnsureSelfLogID,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", bytes.NewReader(body))
+	req.Header.Set("Content-Type", cborContentType)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for new key, got %d", rec.Code)
+	}
+	var resp EnsureKeyResponse
+	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	if !resp.Created {
+		t.Error("expected created=true")
 	}
 }
 

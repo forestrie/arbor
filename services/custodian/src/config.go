@@ -17,13 +17,13 @@ type Config struct {
 	ShutdownTimeout time.Duration
 
 	// Application tokens (Bearer); log only digests.
-	AppToken          string // Normal: key creation, list keys, public key, custody key signing
+	AppToken          string // Normal: key ensure, list keys, public key, custody key signing
 	BootstrapAppToken string // Bootstrap: key destruction, POST .../:bootstrap/sign
 
 	// GCP: custody signer SA (IAM grants per key) and custody key ring for key creation.
 	CustodySignerSAEmail string
 	// CustodianRuntimeSAEmail is the GCP SA used by this process (ADC). When set,
-	// CreateKeyForOwner grants it signerVerifier and publicKeyViewer on each new
+	// EnsureKeyForOwner grants it signerVerifier and publicKeyViewer on each
 	// custody key so SignAsymmetric and GetPublicKey succeed for that identity.
 	CustodianRuntimeSAEmail string
 	CustodyKeyRingID        string // Full key ring ID (projects/.../locations/.../keyRings/...)

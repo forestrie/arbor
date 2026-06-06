@@ -1,7 +1,7 @@
 ---
 Status: DRAFT
 Date: 2025-03-23
-Related: ../services/custodian/README.md, ../services/sealer/src/sealer.go, ../services/sealer/src/global_delegation.go; [forest-1 arc-delegation-signer-cose-cbor-scitt.md](https://github.com/forestrie/forest-1/blob/main/docs/arc-delegation-signer-cose-cbor-scitt.md); external [ADR-0033](https://github.com/forestrie/devdocs/blob/main/adr/adr-0033-custodian-key-service.md)
+Related: ../services/custodian/README.md, [plan-0010](plan-0010-custodian-kms-ensure-and-e2e-key-hygiene.md), ../services/sealer/src/sealer.go, ../services/sealer/src/global_delegation.go; [forest-1 arc-delegation-signer-cose-cbor-scitt.md](https://github.com/forestrie/forest-1/blob/main/docs/arc-delegation-signer-cose-cbor-scitt.md); external [ADR-0033](https://github.com/forestrie/devdocs/blob/main/adr/adr-0033-custodian-key-service.md)
 ---
 
 # Plan 0001: Custodian HTTP API — exclusive CBOR + COSE_Sign1 signing
