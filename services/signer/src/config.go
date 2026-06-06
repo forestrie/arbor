@@ -23,7 +23,7 @@ type Config struct {
 	// When set, /delegate/parent can resolve parent_log_id == root to bootstrap key.
 	UnivocityURL string
 
-	// Optional: JSON map of parent log id (0x-prefixed hex) to KMS key resource name.
+	// Optional: JSON map of parent log id (canonical UUID or 32-hex) to KMS key name.
 	// When parent is not the root, key is looked up here; if unset and parent != root, 404.
 	ParentKeysJSON string
 }

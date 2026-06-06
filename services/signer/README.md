@@ -31,7 +31,7 @@ Request a signature using the key for a **parent (auth) log**. Use this for sign
 
 **Request body (JSON):**
 
-- `parent_log_id` (required): auth log id as 0x-prefixed 32-byte hex.
+- `parent_log_id` (required): auth log id as a canonical dashed UUID.
 - `payload_hash` (optional): same as bootstrap.
 - `payload` (optional): same as bootstrap.
 
@@ -51,7 +51,7 @@ Request a signature using the key for a **parent (auth) log**. Use this for sign
 | `LOG_LEVEL` | No | debug, info, warn, error. |
 | `SIGNER_BOOTSTRAP_KEY_ID` | **Yes** | GCP KMS key resource name (e.g. `projects/P/locations/L/keyRings/R/cryptoKeys/K`). Must exist before univocity contract deploy/init. |
 | `SIGNER_UNIVOCITY_URL` | No | Base URL of auth-log status service (subplan 02). When set, parent == root uses bootstrap key. |
-| `SIGNER_PARENT_KEYS` | No | JSON object: `{"<logIdHex>": "<kmsKeyId>", ...}`. For auth logs other than root. |
+| `SIGNER_PARENT_KEYS` | No | JSON object: `{"<uuid>": "<kmsKeyId>", ...}`. Keys are canonical UUID strings (32-hex accepted at config load only). |
 
 ## Flow for queue consumer / canopy
 

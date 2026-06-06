@@ -78,12 +78,13 @@ sequenceDiagram
 Refactor-replace the scan-canopy-R2 + O(N) probe path; univocity now **owns**
 storage.
 
-- **Storage layout** (S3/R2 via existing `s3.Client`):
-  - genesis: `forest/{hex64(R)}/genesis.cbor` (univocity-owned).
-  - grants: `forest/{hex64(R)}/grants/{hex64(subject)}.cbor` (raw transparent
-    statement bytes).
-  - index: `index/log/{hex64(subject)} → R` (32 bytes), created with conditional
-    `If-None-Match: *` for atomic uniqueness.
+- **Storage layout** (S3/R2 via existing `s3.Client`; superseded path detail in
+  [ADR-0004](adr/adr-0004-forests-storage-and-uuid-log-ids.md)):
+  - genesis: `forests/forest/{uuid-R}/genesis.cbor` (univocity-owned).
+  - grants: `forests/forest/{uuid-R}/grants/auth-log|data-log/{uuid-subject}.cbor`
+    (raw transparent statement bytes).
+  - index: `forests/index/forest/{uuid-subject}` (ASCII UUID of `R`), created with
+    conditional `If-None-Match: *` for atomic uniqueness.
 - `POST /api/forest/{R}/genesis` (token-auth): verify
   `genesis.key == contract.bootstrapConfig()` (cached per `(chainId, contract)`);
   store; 201/409. `AllowUnanchoredGenesis` relaxes the anchor for local/dev/e2e.

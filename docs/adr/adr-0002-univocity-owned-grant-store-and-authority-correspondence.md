@@ -8,11 +8,15 @@ coordinator central-trust fallback for the pre-chain window.
 
 **Decision:** Univocity **owns** the off-chain genesis + grant store and verifies
 the grant **signature chain** off-chain, anchored to the immutable on-chain
-**bootstrap key** (`bootstrapConfig()`):
+**bootstrap key** (`bootstrapConfig()`).
 
-- genesis: `forest/{hex64(R)}/genesis.cbor`
-- grants: `forest/{hex64(R)}/grants/{hex64(subject)}.cbor` (raw transparent
-  statement bytes)
+**Object layout** (canonical paths and UUID log ids): see
+[ADR-0004](adr-0004-forests-storage-and-uuid-log-ids.md). In summary:
+
+- genesis: `forests/forest/{uuid-R}/genesis.cbor`
+- grants: `forests/forest/{uuid-R}/grants/auth-log|data-log/{uuid-subject}.cbor`
+  (raw transparent statement bytes)
+- index: `forests/index/forest/{uuid-subject}` → ASCII UUID of `R`
 - A non-root grant's COSE **envelope** verifies against its **owner's** root key
   `grantData_O` (resolved on-chain via `logRootKey(O)` or by recursing the grant
   store), not against its own `grantData`. The recursion bottoms out at the root,

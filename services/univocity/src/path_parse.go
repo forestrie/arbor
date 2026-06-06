@@ -1,36 +1,38 @@
 package univocity
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 func parseChainIDPath(s string) (uint64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
+	id, err := parseChainIDString(strings.TrimSpace(s))
+	if err != nil {
 		return 0, false
 	}
-	id, err := strconv.ParseUint(s, 10, 64)
-	return id, err == nil
+	return id, true
 }
 
 func parseContractPath(s string) (common.Address, bool) {
 	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(strings.ToLower(s), "0x")
-	if len(s) != 40 {
+	if s == "" {
 		return common.Address{}, false
 	}
-	for _, c := range s {
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
-			continue
-		}
+	if !strings.HasPrefix(s, "0x") && len(s) == 40 {
+		s = "0x" + s
+	}
+	if !common.IsHexAddress(s) {
 		return common.Address{}, false
 	}
-	return common.HexToAddress("0x" + s), true
+	return common.HexToAddress(s), true
 }
 
-func logIDFromPathValue(s string) ([32]byte, bool) {
-	return LogIDFromHex(strings.TrimSpace(s))
+func logIDFromPathValue(s string) (logid.UUID, bool) {
+	id, err := logid.ParseSegment(strings.TrimSpace(s))
+	if err != nil {
+		return logid.Zero, false
+	}
+	return id, true
 }

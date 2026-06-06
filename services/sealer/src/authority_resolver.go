@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -69,7 +70,11 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 		return AuthorityBinding{}, fmt.Errorf("log ID is empty")
 	}
 
-	endpoint := base + "/api/logs/" + logIdHex + "/authority"
+	apiLogID, err := logIDAPISegment(logIdHex)
+	if err != nil {
+		return AuthorityBinding{}, err
+	}
+	endpoint := base + "/api/logs/" + apiLogID + "/authority"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return AuthorityBinding{}, fmt.Errorf("build authority request: %w", err)
@@ -102,9 +107,10 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 	if err != nil {
 		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
 	}
+	rootUUID := logid.FromPaddedWire32(record.RootLogID)
 	return AuthorityBinding{
 		SigningKey:      LogSigningKey{PublicKeyPEM: pemStr, Alg: strings.TrimSpace(record.Alg)},
-		RootLogIDHex:    hex.EncodeToString(record.RootLogID),
+		RootLogIDHex:    hex.EncodeToString(rootUUID[:]),
 		ChainID:         strings.TrimSpace(record.ChainID),
 		ContractAddress: strings.TrimSpace(record.Contract),
 		Source:          strings.TrimSpace(record.Source),

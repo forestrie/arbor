@@ -5,8 +5,10 @@ root `R` (cross-forest reuse), which would make `logId → authority` ambiguous 
 let a grant valid in one forest be replayed to seal a log in another.
 
 **Decision:** A subject `logId` maps to **exactly one** forest `R` globally.
-Univocity maintains an atomic index `index/log/{hex64(subject)} → R` created with a
-conditional write (`If-None-Match: *`). `POST /api/grants` performs an idempotent
+Univocity maintains an atomic index
+`forests/index/forest/{uuid-subject}` (body: ASCII UUID of `R`) created with a
+conditional write (`If-None-Match: *`). See
+[ADR-0004](adr-0004-forests-storage-and-uuid-log-ids.md). `POST /api/grants` performs an idempotent
 index create:
 
 - **new** → `201` (first time this `logId` is seen)

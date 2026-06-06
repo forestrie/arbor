@@ -1,13 +1,13 @@
 package univocity
 
 import (
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -56,7 +56,7 @@ func parseGenesisV1(bytes []byte) (ForestEntry, error) {
 		return ForestEntry{}, fmt.Errorf("chain-id out of range")
 	}
 	return ForestEntry{
-		R:        boot,
+		R:        logid.FromPaddedWire32(boot[:]),
 		ChainID:  chainID,
 		Contract: common.BytesToAddress(addr),
 	}, nil
@@ -160,45 +160,9 @@ func (m genesisIntMap) byteSlice(label int) ([]byte, bool) {
 	return asByteSlice(v)
 }
 
-// wireLogIDFromHex64 parses a 64-char hex log id (no 0x) into 32 wire bytes.
-func wireLogIDFromHex64(hex64 string) ([32]byte, bool) {
-	if len(hex64) != 64 {
-		return [32]byte{}, false
-	}
-	decoded, err := hex.DecodeString(hex64)
-	if err != nil || len(decoded) != 32 {
-		return [32]byte{}, false
-	}
-	var out [32]byte
-	copy(out[:], decoded)
-	return out, true
-}
-
-func forestGenesisObjectKey(hex64 string) string {
-	return "forest/" + hex64 + "/genesis.cbor"
-}
-
-func parseForestKey(key string) (hex64 string, ok bool) {
-	const prefix = "forest/"
-	const suffix = "/genesis.cbor"
-	if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
-		return "", false
-	}
-	hex64 = strings.TrimPrefix(key, prefix)
-	hex64 = strings.TrimSuffix(hex64, suffix)
-	if len(hex64) != 64 {
-		return "", false
-	}
-	return hex64, true
-}
-
 // ForestEntry is one curator-provisioned forest (R, chain, contract).
 type ForestEntry struct {
-	R        [32]byte
+	R        logid.UUID
 	ChainID  uint64
 	Contract common.Address
-}
-
-func logIDHexKey(id [32]byte) string {
-	return hex.EncodeToString(id[:])
 }

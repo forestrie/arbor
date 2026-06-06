@@ -1,6 +1,7 @@
 package univocity
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -52,7 +54,7 @@ func (a API) resolveScoped(
 func (a API) resolveForest(
 	w http.ResponseWriter,
 	r *http.Request,
-	logID [32]byte,
+	logID logid.UUID,
 ) (ForestEntry, ChainReader, bool) {
 	if a.Resolver == nil && a.Store == nil {
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
@@ -64,7 +66,7 @@ func (a API) resolveForest(
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrAmbiguousForest):
-			a.Logger.Error("ambiguous forest resolution", "logId", LogIDToHex(logID))
+			a.Logger.Error("ambiguous forest resolution", "logId", logID.String())
 			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 				"ambiguous log forest", err.Error())
 		case errors.Is(err, ErrLogNotResolved):
@@ -74,7 +76,7 @@ func (a API) resolveForest(
 			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 				"chain not configured", err.Error())
 		default:
-			a.Logger.Error("resolve failed", "error", err, "logId", LogIDToHex(logID))
+			a.Logger.Error("resolve failed", "error", err, "logId", logID.String())
 			a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
 				"resolve failed", err.Error())
 		}
@@ -110,8 +112,8 @@ func (a API) handleScopedLogsList(w http.ResponseWriter, r *http.Request) {
 	}
 	var rootStr *string
 	authLogs := []string{}
-	if root != [32]byte{} {
-		h := LogIDToHex(root)
+	if !root.IsZero() {
+		h := root.String()
 		rootStr = &h
 		authLogs = append(authLogs, h)
 	}
@@ -135,7 +137,7 @@ func (a API) handleScopedLogConfig(w http.ResponseWriter, r *http.Request) {
 	logId, ok := logIDFromPathValue(r.PathValue("logId"))
 	if !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId",
-			"expect 0x-prefixed hex (32 or 64 chars)")
+			"expect canonical UUID")
 		return
 	}
 	a.writeLogConfig(w, r, reader, logId)
@@ -149,7 +151,7 @@ func (a API) handleScopedPublicRoot(w http.ResponseWriter, r *http.Request) {
 	logId, ok := logIDFromPathValue(r.PathValue("logId"))
 	if !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId",
-			"expect 0x-prefixed hex (32 or 64 chars)")
+			"expect canonical UUID")
 		return
 	}
 	a.writePublicRoot(w, r, reader, logId, false, ForestEntry{})
@@ -159,7 +161,7 @@ func (a API) handleLogIDRoot(w http.ResponseWriter, r *http.Request) {
 	logId, ok := logIDFromPathValue(r.PathValue("logId"))
 	if !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId",
-			"expect 0x-prefixed hex (32 or 64 chars)")
+			"expect canonical UUID")
 		return
 	}
 	entry, _, ok := a.resolveForest(w, r, logId)
@@ -171,7 +173,7 @@ func (a API) handleLogIDRoot(w http.ResponseWriter, r *http.Request) {
 		RootLogId string `json:"rootLogId"`
 	}{
 		Exists:    true,
-		RootLogId: LogIDToHex(entry.R),
+		RootLogId: entry.R.String(),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -182,7 +184,7 @@ func (a API) handleLogIDPublicRoot(w http.ResponseWriter, r *http.Request) {
 	logId, ok := logIDFromPathValue(r.PathValue("logId"))
 	if !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId",
-			"expect 0x-prefixed hex (32 or 64 chars)")
+			"expect canonical UUID")
 		return
 	}
 	entry, reader, ok := a.resolveForest(w, r, logId)
@@ -215,7 +217,7 @@ func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 	logID, ok := logIDFromPathValue(r.PathValue("logId"))
 	if !ok {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId",
-			"expect 0x-prefixed hex (32 or 64 chars)")
+			"expect canonical UUID")
 		return
 	}
 	res, err := a.resolveAuthority(r.Context(), logID)
@@ -250,26 +252,26 @@ func (a API) writeAuthorityError(w http.ResponseWriter, r *http.Request, err err
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 			"log not resolved", err.Error())
 	default:
-		a.Logger.Info("authority resolution failed", "logId", LogIDToHex(logID(r)), "error", err)
+		a.Logger.Info("authority resolution failed", "logId", logID(r).String(), "error", err)
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
 			"authority resolution failed", err.Error())
 	}
 }
 
 // logID extracts the path logId for logging (best effort; empty on parse fail).
-func logID(r *http.Request) [32]byte {
+func logID(r *http.Request) logid.UUID {
 	id, _ := logIDFromPathValue(r.PathValue("logId"))
 	return id
 }
 
-func writeRootJSON(w http.ResponseWriter, root [32]byte) {
-	exists := root != [32]byte{}
+func writeRootJSON(w http.ResponseWriter, root logid.UUID) {
+	exists := !root.IsZero()
 	resp := struct {
 		Exists    bool   `json:"exists"`
 		RootLogId string `json:"rootLogId"`
 	}{
 		Exists:    exists,
-		RootLogId: LogIDToHex(root),
+		RootLogId: root.String(),
 	}
 	if !exists {
 		resp.RootLogId = ""
@@ -283,7 +285,7 @@ func (a API) writeLogConfig(
 	w http.ResponseWriter,
 	r *http.Request,
 	reader ChainReader,
-	logId [32]byte,
+	logId logid.UUID,
 ) {
 	initialized, err := reader.IsLogInitialized(r.Context(), logId)
 	if err != nil {
@@ -307,7 +309,7 @@ func (a API) writeLogConfig(
 		InitializedAt uint64 `json:"initializedAt"`
 	}{
 		Kind:          cfg.Kind.String(),
-		AuthLogId:     LogIDToHex(cfg.AuthLogId),
+		AuthLogId:     cfg.AuthLogId.String(),
 		InitializedAt: cfg.InitializedAt,
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -319,7 +321,7 @@ func (a API) writePublicRoot(
 	w http.ResponseWriter,
 	r *http.Request,
 	reader ChainReader,
-	logId [32]byte,
+	logId logid.UUID,
 	includeChainBinding bool,
 	entry ForestEntry,
 ) {
@@ -357,7 +359,7 @@ func (a API) writePublicRoot(
 			X:     rootKeyX[:],
 			Y:     rootKeyY[:],
 		}
-		if includeChainBinding && entry.R != [32]byte{} {
+		if includeChainBinding && !entry.R.IsZero() {
 			record.ChainID = strconv.FormatUint(entry.ChainID, 10)
 			record.ContractAddress = entry.Contract.Hex()
 		}
@@ -379,13 +381,17 @@ func (a API) writePublicRoot(
 		RootKeyX   string `json:"rootKeyX"`
 		RootKeyY   string `json:"rootKeyY"`
 	}{
-		LogId:      LogIDToHex(logId),
+		LogId:      logId.String(),
 		Kind:       cfg.Kind.String(),
-		OwnerLogId: LogIDToHex(cfg.AuthLogId),
-		RootKeyX:   LogIDToHex(rootKeyX),
-		RootKeyY:   LogIDToHex(rootKeyY),
+		OwnerLogId: cfg.AuthLogId.String(),
+		RootKeyX:   bytes32Hex(rootKeyX),
+		RootKeyY:   bytes32Hex(rootKeyY),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func bytes32Hex(b [32]byte) string {
+	return "0x" + hex.EncodeToString(b[:])
 }

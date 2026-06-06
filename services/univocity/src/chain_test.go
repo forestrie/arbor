@@ -5,59 +5,46 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 // TestMockChain_RootLogId_ZeroAndNonZero satisfies plan §8.2 verification:
 // unit test with mock for rootLogId returning zero vs non-zero.
 func TestMockChain_RootLogId_ZeroAndNonZero(t *testing.T) {
 	ctx := context.Background()
-	zero := &mockChain{rootLogId: [32]byte{}}
+	zero := &mockChain{rootLogId: logid.Zero}
 	got, err := zero.RootLogId(ctx)
 	if err != nil {
 		t.Fatalf("RootLogId: %v", err)
 	}
-	if got != [32]byte{} {
+	if !got.IsZero() {
 		t.Error("expected zero rootLogId")
 	}
-	nonZero := &mockChain{rootLogId: [32]byte{31: 1}}
+	nonZero := &mockChain{rootLogId: testLogID(1)}
 	got, err = nonZero.RootLogId(ctx)
 	if err != nil {
 		t.Fatalf("RootLogId: %v", err)
 	}
-	if got == [32]byte{} {
+	if got.IsZero() {
 		t.Error("expected non-zero rootLogId")
 	}
 }
 
-func TestLogIDFromHex_Valid32Bytes(t *testing.T) {
-	hex := "0x0000000000000000000000000000000000000000000000000000000000000001"
-	id, ok := LogIDFromHex(hex)
-	if !ok {
-		t.Fatal("LogIDFromHex failed")
+func TestParseSegment_UUID(t *testing.T) {
+	id := testLogID(1)
+	got, err := logid.ParseSegment(id.String())
+	if err != nil {
+		t.Fatal(err)
 	}
-	got := LogIDToHex(id)
-	if got != hex {
-		t.Errorf("round-trip: got %q", got)
-	}
-}
-
-func TestLogIDFromHex_WithoutPrefix(t *testing.T) {
-	hex := "0000000000000000000000000000000000000000000000000000000000000001"
-	id, ok := LogIDFromHex(hex)
-	if !ok {
-		t.Fatal("LogIDFromHex failed")
-	}
-	if LogIDToHex(id) != "0x"+hex {
-		t.Error("expected 0x-prefixed")
+	if got != id {
+		t.Fatalf("round-trip: got %v want %v", got, id)
 	}
 }
 
-func TestLogIDFromHex_Invalid(t *testing.T) {
-	if _, ok := LogIDFromHex("not-hex"); ok {
-		t.Error("expected false for invalid hex")
-	}
-	if _, ok := LogIDFromHex("0xgg"); ok {
-		t.Error("expected false for invalid hex chars")
+func TestParseSegment_RejectsHex64(t *testing.T) {
+	hex64 := "00000000000000000000000000000000aeacb6e77e8c47de8ea3f0289d203dba"
+	if _, err := logid.ParseSegment(hex64); err != logid.ErrAmbiguousLength {
+		t.Fatalf("got %v", err)
 	}
 }
 

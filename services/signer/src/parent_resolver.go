@@ -8,15 +8,17 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 // ParentResolver resolves parent (auth) log id to the KMS key resource name to use for signing.
 // For bootstrap root auth log, returns bootstrap key. For other auth logs, uses map or univocity.
 type ParentResolver struct {
 	BootstrapKeyID string
-	ParentKeys     map[string]string // log id hex (0x-prefixed or not) -> KMS key id
+	ParentKeys     map[string]string // canonical UUID -> KMS key id
 	UnivocityURL   string
-	RootLogIDHex   string // cached from univocity GET /api/logs/{id}/root
+	RootLogID      logid.UUID // cached forest root R (from univocity)
 	HTTPClient     *http.Client
 }
 
@@ -25,103 +27,103 @@ func NewParentResolver(cfg Config) *ParentResolver {
 	client := &http.Client{Timeout: 10 * time.Second}
 	return &ParentResolver{
 		BootstrapKeyID: cfg.BootstrapKeyID,
-		ParentKeys:     cfg.ParentKeyMap(),
+		ParentKeys:     normalizeParentKeyMap(cfg.ParentKeyMap()),
 		UnivocityURL:   strings.TrimRight(strings.TrimSpace(cfg.UnivocityURL), "/"),
 		HTTPClient:     client,
 	}
 }
 
 // ResolveKeyID returns the KMS key resource name for the given parent (auth) log id.
-// parentLogIDHex should be 0x-prefixed 32-byte hex. If parent is the root and we have
-// bootstrap key, returns bootstrap. Else looks up ParentKeys; if UnivocityURL is set
-// and root not yet known, fetches root and retries. Returns error if not found.
-func (p *ParentResolver) ResolveKeyID(ctx context.Context, parentLogIDHex string) (string, error) {
-	normalized := normalizeLogIDHex(parentLogIDHex)
-	if normalized == "" {
-		return "", fmt.Errorf("invalid parent_log_id hex")
+// parentLogID must be a canonical dashed UUID on the HTTP API (not bytes32 chain hex).
+func (p *ParentResolver) ResolveKeyID(ctx context.Context, parentLogID string) (string, error) {
+	parentUUID, err := parseParentLogID(parentLogID)
+	if err != nil {
+		return "", err
 	}
 
 	// If we have bootstrap and parent is the root, use bootstrap (simple deployment).
-	if p.BootstrapKeyID != "" && p.isRoot(ctx, normalized) {
+	if p.BootstrapKeyID != "" && p.isRoot(ctx, parentUUID) {
 		return p.BootstrapKeyID, nil
 	}
 
-	// Explicit map lookup (log id hex -> key id).
+	// Explicit map lookup (canonical UUID -> key id).
 	if p.ParentKeys != nil {
-		if keyID, ok := p.ParentKeys[normalized]; ok && keyID != "" {
-			return keyID, nil
-		}
-		// Try with 0x prefix if we stored without.
-		if keyID, ok := p.ParentKeys["0x"+normalized]; ok && keyID != "" {
+		if keyID, ok := p.ParentKeys[parentUUID.String()]; ok && keyID != "" {
 			return keyID, nil
 		}
 	}
 
-	return "", fmt.Errorf("no key configured for parent log %s", normalized)
+	return "", fmt.Errorf("no key configured for parent log %s", parentUUID.String())
 }
 
-func normalizeLogIDHex(s string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(strings.ToLower(s), "0x") {
-		s = s[2:]
+func parseParentLogID(s string) (logid.UUID, error) {
+	u, err := logid.ParseCanonicalSegment(s)
+	if err != nil {
+		return logid.Zero, fmt.Errorf("invalid parent_log_id: %w", err)
 	}
-	if len(s) != 64 {
-		return ""
+	return u, nil
+}
+
+// normalizeParentKeyMap converts config keys (canonical UUID or custodian 32-hex) to
+// canonical dashed UUID strings. Chain bytes32 (64-hex) is not accepted.
+func normalizeParentKeyMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
 	}
-	for _, c := range s {
-		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		u, err := logid.ParseSegment(strings.TrimSpace(k))
+		if err != nil {
 			continue
 		}
-		return ""
+		out[u.String()] = v
 	}
-	return s
+	return out
 }
 
-func (p *ParentResolver) isRoot(ctx context.Context, logIDHex string) bool {
+func (p *ParentResolver) isRoot(ctx context.Context, parentUUID logid.UUID) bool {
 	if p.UnivocityURL == "" {
 		return false
 	}
-	root := p.fetchRootLogID(ctx, logIDHex)
-	if root == "" {
+	root := p.fetchRootLogID(ctx, parentUUID)
+	if root.IsZero() {
 		return false
 	}
-	p.RootLogIDHex = root
-	normalizedRoot := normalizeLogIDHex(root)
-	normalizedParent := normalizeLogIDHex(logIDHex)
-	return normalizedRoot != "" && normalizedRoot == normalizedParent
+	p.RootLogID = root
+	return root == parentUUID
 }
 
-func (p *ParentResolver) fetchRootLogID(ctx context.Context, parentLogIDHex string) string {
+func (p *ParentResolver) fetchRootLogID(ctx context.Context, parentUUID logid.UUID) logid.UUID {
 	if p.HTTPClient == nil {
-		return ""
+		return logid.Zero
 	}
-	normalized := normalizeLogIDHex(parentLogIDHex)
-	if normalized == "" {
-		return ""
-	}
-	url := p.UnivocityURL + "/api/logs/0x" + normalized + "/root"
+	url := p.UnivocityURL + "/api/logs/" + parentUUID.String() + "/root"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return ""
+		return logid.Zero
 	}
 	resp, err := p.HTTPClient.Do(req)
 	if err != nil {
-		return ""
+		return logid.Zero
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		slog.Warn("univocity root lookup transient", "parentLogId", "0x"+normalized)
-		return ""
+		slog.Warn("univocity root lookup transient", "parentLogId", parentUUID.String())
+		return logid.Zero
 	}
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return logid.Zero
 	}
 	var out struct {
 		Exists    bool   `json:"exists"`
 		RootLogId string `json:"rootLogId"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&out) != nil || !out.Exists {
-		return ""
+		return logid.Zero
 	}
-	return out.RootLogId
+	root, err := logid.ParseUUIDString(out.RootLogId)
+	if err != nil {
+		return logid.Zero
+	}
+	return root
 }

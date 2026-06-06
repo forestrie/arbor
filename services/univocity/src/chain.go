@@ -2,7 +2,6 @@ package univocity
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"math/big"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 var ErrChainNotConfigured = errors.New("chainId not configured")
@@ -114,18 +114,18 @@ func (k LogKind) String() string {
 
 type LogConfig struct {
 	Kind          LogKind
-	AuthLogId     [32]byte
+	AuthLogId     logid.UUID
 	RootKey       []byte
 	InitializedAt uint64
 }
 
 // ChainReader is the contract read interface used by the API. It allows tests to inject a mock.
 type ChainReader interface {
-	RootLogId(ctx context.Context) ([32]byte, error)
+	RootLogId(ctx context.Context) (logid.UUID, error)
 	BootstrapConfig(ctx context.Context) (alg int64, key []byte, err error)
-	IsLogInitialized(ctx context.Context, logId [32]byte) (bool, error)
-	LogConfig(ctx context.Context, logId [32]byte) (LogConfig, error)
-	LogRootKey(ctx context.Context, logId [32]byte) (rootKeyX, rootKeyY [32]byte, err error)
+	IsLogInitialized(ctx context.Context, logId logid.UUID) (bool, error)
+	LogConfig(ctx context.Context, logId logid.UUID) (LogConfig, error)
+	LogRootKey(ctx context.Context, logId logid.UUID) (rootKeyX, rootKeyY [32]byte, err error)
 }
 
 type UnivocityContract struct {
@@ -134,20 +134,20 @@ type UnivocityContract struct {
 	contract abi.ABI
 }
 
-func (c *UnivocityContract) RootLogId(ctx context.Context) ([32]byte, error) {
+func (c *UnivocityContract) RootLogId(ctx context.Context) (logid.UUID, error) {
 	data, err := c.contract.Pack("rootLogId")
 	if err != nil {
-		return [32]byte{}, err
+		return logid.Zero, err
 	}
 	out, err := c.call(ctx, data)
 	if err != nil {
-		return [32]byte{}, err
+		return logid.Zero, err
 	}
 	vals, err := c.contract.Unpack("rootLogId", out)
 	if err != nil || len(vals) == 0 {
-		return [32]byte{}, err
+		return logid.Zero, err
 	}
-	return vals[0].([32]byte), nil
+	return logid.FromContractBytes32(vals[0].([32]byte)), nil
 }
 
 // BootstrapConfig returns the immutable on-chain bootstrap (alg, key) that
@@ -179,8 +179,8 @@ func (c *UnivocityContract) BootstrapConfig(ctx context.Context) (int64, []byte,
 	return alg, key, nil
 }
 
-func (c *UnivocityContract) IsLogInitialized(ctx context.Context, logId [32]byte) (bool, error) {
-	data, err := c.contract.Pack("isLogInitialized", logId)
+func (c *UnivocityContract) IsLogInitialized(ctx context.Context, logId logid.UUID) (bool, error) {
+	data, err := c.contract.Pack("isLogInitialized", logId.ToContractBytes32())
 	if err != nil {
 		return false, err
 	}
@@ -195,8 +195,8 @@ func (c *UnivocityContract) IsLogInitialized(ctx context.Context, logId [32]byte
 	return vals[0].(bool), nil
 }
 
-func (c *UnivocityContract) LogConfig(ctx context.Context, logId [32]byte) (LogConfig, error) {
-	data, err := c.contract.Pack("logConfig", logId)
+func (c *UnivocityContract) LogConfig(ctx context.Context, logId logid.UUID) (LogConfig, error) {
+	data, err := c.contract.Pack("logConfig", logId.ToContractBytes32())
 	if err != nil {
 		return LogConfig{}, err
 	}
@@ -213,7 +213,7 @@ func (c *UnivocityContract) LogConfig(ctx context.Context, logId [32]byte) (LogC
 		cfg.Kind = LogKind(v)
 	}
 	if v, ok := vals[1].([32]byte); ok {
-		cfg.AuthLogId = v
+		cfg.AuthLogId = logid.FromContractBytes32(v)
 	}
 	if v, ok := vals[2].([]byte); ok {
 		cfg.RootKey = v
@@ -224,8 +224,8 @@ func (c *UnivocityContract) LogConfig(ctx context.Context, logId [32]byte) (LogC
 	return cfg, nil
 }
 
-func (c *UnivocityContract) LogRootKey(ctx context.Context, logId [32]byte) (rootKeyX, rootKeyY [32]byte, err error) {
-	data, err := c.contract.Pack("logRootKey", logId)
+func (c *UnivocityContract) LogRootKey(ctx context.Context, logId logid.UUID) (rootKeyX, rootKeyY [32]byte, err error) {
+	data, err := c.contract.Pack("logRootKey", logId.ToContractBytes32())
 	if err != nil {
 		return [32]byte{}, [32]byte{}, err
 	}
@@ -248,19 +248,4 @@ func (c *UnivocityContract) call(ctx context.Context, data []byte) ([]byte, erro
 		Data: data,
 	}
 	return c.client.CallContract(ctx, msg, nil)
-}
-
-func LogIDFromHex(s string) ([32]byte, bool) {
-	s = strings.TrimPrefix(strings.ToLower(s), "0x")
-	decoded, err := hex.DecodeString(s)
-	if err != nil || len(decoded) > 32 {
-		return [32]byte{}, false
-	}
-	var id [32]byte
-	copy(id[32-len(decoded):], decoded)
-	return id, true
-}
-
-func LogIDToHex(id [32]byte) string {
-	return "0x" + hex.EncodeToString(id[:])
 }

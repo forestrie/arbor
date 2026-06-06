@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -70,9 +71,11 @@ func signSign1(t *testing.T, priv *ecdsa.PrivateKey, protected, payload []byte) 
 
 func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []byte {
 	t.Helper()
+	logWire := g.LogID.ToPaddedWire32()
+	ownerWire := g.OwnerLogID.ToPaddedWire32()
 	inner := map[int]interface{}{
-		grantKeyLogID:      g.LogID[:],
-		grantKeyOwnerLogID: g.OwnerLogID[:],
+		grantKeyLogID:      logWire[:],
+		grantKeyOwnerLogID: ownerWire[:],
 		grantKeyFlags:      g.Flags,
 		grantKeyMaxHeight:  g.MaxHeight,
 		grantKeyMinGrowth:  g.MinGrowth,
@@ -97,7 +100,7 @@ func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []b
 	return out
 }
 
-func buildGenesisDoc(t *testing.T, r [32]byte, boot *ecdsa.PrivateKey, chainID uint64, addr common.Address) []byte {
+func buildGenesisDoc(t *testing.T, r logid.UUID, boot *ecdsa.PrivateKey, chainID uint64, addr common.Address) []byte {
 	t.Helper()
 	x, y := pubXY(boot)
 	m := map[int]interface{}{
@@ -107,7 +110,7 @@ func buildGenesisDoc(t *testing.T, r [32]byte, boot *ecdsa.PrivateKey, chainID u
 		coseEc2X:            x[:],
 		coseEc2Y:            y[:],
 		labelGenesisVersion: genesisSchemaV1,
-		labelBootstrapLogID: r[:],
+		labelBootstrapLogID: func() []byte { w := r.ToPaddedWire32(); return w[:] }(),
 		labelUnivocityAddr:  addr.Bytes(),
 		labelChainID:        strconv.FormatUint(chainID, 10),
 	}
@@ -123,27 +126,31 @@ func buildGenesisDoc(t *testing.T, r [32]byte, boot *ecdsa.PrivateKey, chainID u
 type fakeStore struct {
 	genesis map[string][]byte
 	grants  map[string][]byte
-	index   map[string][32]byte
+	index   map[string]logid.UUID
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		genesis: map[string][]byte{},
 		grants:  map[string][]byte{},
-		index:   map[string][32]byte{},
+		index:   map[string]logid.UUID{},
 	}
 }
 
-func (s *fakeStore) GetGenesis(_ context.Context, r [32]byte) ([]byte, error) {
-	b, ok := s.genesis[hex64(r)]
+func (s *fakeStore) grantStoreKey(r, subject logid.UUID, class GrantClass) string {
+	return r.String() + "/" + grantClassDir(class) + "/" + subject.String()
+}
+
+func (s *fakeStore) GetGenesis(_ context.Context, r logid.UUID) ([]byte, error) {
+	b, ok := s.genesis[r.String()]
 	if !ok {
 		return nil, errStoreMiss
 	}
 	return b, nil
 }
 
-func (s *fakeStore) PutGenesisIfAbsent(_ context.Context, r [32]byte, body []byte) (bool, error) {
-	k := hex64(r)
+func (s *fakeStore) PutGenesisIfAbsent(_ context.Context, r logid.UUID, body []byte) (bool, error) {
+	k := r.String()
 	if _, ok := s.genesis[k]; ok {
 		return false, nil
 	}
@@ -151,53 +158,58 @@ func (s *fakeStore) PutGenesisIfAbsent(_ context.Context, r [32]byte, body []byt
 	return true, nil
 }
 
-func (s *fakeStore) GetGrant(_ context.Context, r, subject [32]byte) ([]byte, error) {
-	b, ok := s.grants[hex64(r)+"/"+hex64(subject)]
-	if !ok {
-		return nil, errStoreMiss
+func (s *fakeStore) GetGrant(_ context.Context, r, subject logid.UUID) ([]byte, error) {
+	for _, class := range []GrantClass{GrantClassAuthLog, GrantClassDataLog} {
+		if b, ok := s.grants[s.grantStoreKey(r, subject, class)]; ok {
+			return b, nil
+		}
 	}
-	return b, nil
+	return nil, errStoreMiss
 }
 
-func (s *fakeStore) PutGrant(_ context.Context, r, subject [32]byte, body []byte) error {
-	s.grants[hex64(r)+"/"+hex64(subject)] = body
+func (s *fakeStore) PutGrant(_ context.Context, r, subject logid.UUID, class GrantClass, body []byte) error {
+	s.grants[s.grantStoreKey(r, subject, class)] = body
 	return nil
 }
 
-func (s *fakeStore) IndexGet(_ context.Context, subject [32]byte) ([32]byte, bool, error) {
-	r, ok := s.index[hex64(subject)]
+func (s *fakeStore) IndexGet(_ context.Context, subject logid.UUID) (logid.UUID, bool, error) {
+	r, ok := s.index[subject.String()]
 	return r, ok, nil
 }
 
-func (s *fakeStore) IndexCreate(_ context.Context, subject, r [32]byte) (bool, [32]byte, error) {
-	if existing, ok := s.index[hex64(subject)]; ok {
+func (s *fakeStore) IndexCreate(_ context.Context, subject, r logid.UUID) (bool, logid.UUID, error) {
+	if existing, ok := s.index[subject.String()]; ok {
 		return false, existing, nil
 	}
-	s.index[hex64(subject)] = r
+	s.index[subject.String()] = r
 	return true, r, nil
 }
 
-func (s *fakeStore) DeleteGenesis(_ context.Context, r [32]byte) error {
-	delete(s.genesis, hex64(r))
+func (s *fakeStore) DeleteGenesis(_ context.Context, r logid.UUID) error {
+	delete(s.genesis, r.String())
 	return nil
 }
 
-func (s *fakeStore) DeleteGrant(_ context.Context, r, subject [32]byte) error {
-	delete(s.grants, hex64(r)+"/"+hex64(subject))
+func (s *fakeStore) DeleteGrant(_ context.Context, r, subject logid.UUID) error {
+	for _, class := range []GrantClass{GrantClassAuthLog, GrantClassDataLog} {
+		delete(s.grants, s.grantStoreKey(r, subject, class))
+	}
 	return nil
 }
 
-func (s *fakeStore) DeleteIndex(_ context.Context, subject [32]byte) error {
-	delete(s.index, hex64(subject))
+func (s *fakeStore) DeleteIndex(_ context.Context, subject logid.UUID) error {
+	delete(s.index, subject.String())
 	return nil
 }
 
-func (s *fakeStore) ListForests(_ context.Context) ([][32]byte, error) {
-	out := make([][32]byte, 0, len(s.genesis))
+func (s *fakeStore) ListForests(_ context.Context) ([]logid.UUID, error) {
+	out := make([]logid.UUID, 0, len(s.genesis))
 	for k := range s.genesis {
-		if r, ok := wireLogIDFromHex64(k); ok {
-			out = append(out, r)
+		id, err := logid.ParseUUIDString(k)
+		if err != nil {
+			continue
 		}
+		out = append(out, id)
 	}
 	return out, nil
 }
@@ -222,17 +234,15 @@ func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 	boot := mustKey(t)
 	child := mustKey(t)
 
-	var R [32]byte
-	R[31] = 1
-	var A [32]byte
-	A[31] = 2
+	R := testLogID(1)
+	A := testLogID(2)
 
 	chain := newChainColdAnchored(boot)
 	store := newFakeStore()
 	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
 	forest := ForestEntry{R: R, ChainID: 84532, Contract: common.HexToAddress("0x1")}
 
-	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: make([]byte, 8), GrantData: xyConcat(boot)}
+	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(boot)}
 	rootTS, err := decodeTransparentStatement(buildGrantStatement(t, boot, rootGrant))
 	if err != nil {
 		t.Fatalf("decode root: %v", err)
@@ -241,7 +251,7 @@ func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 		t.Fatalf("root chain invalid: %v", err)
 	}
 
-	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: make([]byte, 8), GrantData: xyConcat(child)}
+	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	childTS, err := decodeTransparentStatement(buildGrantStatement(t, boot, childGrant))
 	if err != nil {
 		t.Fatalf("decode child: %v", err)
@@ -250,7 +260,6 @@ func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 		t.Fatalf("child chain invalid: %v", err)
 	}
 
-	// Child signed by the wrong key (not the owner root) must be rejected.
 	bad := buildGrantStatement(t, child, childGrant)
 	badTS, err := decodeTransparentStatement(bad)
 	if err != nil {
@@ -260,8 +269,7 @@ func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 		t.Fatal("expected self-signed child grant to be rejected")
 	}
 
-	// Root grantData not matching the bootstrap key must be rejected.
-	wrongRoot := Grant{LogID: R, OwnerLogID: R, Flags: make([]byte, 8), GrantData: xyConcat(child)}
+	wrongRoot := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	wrongTS, err := decodeTransparentStatement(buildGrantStatement(t, boot, wrongRoot))
 	if err != nil {
 		t.Fatalf("decode wrong root: %v", err)
@@ -276,23 +284,19 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 	boot := mustKey(t)
 	child := mustKey(t)
 
-	var R [32]byte
-	R[31] = 1
-	var A [32]byte
-	A[31] = 2
+	R := testLogID(1)
+	A := testLogID(2)
 	addr := common.HexToAddress("0xabc")
 
 	chain := newChainColdAnchored(boot)
 	store := newFakeStore()
-	store.genesis[hex64(R)] = buildGenesisDoc(t, R, boot, 84532, addr)
-	store.index[hex64(A)] = R
-	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: make([]byte, 8), GrantData: xyConcat(child)}
-	store.grants[hex64(R)+"/"+hex64(A)] = buildGrantStatement(t, boot, childGrant)
+	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
+	store.index[A.String()] = R
+	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
+	store.grants[store.grantStoreKey(R, A, GrantClassAuthLog)] = buildGrantStatement(t, boot, childGrant)
 
 	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
 
-	// resolveAuthority returns the chain-valid grant-derived key for the cold
-	// child; the sealer verifies the delegation certificate locally against it.
 	res, err := api.resolveAuthority(context.Background(), A)
 	if err != nil {
 		t.Fatalf("resolve authority failed: %v", err)
@@ -304,9 +308,7 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 		t.Fatal("returned key does not match child grantData")
 	}
 
-	// An unknown log has no resolvable authority.
-	var unknown [32]byte
-	unknown[31] = 99
+	unknown := testLogID(99)
 	if _, err := api.resolveAuthority(context.Background(), unknown); err == nil {
 		t.Fatal("expected unknown log to fail authority resolution")
 	}
@@ -317,15 +319,13 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	boot := mustKey(t)
 	child := mustKey(t)
 
-	var R [32]byte
-	R[31] = 1
-	var A [32]byte
-	A[31] = 2
+	R := testLogID(1)
+	A := testLogID(2)
 	addr := common.HexToAddress("0xabc")
 
 	chain := newChainColdAnchored(boot)
 	store := newFakeStore()
-	store.genesis[hex64(R)] = buildGenesisDoc(t, R, boot, 84532, addr)
+	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
 
 	api := API{
 		Logger:    logger,
@@ -337,7 +337,7 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
-	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: make([]byte, 8), GrantData: xyConcat(child)}
+	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	stmt := buildGrantStatement(t, boot, childGrant)
 	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt})
 
@@ -356,7 +356,6 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		t.Fatalf("idempotent post want 200 got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Missing token -> 401.
 	noTok := httptest.NewRequest(http.MethodPost, "/api/grants", bytes.NewReader(reqBody))
 	noTokRec := httptest.NewRecorder()
 	mux.ServeHTTP(noTokRec, noTok)
@@ -364,20 +363,16 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		t.Fatalf("missing token want 401 got %d", noTokRec.Code)
 	}
 
-	// Cross-forest reuse of A under a different forest R2 -> 409.
-	var R2 [32]byte
-	R2[31] = 9
-	store.genesis[hex64(R2)] = buildGenesisDoc(t, R2, boot, 84532, addr)
-	childGrant2 := Grant{LogID: A, OwnerLogID: R2, Flags: make([]byte, 8), GrantData: xyConcat(child)}
+	R2 := testLogID(9)
+	store.genesis[R2.String()] = buildGenesisDoc(t, R2, boot, 84532, addr)
+	childGrant2 := Grant{LogID: A, OwnerLogID: R2, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	stmt2 := buildGrantStatement(t, boot, childGrant2)
 	reqBody2, _ := cbor.Marshal(postGrantRequest{RootLogID: R2[:], Statement: stmt2})
 	if rec := post(reqBody2); rec.Code != http.StatusConflict {
 		t.Fatalf("cross-forest reuse want 409 got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Resolve the cold child's authority via the GET endpoint (no token, no
-	// certificate): the sealer verifies the delegation locally against this key.
-	authReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+hex64(A)+"/authority", nil)
+	authReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+A.String()+"/authority", nil)
 	authRec := httptest.NewRecorder()
 	mux.ServeHTTP(authRec, authReq)
 	if authRec.Code != http.StatusOK {
@@ -394,10 +389,8 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		t.Fatal("authority key does not match child grantData")
 	}
 
-	// An unregistered log has no resolvable authority -> 503.
-	var unknown [32]byte
-	unknown[31] = 77
-	unkReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+hex64(unknown)+"/authority", nil)
+	unknown := testLogID(77)
+	unkReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+unknown.String()+"/authority", nil)
 	unkRec := httptest.NewRecorder()
 	mux.ServeHTTP(unkRec, unkReq)
 	if unkRec.Code != http.StatusServiceUnavailable {

@@ -6,12 +6,14 @@ toolchain go1.24.4
 
 require (
 	github.com/ethereum/go-ethereum v1.17.1
+	github.com/forestrie/arbor/services/pkgs/logid v0.0.0-00010101000000-000000000000
 	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
 	github.com/fxamacker/cbor/v2 v2.9.0
 )
 
 replace (
+	github.com/forestrie/arbor/services/pkgs/logid => ../../pkgs/logid
 	github.com/forestrie/arbor/services/pkgs/s3storage => ../../pkgs/s3storage
 	github.com/forestrie/go-merklelog/bloom => ../../_deps/go-merklelog/bloom
 	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs

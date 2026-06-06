@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -74,7 +75,7 @@ func parseGenesisDoc(body []byte) (GenesisDoc, error) {
 	}
 	return GenesisDoc{
 		Forest: ForestEntry{
-			R:        boot,
+			R:        logid.FromPaddedWire32(boot[:]),
 			ChainID:  chainID,
 			Contract: common.BytesToAddress(addr),
 		},

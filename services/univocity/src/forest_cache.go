@@ -3,6 +3,8 @@ package univocity
 import (
 	"sync"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 type forestCacheEntry struct {
@@ -10,7 +12,7 @@ type forestCacheEntry struct {
 	expires time.Time
 }
 
-// forestLRUCache maps logId hex -> forest with optional negative TTL.
+// forestLRUCache maps logId uuid string -> forest with optional negative TTL.
 type forestLRUCache struct {
 	mu       sync.Mutex
 	positive map[string]ForestEntry
@@ -39,8 +41,8 @@ func (c *forestLRUCache) Clear() {
 	c.order = nil
 }
 
-func (c *forestLRUCache) Get(logID [32]byte) (ForestEntry, bool, bool) {
-	key := logIDHexKey(logID)
+func (c *forestLRUCache) Get(logID logid.UUID) (ForestEntry, bool, bool) {
+	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if exp, ok := c.negative[key]; ok {
@@ -53,8 +55,8 @@ func (c *forestLRUCache) Get(logID [32]byte) (ForestEntry, bool, bool) {
 	return e, ok, false
 }
 
-func (c *forestLRUCache) PutPositive(logID [32]byte, e ForestEntry) {
-	key := logIDHexKey(logID)
+func (c *forestLRUCache) PutPositive(logID logid.UUID, e ForestEntry) {
+	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.negative, key)
@@ -69,8 +71,8 @@ func (c *forestLRUCache) PutPositive(logID [32]byte, e ForestEntry) {
 	}
 }
 
-func (c *forestLRUCache) PutNegative(logID [32]byte) {
-	key := logIDHexKey(logID)
+func (c *forestLRUCache) PutNegative(logID logid.UUID) {
+	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.negative[key] = time.Now().Add(c.negTTL)

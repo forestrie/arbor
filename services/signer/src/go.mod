@@ -4,7 +4,12 @@ go 1.24.0
 
 toolchain go1.24.4
 
-require cloud.google.com/go/kms v1.25.0
+require (
+	cloud.google.com/go/kms v1.25.0
+	github.com/forestrie/arbor/services/pkgs/logid v0.0.0
+)
+
+replace github.com/forestrie/arbor/services/pkgs/logid => ../../pkgs/logid
 
 require (
 	cloud.google.com/go v0.121.6 // indirect

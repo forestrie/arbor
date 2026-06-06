@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 )
 
@@ -51,7 +52,7 @@ func (r *ForestRegistry) Forests() []ForestEntry {
 	return out
 }
 
-// Scan lists forest/*/genesis.cbor and replaces the in-memory forest list.
+// Scan lists forests/forest/{uuid}/genesis.cbor and replaces the in-memory forest list.
 func (r *ForestRegistry) Scan(ctx context.Context) error {
 	r.scanMu.Lock()
 	defer r.scanMu.Unlock()
@@ -62,16 +63,16 @@ func (r *ForestRegistry) scanLocked(ctx context.Context) error {
 	var entries []ForestEntry
 	continuation := ""
 	for {
-		page, err := r.s3.ListObjects(ctx, "forest/", continuation, 1000)
+		page, err := r.s3.ListObjects(ctx, forestGenesisPrefix, continuation, 1000)
 		if err != nil {
 			return fmt.Errorf("list genesis objects: %w", err)
 		}
 		for _, obj := range page.Objects {
-			hex64, ok := parseForestKey(obj.Key)
+			uuidStr, ok := parseForestGenesisKey(obj.Key)
 			if !ok {
 				continue
 			}
-			entry, err := r.loadGenesis(ctx, hex64)
+			entry, err := r.loadGenesis(ctx, uuidStr)
 			if err != nil {
 				r.logger.Warn("skip genesis object", "key", obj.Key, "error", err)
 				continue
@@ -80,7 +81,7 @@ func (r *ForestRegistry) scanLocked(ctx context.Context) error {
 				r.logger.Warn(
 					"skip genesis forest: chainId not in UNIVOCITY_RPC_URLS",
 					"chainId", entry.ChainID,
-					"R", LogIDToHex(entry.R),
+					"R", entry.R.String(),
 				)
 				continue
 			}
@@ -100,8 +101,8 @@ func (r *ForestRegistry) scanLocked(ctx context.Context) error {
 	return nil
 }
 
-func (r *ForestRegistry) loadGenesis(ctx context.Context, hex64 string) (ForestEntry, error) {
-	key := forestGenesisObjectKey(hex64)
+func (r *ForestRegistry) loadGenesis(ctx context.Context, uuidStr string) (ForestEntry, error) {
+	key := forestGenesisObjectKey(uuidStr)
 	res, err := r.s3.GetObject(ctx, key, s3.GetOptions{})
 	if err != nil {
 		return ForestEntry{}, err
@@ -115,8 +116,11 @@ func (r *ForestRegistry) loadGenesis(ctx context.Context, hex64 string) (ForestE
 	if err != nil {
 		return ForestEntry{}, err
 	}
-	expected, ok := wireLogIDFromHex64(hex64)
-	if !ok || entry.R != expected {
+	pathID, err := logid.ParseUUIDString(uuidStr)
+	if err != nil {
+		return ForestEntry{}, fmt.Errorf("invalid object key uuid: %w", err)
+	}
+	if entry.R != pathID {
 		return ForestEntry{}, fmt.Errorf("bootstrap-logid does not match object key")
 	}
 	return entry, nil

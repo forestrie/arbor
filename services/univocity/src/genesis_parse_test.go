@@ -5,16 +5,19 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
 func TestParseGenesisV1(t *testing.T) {
-	root := [32]byte{0: 0xaa}
+	var wire [32]byte
+	wire[31] = 0xaa
+	wantR := logid.FromPaddedWire32(wire[:])
 	addr := make([]byte, 20)
 	addr[19] = 0x01
 	m := map[int]interface{}{
 		labelGenesisVersion: genesisSchemaV1,
-		labelBootstrapLogID: root[:],
+		labelBootstrapLogID: wire[:],
 		labelUnivocityAddr:  addr,
 		labelChainID:        "84532",
 	}
@@ -26,7 +29,7 @@ func TestParseGenesisV1(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if entry.R != root || entry.ChainID != 84532 {
+	if entry.R != wantR || entry.ChainID != 84532 {
 		t.Fatalf("unexpected entry %+v", entry)
 	}
 	if entry.Contract != common.BytesToAddress(addr) {
@@ -48,8 +51,8 @@ func TestParseGenesisV1_cborXTaggedByteStrings(t *testing.T) {
 	if entry.ChainID != 84532 {
 		t.Fatalf("chainId: got %d", entry.ChainID)
 	}
-	if entry.R[16] != 0xae || entry.R[31] != 0xba {
-		t.Fatalf("bootstrap wire uuid mismatch: %x", entry.R[16:])
+	if entry.R[0] != 0xae || entry.R[15] != 0xba {
+		t.Fatalf("bootstrap uuid mismatch: %x", entry.R[:])
 	}
 	_, err = parseGenesisDoc(body)
 	if err != nil {

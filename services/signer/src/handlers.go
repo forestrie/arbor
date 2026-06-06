@@ -18,7 +18,7 @@ type DelegateBootstrapRequest struct {
 
 // DelegateParentRequest is the body for POST /delegate/parent (§6.3).
 type DelegateParentRequest struct {
-	ParentLogID string `json:"parent_log_id"` // 0x-prefixed 32-byte hex
+	ParentLogID string `json:"parent_log_id"` // canonical dashed UUID
 	PayloadHash string `json:"payload_hash,omitempty"`
 	Payload     string `json:"payload,omitempty"`
 }

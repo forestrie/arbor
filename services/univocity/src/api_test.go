@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -46,10 +47,11 @@ func TestHandleScopedRoot_InvalidContract(t *testing.T) {
 
 func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 	logger, _ := NewLogger(0)
-	rootID := [32]byte{0: 1}
-	logID := [32]byte{0: 0, 31: 1}
-	rootHex := LogIDToHex(rootID)
-	logHex := LogIDToHex(logID)
+	var rootID logid.UUID
+	rootID[0] = 1
+	logID := testLogID(1)
+	rootUUID := rootID.String()
+	logUUID := logID.String()
 
 	chain := &mockChain{
 		rootLogId:      rootID,
@@ -95,13 +97,13 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 			RootLogId string `json:"rootLogId"`
 		}
 		_ = json.NewDecoder(rec.Body).Decode(&out)
-		if !out.Exists || out.RootLogId != rootHex {
+		if !out.Exists || out.RootLogId != rootUUID {
 			t.Fatalf("unexpected %+v", out)
 		}
 	})
 
 	t.Run("logId root", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+rootHex+"/root", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+rootUUID+"/root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -112,13 +114,13 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 			RootLogId string `json:"rootLogId"`
 		}
 		_ = json.NewDecoder(rec.Body).Decode(&out)
-		if !out.Exists || out.RootLogId != rootHex {
+		if !out.Exists || out.RootLogId != rootUUID {
 			t.Fatalf("unexpected %+v", out)
 		}
 	})
 
 	t.Run("logId public-root CBOR", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logHex+"/public-root", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logUUID+"/public-root", nil)
 		req.Header.Set("Accept", "application/cbor")
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
@@ -135,8 +137,9 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 	})
 
 	t.Run("logId root before on-chain init via genesis identity", func(t *testing.T) {
-		freshRoot := [32]byte{0: 9}
-		freshHex := LogIDToHex(freshRoot)
+		var freshRoot logid.UUID
+		freshRoot[0] = 9
+		freshUUID := freshRoot.String()
 		registry.mu.Lock()
 		registry.forests = append(registry.forests, ForestEntry{
 			R:        freshRoot,
@@ -147,7 +150,7 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 		resolver.OnRegistryScan()
 
 		chain.logInitialized = false
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+freshHex+"/root", nil)
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+freshUUID+"/root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
@@ -158,14 +161,14 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 			RootLogId string `json:"rootLogId"`
 		}
 		_ = json.NewDecoder(rec.Body).Decode(&out)
-		if !out.Exists || out.RootLogId != freshHex {
+		if !out.Exists || out.RootLogId != freshUUID {
 			t.Fatalf("expected genesis short-circuit %+v", out)
 		}
 	})
 
 	t.Run("logId unresolved 503", func(t *testing.T) {
-		unknown := "0x00000000000000000000000000000000000000000000000000000000000000ab"
-		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+unknown+"/root", nil)
+		unknown, _ := logid.ParseUUIDString("00000000-0000-0000-0000-0000000000ab")
+		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+unknown.String()+"/root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusServiceUnavailable {
@@ -176,14 +179,17 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 
 func TestResolver_AmbiguousForest(t *testing.T) {
 	logger, _ := NewLogger(0)
-	logID := [32]byte{31: 1}
+	logID := testLogID(1)
 	chain := &mockChain{logInitialized: true}
 	pool := &mockPool{chain: chain}
 	registry := NewForestRegistry(logger, nil, map[uint64]string{84532: "x"}, time.Minute)
 	registry.mu.Lock()
+	var r1, r2 logid.UUID
+	r1[0] = 1
+	r2[0] = 2
 	registry.forests = []ForestEntry{
-		{R: [32]byte{1}, ChainID: 84532, Contract: common.HexToAddress("0x1")},
-		{R: [32]byte{2}, ChainID: 84532, Contract: common.HexToAddress("0x2")},
+		{R: r1, ChainID: 84532, Contract: common.HexToAddress("0x1")},
+		{R: r2, ChainID: 84532, Contract: common.HexToAddress("0x2")},
 	}
 	registry.lastScan = time.Now()
 	registry.mu.Unlock()
@@ -200,8 +206,8 @@ func TestHandleLogIDPublicRoot_UnavailableWithoutResolver(t *testing.T) {
 	api := API{Logger: logger, Pool: &mockPool{chain: &mockChain{logInitialized: true}}}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
-	logHex := "0x0000000000000000000000000000000000000000000000000000000000000001"
-	req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logHex+"/public-root", nil)
+	logUUID := testLogID(1).String()
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/"+logUUID+"/public-root", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {

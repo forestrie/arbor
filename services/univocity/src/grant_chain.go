@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 const maxGrantChainDepth = 32
@@ -18,8 +19,8 @@ var ErrBootstrapUnavailable = errors.New("on-chain bootstrap anchor unavailable"
 // AuthorityResult is the resolved authority for a logId: the authoritative
 // ES256 root key plus the forest root and chain binding.
 type AuthorityResult struct {
-	LogID     [32]byte
-	RootLogID [32]byte
+	LogID     logid.UUID
+	RootLogID logid.UUID
 	KeyX      [32]byte
 	KeyY      [32]byte
 	ChainID   uint64
@@ -102,7 +103,7 @@ func (a API) ownerKeyXY(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
-	owner [32]byte,
+	owner logid.UUID,
 	depth int,
 ) (x, y [32]byte, err error) {
 	if depth > maxGrantChainDepth {
@@ -161,7 +162,7 @@ func (a API) logRootKeyXY(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
-	logID [32]byte,
+	logID logid.UUID,
 ) (x, y [32]byte, source string, err error) {
 	if logID == forest.R {
 		key, err := a.bootstrapKey(ctx, forest, reader)
@@ -216,7 +217,7 @@ func (a API) logRootKeyXY(
 // returned key.
 func (a API) resolveAuthority(
 	ctx context.Context,
-	logID [32]byte,
+	logID logid.UUID,
 ) (AuthorityResult, error) {
 	forest, reader, err := a.resolveForestForLog(ctx, logID)
 	if err != nil {
@@ -241,7 +242,7 @@ func (a API) resolveAuthority(
 // first, then the genesis-identity + on-chain-probe resolver as a fallback.
 func (a API) resolveForestForLog(
 	ctx context.Context,
-	logID [32]byte,
+	logID logid.UUID,
 ) (ForestEntry, ChainReader, error) {
 	if a.Store != nil {
 		if r, found, err := a.Store.IndexGet(ctx, logID); err == nil && found {
@@ -271,7 +272,7 @@ func (a API) resolveForestForLog(
 }
 
 // loadForest reads and parses a forest genesis document from the owned store.
-func (a API) loadForest(ctx context.Context, r [32]byte) (ForestEntry, error) {
+func (a API) loadForest(ctx context.Context, r logid.UUID) (ForestEntry, error) {
 	if a.Store == nil {
 		return ForestEntry{}, ErrStoreNotConfigured
 	}
@@ -288,4 +289,3 @@ func (a API) loadForest(ctx context.Context, r [32]byte) (ForestEntry, error) {
 	}
 	return doc.Forest, nil
 }
-

@@ -16,8 +16,12 @@ The forest root authority log id; matches genesis `bootstrap-logid` and
 on-chain `rootLogId` after bootstrap.
 _Avoid_: bootstrap log alone (conflicts with bootstrap grant).
 
+**Log ID**:
+16-byte UUID — canonical off-chain identity for a transparency or authority log.
+_Avoid_: wire log id, hex64, padded path segment.
+
 **Forest genesis document**:
-Curator-written CBOR at `forest/{hex64(R)}/genesis.cbor` in the grants bucket.
+Curator-written CBOR at `forests/forest/{uuid-R}/genesis.cbor` in the logs bucket.
 Source of `(chain-id, univocity-addr)` for univocity's forest registry.
 _Avoid_: genesis grant.
 
@@ -57,10 +61,12 @@ locally against the returned key (that local verify is the authorization gate).
 _Avoid_: sending the cert to univocity or expecting a 401 allow/deny verdict.
 
 **Owned grant store**:
-Univocity-owned S3/R2 objects: genesis (`forest/{hex64(R)}/genesis.cbor`), grants
-(`forest/{hex64(R)}/grants/{hex64(subject)}.cbor`), and the global index
-(`index/log/{hex64(subject)} → R`, created with `If-None-Match: *`). Persists only
-until a log's first checkpoint; no long-term backup.
+Univocity-owned S3/R2 objects under `forests/`: genesis
+(`forests/forest/{uuid-R}/genesis.cbor`), auth-log grants
+(`…/grants/auth-log/{uuid}.cbor`), data-log grants
+(`…/grants/data-log/{uuid}.cbor`), and the global index
+(`forests/index/forest/{uuid-subject}` → ASCII UUID of `R`, `If-None-Match: *` on
+create). Persists only until a log's first checkpoint; no long-term backup.
 _Avoid_: "canopy grant storage" (canopy no longer owns it).
 
 **Forest uniqueness (`logId → R`)**:
@@ -84,3 +90,5 @@ unless it chooses to read optional CBOR fields later.
 - [ADR-0001](docs/adr/adr-0001-genesis-driven-logid-resolution.md)
 - [ADR-0002](docs/adr/adr-0002-univocity-owned-grant-store-and-authority-correspondence.md)
 - [ADR-0003](docs/adr/adr-0003-global-logid-r-uniqueness.md)
+- [ADR-0004](docs/adr/adr-0004-forests-storage-and-uuid-log-ids.md)
+- [plan-0009](docs/plan-0009-forests-storage-and-uuid-logid.md)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -63,7 +64,7 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 	}
 	// Root self-index: R -> R. Best effort; conflict means already present.
 	if _, _, err := a.Store.IndexCreate(r.Context(), doc.Forest.R, doc.Forest.R); err != nil {
-		a.Logger.Warn("genesis self-index failed", "R", LogIDToHex(doc.Forest.R), "error", err)
+		a.Logger.Warn("genesis self-index failed", "R", doc.Forest.R.String(), "error", err)
 	}
 	if !created {
 		a.writeProblem(w, r, http.StatusConflict, "about:blank",
@@ -108,7 +109,7 @@ func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 	if err != nil {
 		if a.AllowUnanchoredGenesis {
 			a.Logger.Warn("genesis anchor skipped: reader unavailable",
-				"R", LogIDToHex(doc.Forest.R), "error", err)
+				"R", doc.Forest.R.String(), "error", err)
 			return nil
 		}
 		return err
@@ -117,7 +118,7 @@ func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 	if err != nil {
 		if a.AllowUnanchoredGenesis && errors.Is(err, ErrBootstrapUnavailable) {
 			a.Logger.Warn("genesis anchor skipped: bootstrap unavailable",
-				"R", LogIDToHex(doc.Forest.R), "error", err)
+				"R", doc.Forest.R.String(), "error", err)
 			return nil
 		}
 		return err
@@ -176,7 +177,7 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 	if err := a.verifyGrantChain(r.Context(), forest, reader, ts); err != nil {
 		if errors.Is(err, ErrBootstrapUnavailable) && a.AllowUnanchoredGenesis {
 			a.Logger.Warn("grant chain anchor skipped (unanchored mode)",
-				"subject", LogIDToHex(subject), "error", err)
+				"subject", subject.String(), "error", err)
 		} else {
 			a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
 				"grant chain invalid", err.Error())
@@ -194,7 +195,13 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 			"global logId->R uniqueness violated")
 		return
 	}
-	if err := a.Store.PutGrant(r.Context(), root, subject, req.Statement); err != nil {
+	class, err := grantClassFromFlags(ts.Grant.Flags)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank",
+			"invalid grant class", err.Error())
+		return
+	}
+	if err := a.Store.PutGrant(r.Context(), root, subject, class, req.Statement); err != nil {
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "store grant failed", err.Error())
 		return
 	}
@@ -211,7 +218,7 @@ func (a API) deriveForestRoot(
 	r *http.Request,
 	req postGrantRequest,
 	ts TransparentStatement,
-) ([32]byte, bool) {
+) (logid.UUID, bool) {
 	if len(req.RootLogID) > 0 {
 		root, ok := wireFrom(req.RootLogID)
 		return root, ok
@@ -220,11 +227,11 @@ func (a API) deriveForestRoot(
 		return ts.Grant.LogID, true
 	}
 	if a.Store == nil {
-		return [32]byte{}, false
+		return logid.Zero, false
 	}
 	root, found, err := a.Store.IndexGet(r.Context(), ts.Grant.OwnerLogID)
 	if err != nil || !found {
-		return [32]byte{}, false
+		return logid.Zero, false
 	}
 	return root, true
 }
@@ -252,7 +259,7 @@ func (a API) handleDeleteGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.Store.DeleteIndex(r.Context(), subject); err != nil {
-		a.Logger.Warn("delete index failed", "subject", LogIDToHex(subject), "error", err)
+		a.Logger.Warn("delete index failed", "subject", subject.String(), "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -275,16 +282,15 @@ func (a API) handleDeleteForest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.Store.DeleteIndex(r.Context(), root); err != nil {
-		a.Logger.Warn("delete root index failed", "R", LogIDToHex(root), "error", err)
+		a.Logger.Warn("delete root index failed", "R", root.String(), "error", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func wireFrom(b []byte) ([32]byte, bool) {
-	if len(b) == 0 || len(b) > 32 {
-		return [32]byte{}, false
+func wireFrom(b []byte) (logid.UUID, bool) {
+	id, err := logid.FromBytes(b)
+	if err != nil {
+		return logid.Zero, false
 	}
-	var out [32]byte
-	copy(out[32-len(b):], b)
-	return out, true
+	return id, true
 }

@@ -80,9 +80,9 @@ func TestHandleDelegateBootstrap_NoBootstrapKey_503(t *testing.T) {
 func TestHandleDelegateParent_ResolvesToBootstrap(t *testing.T) {
 	// When parent is root and resolver returns bootstrap key, sign succeeds.
 	sig := []byte("parent_sig_32_bytes!!!!!!!!!!!!!!!!!")
+	rootUUID := "00000000-0000-0000-0000-000000000001"
 	resolver := &ParentResolver{
 		BootstrapKeyID: "projects/p/locations/l/keyRings/r/cryptoKeys/bootstrap",
-		RootLogIDHex:   "0x0000000000000000000000000000000000000000000000000000000000000001",
 	}
 	api := &API{
 		Logger:         mustLogger(t),
@@ -92,13 +92,13 @@ func TestHandleDelegateParent_ResolvesToBootstrap(t *testing.T) {
 	}
 	// Simulate that parent 0x00...01 is the root (so resolver returns bootstrap key).
 	resolver.ParentKeys = map[string]string{
-		"0000000000000000000000000000000000000000000000000000000000000001": "projects/p/locations/l/keyRings/r/cryptoKeys/bootstrap",
+		rootUUID: "projects/p/locations/l/keyRings/r/cryptoKeys/bootstrap",
 	}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
 	body, _ := json.Marshal(DelegateParentRequest{
-		ParentLogID: "0x0000000000000000000000000000000000000000000000000000000000000001",
+		ParentLogID: rootUUID,
 		PayloadHash: hex.EncodeToString(make([]byte, 32)),
 	})
 	req := httptest.NewRequest(http.MethodPost, "/delegate/parent", bytes.NewReader(body))
@@ -132,7 +132,7 @@ func TestHandleDelegateParent_UnknownParent_404(t *testing.T) {
 	api.RegisterRoutes(mux)
 
 	body, _ := json.Marshal(DelegateParentRequest{
-		ParentLogID: "0x0000000000000000000000000000000000000000000000000000000000000099",
+		ParentLogID: "00000000-0000-0000-0000-000000000099",
 		PayloadHash: hex.EncodeToString(make([]byte, 32)),
 	})
 	req := httptest.NewRequest(http.MethodPost, "/delegate/parent", bytes.NewReader(body))

@@ -5,7 +5,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -71,8 +71,12 @@ func TestRequestLogDelegationLease_BYOKHTTPTrustRoot(t *testing.T) {
 		t.Fatal("expected lease certificate")
 	}
 
-	if trustRootCalledFor != logID {
-		t.Fatalf("trust root not fetched for log: got %q want %q", trustRootCalledFor, logID)
+	wantAPISeg, err := logIDAPISegment(logID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trustRootCalledFor != wantAPISeg {
+		t.Fatalf("trust root not fetched for log: got %q want %q", trustRootCalledFor, wantAPISeg)
 	}
 }
 
@@ -160,10 +164,12 @@ func newBYOKTrustRootServer(
 	gotLog *string,
 ) *httptest.Server {
 	t.Helper()
-	logIDBytes, err := hex.DecodeString(logIDHex)
+	logUUID, err := logid.FromHex32(logIDHex)
 	if err != nil {
-		t.Fatalf("decode log id hex: %v", err)
+		t.Fatalf("parse log id hex: %v", err)
 	}
+	wantAPISeg := logUUID.String()
+	logIDBytes := logUUID[:]
 	x := make([]byte, 32)
 	y := make([]byte, 32)
 	pub.X.FillBytes(x)
@@ -189,7 +195,7 @@ func newBYOKTrustRootServer(
 		if gotLog != nil {
 			*gotLog = seenLog
 		}
-		if seenLog != logIDHex {
+		if seenLog != wantAPISeg {
 			http.Error(w, fmt.Sprintf("unknown log %s", seenLog), http.StatusNotFound)
 			return
 		}

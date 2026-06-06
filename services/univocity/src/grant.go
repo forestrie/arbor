@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -41,8 +42,8 @@ var (
 
 // Grant is a decoded Forestrie-Grant v0 (the inner CBOR payload, keys 1-6).
 type Grant struct {
-	LogID      [32]byte
-	OwnerLogID [32]byte
+	LogID      logid.UUID
+	OwnerLogID logid.UUID
 	Flags      []byte
 	MaxHeight  uint64
 	MinGrowth  uint64
@@ -118,11 +119,11 @@ func decodeGrantPayload(b []byte) (Grant, error) {
 	if m == nil {
 		return Grant{}, errors.New("grant payload must be an int-keyed CBOR map")
 	}
-	logID, ok := m.padded32(grantKeyLogID)
+	logID, ok := m.logidFromWire(grantKeyLogID)
 	if !ok {
 		return Grant{}, errors.New("grant logId (key 1) must be <=32-byte bstr")
 	}
-	ownerLogID, ok := m.padded32(grantKeyOwnerLogID)
+	ownerLogID, ok := m.logidFromWire(grantKeyOwnerLogID)
 	if !ok {
 		return Grant{}, errors.New("grant ownerLogId (key 2) must be <=32-byte bstr")
 	}
@@ -241,6 +242,15 @@ func asByteSlice(v interface{}) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// logidFromWire decodes a grant log id from <=32-byte padded wire bstr.
+func (m genesisIntMap) logidFromWire(label int) (logid.UUID, bool) {
+	wire, ok := m.padded32(label)
+	if !ok {
+		return logid.Zero, false
+	}
+	return logid.FromPaddedWire32(wire[:]), true
 }
 
 // padded32 returns a <=32-byte bstr left-padded to a 32-byte wire log id.

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
 var (
@@ -43,7 +45,7 @@ func (f *ForestResolver) OnRegistryScan() {
 }
 
 // Resolve finds the forest for logID.
-func (f *ForestResolver) Resolve(ctx context.Context, logID [32]byte) (ForestEntry, error) {
+func (f *ForestResolver) Resolve(ctx context.Context, logID logid.UUID) (ForestEntry, error) {
 	if e, ok, neg := f.cache.Get(logID); neg {
 		return ForestEntry{}, ErrLogNotResolved
 	} else if ok {
@@ -85,7 +87,7 @@ func (f *ForestResolver) Resolve(ctx context.Context, logID [32]byte) (ForestEnt
 	return ForestEntry{}, ErrLogNotResolved
 }
 
-func matchGenesisIdentity(logID [32]byte, forests []ForestEntry) (ForestEntry, bool) {
+func matchGenesisIdentity(logID logid.UUID, forests []ForestEntry) (ForestEntry, bool) {
 	for _, e := range forests {
 		if e.R == logID {
 			return e, true
@@ -96,7 +98,7 @@ func matchGenesisIdentity(logID [32]byte, forests []ForestEntry) (ForestEntry, b
 
 func (f *ForestResolver) probeForests(
 	ctx context.Context,
-	logID [32]byte,
+	logID logid.UUID,
 	forests []ForestEntry,
 ) (ForestEntry, bool, error) {
 	var matches []ForestEntry
@@ -124,7 +126,7 @@ func (f *ForestResolver) probeForests(
 	default:
 		f.logger.Error(
 			"ambiguous logId across forests",
-			"logId", LogIDToHex(logID),
+			"logId", logID.String(),
 			"matchCount", len(matches),
 		)
 		return ForestEntry{}, false, ErrAmbiguousForest

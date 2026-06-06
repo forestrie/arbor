@@ -54,7 +54,11 @@ func (c *HTTPTrustRootClient) LogSigningKey(
 		return LogSigningKey{}, fmt.Errorf("log id is empty")
 	}
 
-	endpoint := fmt.Sprintf("%s/api/logs/%s/public-root", base, url.PathEscape(logID))
+	apiLogID, err := logIDAPISegment(logID)
+	if err != nil {
+		return LogSigningKey{}, err
+	}
+	endpoint := fmt.Sprintf("%s/api/logs/%s/public-root", base, url.PathEscape(apiLogID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return LogSigningKey{}, fmt.Errorf("build request: %w", err)
