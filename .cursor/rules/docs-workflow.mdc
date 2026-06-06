@@ -1,0 +1,40 @@
+---
+description: Document naming, numbering, ownership, and cross-referencing
+alwaysApply: false
+---
+
+# Document workflow
+
+## Ownership
+
+| Content | Home | This repo keeps |
+|---------|------|-----------------|
+| Cross-repo ADR/ARC | [devdocs](../devdocs/) | stub redirect |
+| Platform ops | devdocs/ops | — |
+| Domain glossary | [devdocs/glossary.md](../devdocs/glossary.md) | docs/agents/domain.md |
+| Arbor service plans | `docs/plan-*.md` | full doc |
+| Arbor-local ADRs | `docs/adr/` | full doc |
+
+## Layout
+
+- `docs/plan-NNNN-*.md` — implementation plans (flat under `docs/`)
+- `docs/adr/adr-NNNN-*.md` — decision records
+- `docs/agents/` — agent indexes
+
+## Numbering
+
+Sequential NNNN per prefix under `docs/**`. Increment from highest.
+
+## Structure
+
+YAML-style header: **Status**, **Date**, **Related**.
+
+## Cross-referencing
+
+Use markdown links. Example:
+
+```markdown
+See [ADR-0001](adr/adr-0001-genesis-driven-logid-resolution.md) for rationale.
+```
+
+Platform docs: `../devdocs/adr/…` or GitHub URLs.
