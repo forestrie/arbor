@@ -159,15 +159,21 @@ curl -sf https://univocity.a.forest-2.forestrie.dev/healthz
 - `curl https://univocity.a.forest-2.forestrie.dev/healthz` → **200** (direct).
 - Deployed worker version has `UNIVOCITY_SERVICE_URL` and **no**
   `UNIVOCITY_RESOLVE_OVERRIDE`.
-- `grants-bootstrap` system e2e genesis POST still returns **503** with detail
-  `univocity genesis returned 502: error code: 502` — Worker subrequest to
-  grey-cloud origin fails at CF edge (not univocity app JSON).
+- Immediately after `resolveOverride` removal, `grants-bootstrap` genesis POST
+  failed with `univocity genesis returned 502: error code: 502`. Traefik
+  Prometheus showed **502** on the `univocity.a` `/api/` router while **univocity
+  app logs stayed quiet** — request reached Traefik but not the Go process.
+- After **univocity pod recycle** and **Traefik deployment rollback** (failed
+  access-log patch), `grants-bootstrap` passed **10/10**; univocity logged
+  `genesis anchor skipped: bootstrap unavailable` (expected dummy binding), not
+  a DNS/TLS failure.
 
 ### Follow-up (not Phase 2)
 
-- **Active:** Worker→grey-cloud subrequests fail for genesis POST after
-  `resolveOverride` removal. Evaluate **Cloudflare Tunnel** or explicit
-  allowlist — do **not** re-add `resolveOverride`.
+- **If 502 regresses:** enable Traefik access logs via
+  `forest-1/clusters/ledger/traefik/helmrelease.yaml`; correlate Traefik 502 vs
+  univocity app logs. Do **not** re-add `resolveOverride`. Tunnel/allowlist only
+  if Traefik→backend failures persist under load.
 - **Chain-binding e2e** (`univocity-genesis-chain-binding.spec.ts`) remains
   blocked on ES256 Univocity deploy vs on-chain KS256/Safe bootstrap at
   `0x611dd70B…` — separate from DNS cleanup.
