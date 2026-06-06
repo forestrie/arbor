@@ -13,6 +13,7 @@ WORKDIR /build
 COPY univocity/src/go.mod univocity/src/go.sum* ./univocity/src/
 
 COPY pkgs/s3storage ./pkgs/s3storage
+COPY pkgs/logid ./pkgs/logid
 
 COPY _deps/go-sigv4 ./_deps/go-sigv4
 COPY _deps/go-merklelog/bloom ./_deps/go-merklelog/bloom
