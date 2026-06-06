@@ -108,19 +108,60 @@ Promote ledger-a to **`main-6be353c-425`** (custodian ensure + forests/UUID).
 - Manual pin in `clusters/ledger-a/services/*/kustomization.yaml` if needed
 - `kubectl rollout status` for custodian, univocity, sealer, ranger, scout
 
-## Phase 2 — Worker → univocity 502
+## Phase 2 — Worker → univocity 502 (resolved 2026-06-06)
 
-**Hypothesis:** 15-byte 502 body is Cloudflare edge (`error code: 502`), not
-univocity application JSON.
+**Original hypothesis:** 15-byte 502 body is Cloudflare edge (`error code: 502`),
+not univocity application JSON.
 
-| Check | Action |
-|-------|--------|
-| External health | `curl https://univocity.a.{DNS_SUB}.{DNS_APEX}/healthz` |
-| In-cluster | `curl http://univocity:9091/healthz` |
-| Worker env | `UNIVOCITY_SERVICE_URL` + token vs `svc_univocity-a` |
-| Ingress | [arbor-flux univocity IngressRoute](https://github.com/forestrie/arbor-flux) → port 9091 |
+### RCA (DNS / resolveOverride band-aid)
 
-Fix: re-sync tokens, correct URL/slot, repair Traefik backend.
+During recovery an agent introduced infrastructure **outside the DNS catalog**:
+
+| Artifact | Problem |
+|----------|---------|
+| `gke-a.forest-2.forestrie.dev` | Manual proxied A → GKE IP; no Traefik cert; TLS handshake fails |
+| GitHub `dev` var `UNIVOCITY_RESOLVE_OVERRIDE=gke-a…` | Fed `cf.resolveOverride` in the worker |
+| Deployed worker `UNIVOCITY_RESOLVE_OVERRIDE=34.39.118.179` | Raw IP; Cloudflare ignores IP overrides |
+| `univocity.a` live DNS as **A** record | Drift; catalog expects grey-cloud **CNAME** like custodian |
+
+**Service TLS was fine** on `univocity.a` / `custodian.a` (grey-cloud, Let's
+Encrypt via Traefik). `resolveOverride` masked invalid `gke-a` DNS; it is not the
+long-term Worker→GKE design.
+
+### Remediation (shipped)
+
+1. **Cloudflare:** deleted `gke-a`; removed stray `univocity.a` A record;
+   restored CNAME → `a.forest-2.forestrie.dev` (grey-cloud).
+2. **arbor-flux:** removed erroneous `cloudflare-proxied: "true"` from ledger-a
+   univocity ExternalDNS Service (matches custodian).
+3. **canopy:** removed `UNIVOCITY_RESOLVE_OVERRIDE` end-to-end (worker env,
+   `apply-runtime-contract`, `univocity-fetch` / `cf.resolveOverride`); plain
+   `fetch` to `UNIVOCITY_SERVICE_URL`.
+4. **GitHub:** deleted `dev` environment variable `UNIVOCITY_RESOLVE_OVERRIDE`.
+
+### DNS catalog (target state)
+
+| Host | Type | Target | Proxied |
+|------|------|--------|---------|
+| `univocity.a.{DNS_SUB}.{DNS_APEX}` | CNAME | `a.{DNS_SUB}.{DNS_APEX}` | false |
+| `custodian.a.{DNS_SUB}.{DNS_APEX}` | CNAME | `a.{DNS_SUB}.{DNS_APEX}` | false |
+| `api-*`, `coordinator` (Workers) | — | — | orange-cloud as designed |
+
+Verify:
+
+```bash
+dig +short univocity.a.forest-2.forestrie.dev
+curl -sf https://univocity.a.forest-2.forestrie.dev/healthz
+```
+
+### Follow-up (not Phase 2)
+
+- If Worker→grey-cloud subrequests regress to CF 502 under load, evaluate
+  **Cloudflare Tunnel** or explicit allowlist — do **not** re-add
+  `resolveOverride`.
+- **Chain-binding e2e** (`univocity-genesis-chain-binding.spec.ts`) remains
+  blocked on ES256 Univocity deploy vs on-chain KS256/Safe bootstrap at
+  `0x611dd70B…` — separate from DNS cleanup.
 
 ## Phase 3 — Receipt pipeline RCA (sealer) — primary focus
 
