@@ -98,7 +98,15 @@ func (a *API) CreateKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg,
 
 	key, err := client.CreateCryptoKey(ctx, req)
 	if err != nil {
-		return "", "", fmt.Errorf("create crypto key: %w", err)
+		if st, ok := status.FromError(err); ok && st.Code() == codes.AlreadyExists {
+			existingName := fmt.Sprintf("%s/cryptoKeys/%s", a.cfg.CustodyKeyRingID, cryptoKeyID)
+			key, err = client.GetCryptoKey(ctx, &kmspb.GetCryptoKeyRequest{Name: existingName})
+			if err != nil {
+				return "", "", fmt.Errorf("get existing crypto key: %w", err)
+			}
+		} else {
+			return "", "", fmt.Errorf("create crypto key: %w", err)
+		}
 	}
 	keyName = key.Name
 
