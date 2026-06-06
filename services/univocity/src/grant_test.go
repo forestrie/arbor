@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -311,6 +312,64 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 	unknown := testLogID(99)
 	if _, err := api.resolveAuthority(context.Background(), unknown); err == nil {
 		t.Fatal("expected unknown log to fail authority resolution")
+	}
+}
+
+// mockChainEmptyResponse simulates eth_call to an undeployed contract address.
+type mockChainEmptyResponse struct{}
+
+func (mockChainEmptyResponse) RootLogId(context.Context) (logid.UUID, error) {
+	return logid.Zero, errors.New("empty contract response")
+}
+
+func (mockChainEmptyResponse) BootstrapConfig(context.Context) (int64, []byte, error) {
+	return 0, nil, errors.New("abi: attempting to unmarshal an empty string while arguments are expected")
+}
+
+func (mockChainEmptyResponse) IsLogInitialized(context.Context, logid.UUID) (bool, error) {
+	return false, errors.New("abi: attempting to unmarshal an empty string while arguments are expected")
+}
+
+func (mockChainEmptyResponse) LogConfig(context.Context, logid.UUID) (LogConfig, error) {
+	return LogConfig{}, errors.New("empty contract response")
+}
+
+func (mockChainEmptyResponse) LogRootKey(context.Context, logid.UUID) ([32]byte, [32]byte, error) {
+	return [32]byte{}, [32]byte{}, errors.New("empty contract response")
+}
+
+func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
+	logger, _ := NewLogger(0)
+	boot := mustKey(t)
+	child := mustKey(t)
+
+	R := testLogID(1)
+	A := testLogID(2)
+	addr := common.HexToAddress("0xabc")
+
+	store := newFakeStore()
+	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
+	store.index[A.String()] = R
+	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
+	store.grants[store.grantStoreKey(R, A, GrantClassAuthLog)] = buildGrantStatement(t, boot, childGrant)
+
+	api := API{
+		Logger:                 logger,
+		Pool:                   &mockPool{chain: mockChainEmptyResponse{}},
+		Store:                  store,
+		Bootstrap:              NewBootstrapCache(),
+		AllowUnanchoredGenesis: true,
+	}
+
+	res, err := api.resolveAuthority(context.Background(), A)
+	if err != nil {
+		t.Fatalf("resolve authority failed: %v", err)
+	}
+	if res.LogID != A || res.RootLogID != R || res.Source != "grant" {
+		t.Fatalf("unexpected result %+v", res)
+	}
+	if cx, cy := pubXY(child); res.KeyX != cx || res.KeyY != cy {
+		t.Fatal("returned key does not match child grantData")
 	}
 }
 

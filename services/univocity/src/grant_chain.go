@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
@@ -28,8 +29,38 @@ type AuthorityResult struct {
 	Source    string // "chain" | "grant"
 }
 
-// bootstrapKey returns the 64-byte on-chain bootstrap key (x||y) for a forest,
-// cached per (chainId, contract).
+// isContractReadUnavailable reports RPC/ABI failures typical when no contract
+// is deployed at the genesis-bound address (empty eth_call return data).
+func isContractReadUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrBootstrapUnavailable) {
+		return true
+	}
+	return strings.Contains(err.Error(), "attempting to unmarshal an empty string")
+}
+
+// bootstrapKeyFromStore loads the genesis key from the owned store when the
+// on-chain anchor is unavailable (unanchored dev/e2e mode).
+func (a API) bootstrapKeyFromStore(ctx context.Context, forest ForestEntry) ([]byte, error) {
+	if a.Store == nil {
+		return nil, ErrStoreNotConfigured
+	}
+	body, err := a.Store.GetGenesis(ctx, forest.R)
+	if err != nil {
+		return nil, err
+	}
+	doc, err := parseGenesisDoc(body)
+	if err != nil {
+		return nil, err
+	}
+	return doc.GenesisKeyBytes(), nil
+}
+
+// bootstrapKey returns the 64-byte bootstrap key (x||y) for a forest, cached per
+// (chainId, contract). Prefer on-chain bootstrapConfig(); when
+// AllowUnanchoredGenesis is set, fall back to the stored genesis document.
 func (a API) bootstrapKey(
 	ctx context.Context,
 	forest ForestEntry,
@@ -42,16 +73,37 @@ func (a API) bootstrapKey(
 		}
 	}
 	_, key, err := reader.BootstrapConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
-	}
-	if len(key) != 64 {
+	if err != nil || len(key) != 64 {
+		if a.AllowUnanchoredGenesis {
+			storeKey, serr := a.bootstrapKeyFromStore(ctx, forest)
+			if serr == nil && len(storeKey) == 64 {
+				if a.Bootstrap != nil {
+					a.Bootstrap.put(cacheKey, storeKey)
+				}
+				return storeKey, nil
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
+		}
 		return nil, fmt.Errorf("bootstrap key must be 64 bytes, got %d", len(key))
 	}
 	if a.Bootstrap != nil {
 		a.Bootstrap.put(cacheKey, key)
 	}
 	return key, nil
+}
+
+func (a API) isLogInitialized(
+	ctx context.Context,
+	reader ChainReader,
+	logID logid.UUID,
+) (bool, error) {
+	ok, err := reader.IsLogInitialized(ctx, logID)
+	if err != nil && a.AllowUnanchoredGenesis && isContractReadUnavailable(err) {
+		return false, nil
+	}
+	return ok, err
 }
 
 // verifyGrantChain verifies a creation grant's envelope is signed by its owner's
@@ -120,7 +172,7 @@ func (a API) ownerKeyXY(
 		}
 		return bx, by, nil
 	}
-	initialized, err := reader.IsLogInitialized(ctx, owner)
+	initialized, err := a.isLogInitialized(ctx, reader, owner)
 	if err != nil {
 		return [32]byte{}, [32]byte{}, fmt.Errorf("isLogInitialized(owner): %w", err)
 	}
@@ -175,7 +227,7 @@ func (a API) logRootKeyXY(
 		}
 		return bx, by, "chain", nil
 	}
-	initialized, err := reader.IsLogInitialized(ctx, logID)
+	initialized, err := a.isLogInitialized(ctx, reader, logID)
 	if err != nil {
 		return [32]byte{}, [32]byte{}, "", fmt.Errorf("isLogInitialized: %w", err)
 	}

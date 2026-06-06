@@ -39,7 +39,7 @@ func (m *mockChain) LogRootKey(_ context.Context, _ logid.UUID) ([32]byte, [32]b
 
 type mockPool struct {
 	mu    sync.Mutex
-	chain *mockChain
+	chain ChainReader
 }
 
 func (p *mockPool) Reader(uint64, common.Address) (ChainReader, error) {
