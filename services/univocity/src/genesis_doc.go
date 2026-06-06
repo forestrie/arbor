@@ -25,7 +25,23 @@ func (g GenesisDoc) GenesisKeyBytes() []byte {
 	return out
 }
 
-// parseGenesisDoc decodes a v1 forest genesis document into its forest binding
+func validateGenesisPostVersion(body []byte) error {
+	var top interface{}
+	if err := cbor.Unmarshal(body, &top); err != nil {
+		return errors.New("decode genesis cbor")
+	}
+	m := decodeCBORIntKeyMap(top)
+	if m == nil {
+		return errors.New("genesis body must be a CBOR map")
+	}
+	v, ok := m.uint(labelGenesisVersion)
+	if !ok || v != genesisSchemaV2 {
+		return errors.New("genesis-version must be 2")
+	}
+	return nil
+}
+
+// parseGenesisDoc decodes a forest genesis document into its forest binding
 // and bootstrap identity. It accepts either v2 opaque (bootstrap-alg,
 // bootstrap-key) labels or the legacy v1 EC2/P-256 COSE_Key map.
 func parseGenesisDoc(body []byte) (GenesisDoc, error) {

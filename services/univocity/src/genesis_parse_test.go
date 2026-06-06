@@ -60,3 +60,43 @@ func TestParseGenesisV1_cborXTaggedByteStrings(t *testing.T) {
 	}
 	_ = common.BytesToAddress(entry.Contract[:])
 }
+
+func TestValidateGenesisPostVersion_rejectsV1(t *testing.T) {
+	var wire [32]byte
+	wire[31] = 0xaa
+	addr := make([]byte, 20)
+	m := map[int]interface{}{
+		labelGenesisVersion: genesisSchemaV1,
+		labelBootstrapLogID: wire[:],
+		labelUnivocityAddr:  addr,
+		labelChainID:        "84532",
+	}
+	body, err := cbor.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGenesisPostVersion(body); err == nil {
+		t.Fatal("expected v1 POST to be rejected")
+	}
+}
+
+func TestValidateGenesisPostVersion_acceptsV2(t *testing.T) {
+	var wire [32]byte
+	addr := make([]byte, 20)
+	key := make([]byte, 64)
+	m := map[int]interface{}{
+		labelGenesisVersion: genesisSchemaV2,
+		labelBootstrapAlg:   coseAlgES256,
+		labelBootstrapKey:   key,
+		labelBootstrapLogID: wire[:],
+		labelUnivocityAddr:  addr,
+		labelChainID:        "84532",
+	}
+	body, err := cbor.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGenesisPostVersion(body); err != nil {
+		t.Fatalf("v2 POST should be accepted: %v", err)
+	}
+}
