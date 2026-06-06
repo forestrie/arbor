@@ -96,8 +96,6 @@ func kmsPublicKeyAlgString(a kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm) (
 	switch a {
 	case kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256:
 		return "ES256", nil
-	case kmspb.CryptoKeyVersion_EC_SIGN_SECP256K1_SHA256:
-		return "KS256", nil
 	default:
 		return "", fmt.Errorf("unsupported KMS algorithm for public key: %v", a)
 	}

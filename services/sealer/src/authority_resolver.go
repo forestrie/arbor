@@ -36,9 +36,8 @@ type AuthorityResolver interface {
 type authorityResponse struct {
 	LogID     []byte `cbor:"logId,omitempty"`
 	RootLogID []byte `cbor:"rootLogId,omitempty"`
-	Alg       string `cbor:"alg,omitempty"`
-	X         []byte `cbor:"x,omitempty"`
-	Y         []byte `cbor:"y,omitempty"`
+	Alg       int64  `cbor:"alg,omitempty"`
+	Key       []byte `cbor:"key,omitempty"`
 	ChainID   string `cbor:"chainId,omitempty"`
 	Contract  string `cbor:"contract,omitempty"`
 	Source    string `cbor:"source,omitempty"`
@@ -52,8 +51,6 @@ type HTTPAuthorityResolver struct {
 }
 
 // ResolveAuthority fetches the authoritative root key + chain binding for a log.
-// A non-200 response is an error so the caller fails closed; the sealer then
-// verifies the delegation certificate locally against the returned key.
 func (c *HTTPAuthorityResolver) ResolveAuthority(
 	ctx context.Context,
 	logIdHex string,
@@ -99,17 +96,18 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 		)
 	}
 
+	signingKey, err := LogSigningKeyFromTrustRootCBOR(body)
+	if err != nil {
+		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
+	}
+
 	var record authorityResponse
 	if err := cbor.Unmarshal(body, &record); err != nil {
 		return AuthorityBinding{}, fmt.Errorf("decode authority response: %w", err)
 	}
-	pemStr, err := EncodeECDSAPublicKeyPEMFromXY(record.Alg, record.X, record.Y)
-	if err != nil {
-		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
-	}
 	rootUUID := logid.FromPaddedWire32(record.RootLogID)
 	return AuthorityBinding{
-		SigningKey:      LogSigningKey{PublicKeyPEM: pemStr, Alg: strings.TrimSpace(record.Alg)},
+		SigningKey:      signingKey,
 		RootLogIDHex:    hex.EncodeToString(rootUUID[:]),
 		ChainID:         strings.TrimSpace(record.ChainID),
 		ContractAddress: strings.TrimSpace(record.Contract),

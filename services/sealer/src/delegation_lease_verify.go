@@ -25,23 +25,45 @@ func VerifyDelegationLease(
 	trustRoot LogSigningKey,
 	issuerResp *IssuerLeaseResponse,
 	req LeaseVerificationInput,
+	erc1271 delegationcert.ERC1271Verifier,
 ) (*delegationcert.CertificateInfo, error) {
 	if issuerResp == nil || len(issuerResp.Certificate) == 0 {
 		return nil, fmt.Errorf("issuer response missing certificate")
 	}
-	if strings.TrimSpace(trustRoot.PublicKeyPEM) == "" {
-		return nil, fmt.Errorf("trust root public key is empty")
-	}
-	if !algMatchesCurve(trustRoot.Alg, req.Curve) {
-		return nil, fmt.Errorf("trust root alg %s does not match curve %s", trustRoot.Alg, req.Curve)
-	}
 
-	trustPub, err := ParseECDSAPublicKeyFromPEM(trustRoot.PublicKeyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("parse trust root public key: %w", err)
-	}
-	if err := delegationcert.VerifyCertificateSignature(issuerResp.Certificate, trustPub, req.Curve); err != nil {
-		return nil, err
+	if trustRoot.IsKS256Root() {
+		if req.Curve != delegationcert.Secp256r1 {
+			return nil, fmt.Errorf("KS256 root may only delegate to an ES256 key")
+		}
+		if len(trustRoot.KS256Signer) != 20 {
+			return nil, fmt.Errorf("KS256 trust root missing 20-byte signer address")
+		}
+		if err := delegationcert.VerifyCertificateSignatureKS256(
+			issuerResp.Certificate,
+			trustRoot.KS256Signer,
+			erc1271,
+		); err != nil {
+			return nil, err
+		}
+	} else {
+		if strings.TrimSpace(trustRoot.PublicKeyPEM) == "" {
+			return nil, fmt.Errorf("trust root public key is empty")
+		}
+		if !algMatchesCurve(trustRoot.Alg, req.Curve) {
+			return nil, fmt.Errorf(
+				"trust root alg %s does not match curve %s",
+				trustRoot.Alg, req.Curve,
+			)
+		}
+		trustPub, err := ParseECDSAPublicKeyFromPEM(trustRoot.PublicKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("parse trust root public key: %w", err)
+		}
+		if err := delegationcert.VerifyCertificateSignature(
+			issuerResp.Certificate, trustPub, req.Curve,
+		); err != nil {
+			return nil, err
+		}
 	}
 
 	info, err := delegationcert.ParseCertificate(issuerResp.Certificate)
@@ -49,7 +71,10 @@ func VerifyDelegationLease(
 		return nil, err
 	}
 	if info.PayloadLogID != req.LogIdHex {
-		return nil, fmt.Errorf("delegation cert log_id mismatch: got %s, expected %s", info.PayloadLogID, req.LogIdHex)
+		return nil, fmt.Errorf(
+			"delegation cert log_id mismatch: got %s, expected %s",
+			info.PayloadLogID, req.LogIdHex,
+		)
 	}
 	if info.PayloadMmrStart != fmt.Sprintf("%d", req.MMRStart) {
 		return nil, fmt.Errorf("delegation cert mmr_start mismatch")

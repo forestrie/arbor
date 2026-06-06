@@ -2,12 +2,9 @@ package univocity
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"math/big"
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
@@ -178,56 +175,6 @@ func decodeCoseSign1(raw []byte) (coseSign1, genesisIntMap, error) {
 		unprotected = genesisIntMap{}
 	}
 	return coseSign1{protected: protected, payload: payload, signature: signature}, unprotected, nil
-}
-
-// verifyCoseSign1ES256 verifies a COSE Sign1 ES256 signature against the
-// provided P-256 public key coordinates.
-func verifyCoseSign1ES256(cose coseSign1, x, y [32]byte) error {
-	if len(cose.signature) != 64 {
-		return fmt.Errorf("%w: COSE signature must be 64 bytes", ErrGrantSignatureInvalid)
-	}
-	pub, err := ecdsaPubFromXY(x, y)
-	if err != nil {
-		return err
-	}
-	sigStructure := []interface{}{
-		"Signature1",
-		cose.protected,
-		[]byte{},
-		cose.payload,
-	}
-	sigBytes, err := cbor.Marshal(sigStructure)
-	if err != nil {
-		return fmt.Errorf("encode sig structure: %w", err)
-	}
-	digest := sha256.Sum256(sigBytes)
-	r := new(big.Int).SetBytes(cose.signature[:32])
-	s := new(big.Int).SetBytes(cose.signature[32:])
-	if !ecdsa.Verify(pub, digest[:], r, s) {
-		return ErrGrantSignatureInvalid
-	}
-	return nil
-}
-
-// ecdsaPubFromXY builds a P-256 public key from 32-byte big-endian coordinates.
-func ecdsaPubFromXY(x, y [32]byte) (*ecdsa.PublicKey, error) {
-	bx := new(big.Int).SetBytes(x[:])
-	by := new(big.Int).SetBytes(y[:])
-	curve := elliptic.P256()
-	if !curve.IsOnCurve(bx, by) {
-		return nil, errors.New("public key point is not on P-256")
-	}
-	return &ecdsa.PublicKey{Curve: curve, X: bx, Y: by}, nil
-}
-
-// grantDataToXY splits a 64-byte ES256 grantData (x||y) into coordinates.
-func grantDataToXY(grantData []byte) (x, y [32]byte, ok bool) {
-	if len(grantData) != 64 {
-		return [32]byte{}, [32]byte{}, false
-	}
-	copy(x[:], grantData[:32])
-	copy(y[:], grantData[32:])
-	return x, y, true
 }
 
 func asByteSlice(v interface{}) ([]byte, bool) {

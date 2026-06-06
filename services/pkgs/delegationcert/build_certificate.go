@@ -13,8 +13,9 @@ const DelegationContentType = "application/forestrie.delegation+cbor"
 
 // COSE algorithm identifiers.
 const (
-	CoseAlgES256  = -7  // ECDSA w/ SHA-256 (P-256)
-	CoseAlgES256K = -47 // ECDSA w/ SHA-256 (secp256k1)
+	CoseAlgES256 = -7 // ECDSA w/ SHA-256 (P-256)
+	// CoseAlgKS256 is secp256k1 + Keccak-256 + Ethereum address / ERC-1271.
+	CoseAlgKS256 = -65799
 )
 
 // COSE protected header labels.
@@ -58,10 +59,10 @@ type DelegationToBeSigned struct {
 
 // coseAlgFromCurve returns the COSE algorithm for a curve.
 func coseAlgFromCurve(curve Curve) int64 {
-	if curve == Secp256r1 {
-		return CoseAlgES256
+	if curve != Secp256r1 {
+		panic("unsupported delegation curve")
 	}
-	return CoseAlgES256K
+	return CoseAlgES256
 }
 
 // BuildDelegationToBeSigned creates the components for a delegation certificate

@@ -13,8 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
 // ErrTrustRootNotFound indicates the primary trust-root service has no root
@@ -96,20 +94,11 @@ func (c *HTTPTrustRootClient) LogSigningKey(
 		return LogSigningKey{}, fmt.Errorf("trust root returned empty body")
 	}
 
-	var record TrustRootResponse
-	if err := cbor.Unmarshal(body, &record); err != nil {
-		return LogSigningKey{}, fmt.Errorf("decode trust root CBOR: %w", err)
-	}
-
-	pemStr, err := EncodeECDSAPublicKeyPEMFromXY(record.Alg, record.X, record.Y)
+	key, err := LogSigningKeyFromTrustRootCBOR(body)
 	if err != nil {
 		return LogSigningKey{}, err
 	}
-
-	return LogSigningKey{
-		PublicKeyPEM: pemStr,
-		Alg:          strings.TrimSpace(record.Alg),
-	}, nil
+	return key, nil
 }
 
 // EncodeECDSAPublicKeyPEMFromXY builds a PEM-encoded SPKI public key from the

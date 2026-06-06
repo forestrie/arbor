@@ -37,6 +37,14 @@ func (m *mockChain) LogRootKey(_ context.Context, _ logid.UUID) ([32]byte, [32]b
 	return m.logRootKeyX, m.logRootKeyY, nil
 }
 
+func (m *mockChain) HasCode(_ context.Context, _ common.Address) (bool, error) {
+	return false, nil
+}
+
+func (m *mockChain) IsValidSignature(_ context.Context, _ common.Address, hash, sig []byte) error {
+	return errERC1271Failed
+}
+
 type mockPool struct {
 	mu    sync.Mutex
 	chain ChainReader

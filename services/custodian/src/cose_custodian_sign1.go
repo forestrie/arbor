@@ -22,8 +22,6 @@ func coseAlgFromKMS(a kmspb.CryptoKeyVersion_CryptoKeyVersionAlgorithm) (cose.Al
 	switch a {
 	case kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256:
 		return cose.AlgorithmES256, nil
-	case kmspb.CryptoKeyVersion_EC_SIGN_SECP256K1_SHA256:
-		return cose.Algorithm(-47), nil
 	default:
 		return 0, fmt.Errorf("unsupported KMS signing algorithm %v", a)
 	}

@@ -73,8 +73,6 @@ func ParseCertificate(certBytes []byte) (*CertificateInfo, error) {
 		if m, ok := normalizeAnyIntKeyedMap(rawKey); ok {
 			if crv, ok := asInt64(m[-1]); ok {
 				switch crv {
-				case 8:
-					delegatedCurve = string(Secp256k1)
 				case 1:
 					delegatedCurve = string(Secp256r1)
 				default:

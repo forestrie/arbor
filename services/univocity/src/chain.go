@@ -3,6 +3,7 @@ package univocity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -59,7 +60,16 @@ func (p *ContractClients) Reader(
 		client:   client,
 		addr:     contractAddr,
 		contract: p.contract,
+		erc1271:  mustParseABI(erc1271ABI),
 	}, nil
+}
+
+func mustParseABI(raw string) abi.ABI {
+	parsed, err := abi.JSON(strings.NewReader(raw))
+	if err != nil {
+		panic(err)
+	}
+	return parsed
 }
 
 func (p *ContractClients) clientForChain(chainID uint64, url string) (*ethclient.Client, error) {
@@ -92,6 +102,13 @@ const univocityViewABI = `[
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"isLogInitialized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logRootKey","outputs":[{"internalType":"bytes32","name":"rootKeyX","type":"bytes32"},{"internalType":"bytes32","name":"rootKeyY","type":"bytes32"}],"stateMutability":"view","type":"function"}
 ]`
+
+const erc1271ABI = `[{"inputs":[{"internalType":"bytes32","name":"hash","type":"bytes32"},{"internalType":"bytes","name":"signature","type":"bytes"}],"name":"isValidSignature","outputs":[{"internalType":"bytes4","name":"","type":"bytes4"}],"stateMutability":"view","type":"function"}]`
+
+var (
+	erc1271Magic     = [4]byte{0x16, 0x26, 0xba, 0x7e}
+	errERC1271Failed = errors.New("ERC-1271 isValidSignature rejected signature")
+)
 
 type LogKind uint8
 
@@ -126,12 +143,14 @@ type ChainReader interface {
 	IsLogInitialized(ctx context.Context, logId logid.UUID) (bool, error)
 	LogConfig(ctx context.Context, logId logid.UUID) (LogConfig, error)
 	LogRootKey(ctx context.Context, logId logid.UUID) (rootKeyX, rootKeyY [32]byte, err error)
+	ERC1271Verifier
 }
 
 type UnivocityContract struct {
-	client   *ethclient.Client
-	addr     common.Address
-	contract abi.ABI
+	client       *ethclient.Client
+	addr         common.Address
+	contract     abi.ABI
+	erc1271      abi.ABI
 }
 
 func (c *UnivocityContract) RootLogId(ctx context.Context) (logid.UUID, error) {
@@ -240,6 +259,48 @@ func (c *UnivocityContract) LogRootKey(ctx context.Context, logId logid.UUID) (r
 	rootKeyX = vals[0].([32]byte)
 	rootKeyY = vals[1].([32]byte)
 	return rootKeyX, rootKeyY, nil
+}
+
+func (c *UnivocityContract) HasCode(ctx context.Context, addr common.Address) (bool, error) {
+	code, err := c.client.CodeAt(ctx, addr, nil)
+	if err != nil {
+		return false, err
+	}
+	return len(code) > 0, nil
+}
+
+func (c *UnivocityContract) IsValidSignature(
+	ctx context.Context,
+	addr common.Address,
+	hash, sig []byte,
+) error {
+	if len(hash) != 32 {
+		return fmt.Errorf("ERC-1271 hash must be 32 bytes, got %d", len(hash))
+	}
+	data, err := c.erc1271.Pack("isValidSignature", toBytes32(hash), sig)
+	if err != nil {
+		return err
+	}
+	msg := ethereum.CallMsg{To: &addr, Data: data}
+	out, err := c.client.CallContract(ctx, msg, nil)
+	if err != nil {
+		return err
+	}
+	vals, err := c.erc1271.Unpack("isValidSignature", out)
+	if err != nil || len(vals) == 0 {
+		return errERC1271Failed
+	}
+	magic, ok := vals[0].([4]byte)
+	if !ok || magic != erc1271Magic {
+		return errERC1271Failed
+	}
+	return nil
+}
+
+func toBytes32(b []byte) [32]byte {
+	var out [32]byte
+	copy(out[:], b)
+	return out
 }
 
 func (c *UnivocityContract) call(ctx context.Context, data []byte) ([]byte, error) {

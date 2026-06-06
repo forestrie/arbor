@@ -1,7 +1,6 @@
 package univocity
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -114,7 +113,7 @@ func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 		}
 		return err
 	}
-	key, err := a.bootstrapKey(r.Context(), doc.Forest, reader)
+	bootAlg, bootKey, err := a.bootstrapConfig(r.Context(), doc.Forest, reader)
 	if err != nil {
 		if a.AllowUnanchoredGenesis && errors.Is(err, ErrBootstrapUnavailable) {
 			a.Logger.Warn("genesis anchor skipped: bootstrap unavailable",
@@ -123,8 +122,8 @@ func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 		}
 		return err
 	}
-	if !bytes.Equal(doc.GenesisKeyBytes(), key) {
-		return errors.New("genesis key does not match on-chain bootstrapConfig()")
+	if !bootstrapKeysEqual(doc.Alg, doc.GenesisKeyBytes(), bootAlg, bootKey) {
+		return errors.New("genesis (alg,key) does not match on-chain bootstrapConfig()")
 	}
 	return nil
 }

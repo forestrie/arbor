@@ -225,6 +225,7 @@ func (*storeMissError) Error() string { return "not found" }
 
 func newChainColdAnchored(boot *ecdsa.PrivateKey) *mockChain {
 	return &mockChain{
+		bootstrapAlg:   coseAlgES256,
 		bootstrapKey:   xyConcat(boot),
 		logInitialized: false,
 	}
@@ -305,7 +306,7 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 	if res.LogID != A || res.RootLogID != R || res.Source != "grant" {
 		t.Fatalf("unexpected result %+v", res)
 	}
-	if cx, cy := pubXY(child); res.KeyX != cx || res.KeyY != cy {
+	if !bytes.Equal(res.Key, xyConcat(child)) {
 		t.Fatal("returned key does not match child grantData")
 	}
 
@@ -338,6 +339,18 @@ func (mockChainEmptyResponse) LogRootKey(context.Context, logid.UUID) ([32]byte,
 	return [32]byte{}, [32]byte{}, errors.New("empty contract response")
 }
 
+func (mockChainEmptyResponse) HasCode(context.Context, common.Address) (bool, error) {
+	return false, nil
+}
+
+func (mockChainEmptyResponse) IsValidSignature(ctx context.Context, addr common.Address, hash, sig []byte) error {
+	_ = ctx
+	_ = addr
+	_ = hash
+	_ = sig
+	return errERC1271Failed
+}
+
 func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)
@@ -368,7 +381,7 @@ func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
 	if res.LogID != A || res.RootLogID != R || res.Source != "grant" {
 		t.Fatalf("unexpected result %+v", res)
 	}
-	if cx, cy := pubXY(child); res.KeyX != cx || res.KeyY != cy {
+	if !bytes.Equal(res.Key, xyConcat(child)) {
 		t.Fatal("returned key does not match child grantData")
 	}
 }
@@ -444,7 +457,7 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	if !bytes.Equal(resp.RootLogID, R[:]) || resp.Source != "grant" {
 		t.Fatalf("unexpected authority resp %+v", resp)
 	}
-	if cx, cy := pubXY(child); !bytes.Equal(resp.X, cx[:]) || !bytes.Equal(resp.Y, cy[:]) {
+	if !bytes.Equal(resp.Key, xyConcat(child)) {
 		t.Fatal("authority key does not match child grantData")
 	}
 

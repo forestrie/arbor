@@ -45,21 +45,15 @@ func delegatedCoseKeyFromMap(m map[int64]any) (*DelegatedCoseKey, Curve, error) 
 		return nil, "", fmt.Errorf("delegated public key: y must be 32 bytes")
 	}
 
-	var curve Curve
-	switch crv {
-	case CoseCurveP256:
-		curve = Secp256r1
-	case CoseCurveSecp256k1:
-		curve = Secp256k1
-	default:
+	if crv != CoseCurveP256 {
 		return nil, "", fmt.Errorf("delegated public key: unsupported crv %d", crv)
 	}
 
-	key, err := NewDelegatedCoseKey(curve, x, y)
+	key, err := NewDelegatedCoseKey(Secp256r1, x, y)
 	if err != nil {
 		return nil, "", err
 	}
-	return key, curve, nil
+	return key, Secp256r1, nil
 }
 
 // CurveFromAlgorithm maps issuer request algorithm strings to Curve.
@@ -67,8 +61,6 @@ func CurveFromAlgorithm(raw string) (Curve, error) {
 	switch normalizeAlg(raw) {
 	case "ES256":
 		return Secp256r1, nil
-	case "KS256", "ES256K":
-		return Secp256k1, nil
 	default:
 		return "", fmt.Errorf("unsupported algorithm %q", raw)
 	}

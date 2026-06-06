@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -195,14 +196,13 @@ func (a API) handleLogIDPublicRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 // authorityResponse is the CBOR authority binding for a logId: the authoritative
-// ES256 root key (x,y) plus the forest root and chain binding. Unlike
+// root identity (alg,key) plus the forest root and chain binding. Unlike
 // public-root it resolves *cold* logs from the chain-valid stored grant chain.
 type authorityResponse struct {
 	LogID     []byte `cbor:"logId,omitempty"`
 	RootLogID []byte `cbor:"rootLogId,omitempty"`
-	Alg       string `cbor:"alg,omitempty"`
-	X         []byte `cbor:"x,omitempty"`
-	Y         []byte `cbor:"y,omitempty"`
+	Alg       int64  `cbor:"alg,omitempty"`
+	Key       []byte `cbor:"key,omitempty"`
 	ChainID   string `cbor:"chainId,omitempty"`
 	Contract  string `cbor:"contract,omitempty"`
 	Source    string `cbor:"source,omitempty"`
@@ -228,9 +228,8 @@ func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 	resp := authorityResponse{
 		LogID:     res.LogID[:],
 		RootLogID: res.RootLogID[:],
-		Alg:       "ES256",
-		X:         res.KeyX[:],
-		Y:         res.KeyY[:],
+		Alg:       res.Alg,
+		Key:       res.Key,
 		ChainID:   strconv.FormatUint(res.ChainID, 10),
 		Contract:  res.Contract.Hex(),
 		Source:    res.Source,
@@ -341,23 +340,17 @@ func (a API) writePublicRoot(
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "contract call failed", err.Error())
 		return
 	}
-	if len(cfg.RootKey) == 20 {
-		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "log not found",
-			"KS256 trust root not supported via univocity")
-		return
-	}
-	rootKeyX, rootKeyY, err := reader.LogRootKey(r.Context(), logId)
-	if err != nil {
-		a.Logger.Error("logRootKey call failed", "error", err)
-		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "contract call failed", err.Error())
+	alg, key, ok := grantDataIdentity(cfg.RootKey)
+	if !ok {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "contract call failed",
+			fmt.Sprintf("invalid on-chain rootKey length %d", len(cfg.RootKey)))
 		return
 	}
 	if includeChainBinding || strings.Contains(r.Header.Get("Accept"), "application/cbor") {
 		record := TrustRootResponse{
 			LogID: logId[:],
-			Alg:   "ES256",
-			X:     rootKeyX[:],
-			Y:     rootKeyY[:],
+			Alg:   alg,
+			Key:   key,
 		}
 		if includeChainBinding && !entry.R.IsZero() {
 			record.ChainID = strconv.FormatUint(entry.ChainID, 10)
@@ -374,18 +367,26 @@ func (a API) writePublicRoot(
 		_, _ = w.Write(body)
 		return
 	}
+	x, y := es256XYFromOpaqueKey(alg, key)
 	resp := struct {
 		LogId      string `json:"logId"`
 		Kind       string `json:"kind"`
 		OwnerLogId string `json:"ownerLogId"`
-		RootKeyX   string `json:"rootKeyX"`
-		RootKeyY   string `json:"rootKeyY"`
+		RootKeyX   string `json:"rootKeyX,omitempty"`
+		RootKeyY   string `json:"rootKeyY,omitempty"`
+		RootKey    string `json:"rootKey,omitempty"`
+		Alg        int64  `json:"alg"`
 	}{
 		LogId:      logId.String(),
 		Kind:       cfg.Kind.String(),
 		OwnerLogId: cfg.AuthLogId.String(),
-		RootKeyX:   bytes32Hex(rootKeyX),
-		RootKeyY:   bytes32Hex(rootKeyY),
+		Alg:        alg,
+	}
+	if alg == coseAlgES256 {
+		resp.RootKeyX = bytes32Hex(x)
+		resp.RootKeyY = bytes32Hex(y)
+	} else {
+		resp.RootKey = "0x" + hex.EncodeToString(key)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -394,4 +395,12 @@ func (a API) writePublicRoot(
 
 func bytes32Hex(b [32]byte) string {
 	return "0x" + hex.EncodeToString(b[:])
+}
+
+func es256XYFromOpaqueKey(alg int64, key []byte) (x, y [32]byte) {
+	if alg != coseAlgES256 {
+		return [32]byte{}, [32]byte{}
+	}
+	x, y, _ = grantDataToXY(key)
+	return x, y
 }

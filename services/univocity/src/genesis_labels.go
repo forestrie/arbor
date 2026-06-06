@@ -7,11 +7,18 @@ const (
 	labelUnivocityAddr     = -68011
 	labelUnivocityChainIDs = -68012 // legacy; rejected on v1
 	labelChainID           = -68013
+	labelBootstrapAlg      = -68014 // bootstrap-alg: int COSE alg (-7 | -65799)
+	labelBootstrapKey      = -68015 // bootstrap-key: bstr opaque 64 (ES256) or 20 (KS256)
 	genesisSchemaV1        = 1
+	genesisSchemaV2        = 2
 )
 
-// COSE_Key map labels carried by the forest genesis document (canopy
-// cose/cose-key.ts). The genesis key is the forest bootstrap/authority key.
+func validGenesisSchemaVersion(v uint64) bool {
+	return v == genesisSchemaV1 || v == genesisSchemaV2
+}
+
+// COSE_Key map labels carried by the v1 forest genesis document (canopy
+// cose/cose-key.ts). Legacy ES256 genesis uses an embedded EC2/P-256 key.
 const (
 	coseKeyKty   = 1
 	coseKeyAlg   = 3
@@ -21,4 +28,5 @@ const (
 	coseKtyEc2   = 2
 	coseCrvP256  = 1
 	coseAlgES256 = -7
+	coseAlgKS256 = -65799
 )

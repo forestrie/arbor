@@ -64,6 +64,14 @@ func main() {
 		HTTPClient: httpClient,
 	}
 	leaseMgr := sealer.NewDelegationLeaseManager(trustRoot, issuer, 0, 0)
+	if cfg.ContractRPCURL != "" {
+		if v, err := sealer.NewRPCERC1271Verifier(cfg.ContractRPCURL); err != nil {
+			slog.Error("invalid UNIVOCITY_CONTRACT_RPC_URL", "error", err)
+			os.Exit(1)
+		} else {
+			leaseMgr.SetERC1271Verifier(v)
+		}
+	}
 	if cfg.UnivocityAuthorityURL != "" {
 		leaseMgr.SetAuthorityResolver(&sealer.HTTPAuthorityResolver{
 			BaseURL:    cfg.UnivocityAuthorityURL,

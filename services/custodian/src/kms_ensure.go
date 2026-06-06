@@ -71,12 +71,10 @@ func (a *API) EnsureKeyForOwner(ctx context.Context, keyOwnerID, selfLogID, alg,
 		},
 	}
 	switch strings.ToUpper(alg) {
-	case "KS256", "ES256K":
-		createReq.CryptoKey.VersionTemplate.Algorithm = kmspb.CryptoKeyVersion_EC_SIGN_SECP256K1_SHA256
 	case "ES256", "":
 		createReq.CryptoKey.VersionTemplate.Algorithm = kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256
 	default:
-		createReq.CryptoKey.VersionTemplate.Algorithm = kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256
+		return "", "", false, fmt.Errorf("unsupported key algorithm %q (only ES256)", alg)
 	}
 
 	key, err = client.CreateCryptoKey(ctx, createReq)

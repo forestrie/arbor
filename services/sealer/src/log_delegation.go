@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -26,7 +25,7 @@ func RequestLogDelegationLease(
 	mmrStart, mmrEnd uint64,
 ) (*DelegationLease, error) {
 	return requestLogDelegationLeaseWithKeyPair(
-		ctx, httpClient, trustRoot, nil, issuer, curveRaw, ttl,
+		ctx, httpClient, trustRoot, nil, issuer, nil, curveRaw, ttl,
 		logIdHex, mmrStart, mmrEnd, nil,
 	)
 }
@@ -45,6 +44,7 @@ func requestLogDelegationLeaseWithKeyPair(
 	trustRoot TrustRootClient,
 	resolver AuthorityResolver,
 	issuer DelegationIssuer,
+	erc1271 delegationcert.ERC1271Verifier,
 	curveRaw string,
 	ttl time.Duration,
 	logIdHex string,
@@ -102,11 +102,8 @@ func requestLogDelegationLeaseWithKeyPair(
 	}
 
 	algorithm := "ES256"
-	if curve == delegationcert.Secp256k1 {
-		algorithm = "KS256"
-	}
 
-	// Resolve the authoritative root key by logId. The univocity authority
+	// Resolve the authoritative root key by logId.
 	// resolver also returns the chain binding and resolves cold logs from the
 	// grant chain; the legacy trust-root client only resolves logs already on
 	// chain. Either way the certificate is verified locally below.
@@ -146,7 +143,7 @@ func requestLogDelegationLeaseWithKeyPair(
 		Curve:               curve,
 		DelegatedPublicKey:  keyPair.Public,
 		RequestedTTLSeconds: uint64(ttl.Seconds()),
-	})
+	}, erc1271)
 	if err != nil {
 		return nil, fmt.Errorf("verify delegation lease: %w", err)
 	}
@@ -175,34 +172,18 @@ func marshalDelegatedPublicKeyCBOR(key *delegationcert.DelegatedCoseKey) ([]byte
 }
 
 func generateEphemeralKey(curve delegationcert.Curve) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
-	switch curve {
-	case delegationcert.Secp256r1:
-		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate P-256 key: %w", err)
-		}
-		return k, &k.PublicKey, nil
-	case delegationcert.Secp256k1:
-		k, err := secp256k1.GeneratePrivateKey()
-		if err != nil {
-			return nil, nil, fmt.Errorf("generate secp256k1 key: %w", err)
-		}
-		priv := k.ToECDSA()
-		return priv, &priv.PublicKey, nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported curve %q", curve)
+	if curve != delegationcert.Secp256r1 {
+		return nil, nil, fmt.Errorf("unsupported curve %q (only secp256r1)", curve)
 	}
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("generate P-256 key: %w", err)
+	}
+	return k, &k.PublicKey, nil
 }
 
-// algMatchesCurve checks if a Custodian algorithm string matches the curve.
+// algMatchesCurve checks if a trust-root algorithm string matches the delegated curve.
 func algMatchesCurve(alg string, curve delegationcert.Curve) bool {
 	a := strings.TrimSpace(strings.ToUpper(alg))
-	switch curve {
-	case delegationcert.Secp256r1:
-		return a == "ES256"
-	case delegationcert.Secp256k1:
-		return a == "KS256" || a == "ES256K"
-	default:
-		return false
-	}
+	return curve == delegationcert.Secp256r1 && a == "ES256"
 }

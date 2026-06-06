@@ -22,6 +22,7 @@ type TrustRootResponse struct {
 	Alg             string `cbor:"alg"`
 	X               []byte `cbor:"x"`
 	Y               []byte `cbor:"y"`
+	Key             []byte `cbor:"key,omitempty"`
 	ChainID         string `cbor:"chainId,omitempty"`
 	ContractAddress string `cbor:"contractAddress,omitempty"`
 	Domain          string `cbor:"domain,omitempty"`

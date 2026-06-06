@@ -3,15 +3,16 @@ package delegationcert
 import "testing"
 
 func TestParseCurve(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
+	cases := []struct {
 		in   string
 		want Curve
 	}{
-		{"", Secp256k1},
-		{"ES256", Secp256r1},
-		{"es256k", Secp256k1},
-	} {
+		{"", Secp256r1},
+		{"secp256r1", Secp256r1},
+		{"es256", Secp256r1},
+		{"P-256", Secp256r1},
+	}
+	for _, tc := range cases {
 		c, err := ParseCurve(tc.in)
 		if err != nil {
 			t.Fatalf("ParseCurve(%q): %v", tc.in, err)
@@ -20,7 +21,10 @@ func TestParseCurve(t *testing.T) {
 			t.Fatalf("ParseCurve(%q) = %q, want %q", tc.in, c, tc.want)
 		}
 	}
+	if _, err := ParseCurve("secp256k1"); err == nil {
+		t.Fatal("expected secp256k1 to be rejected")
+	}
 	if _, err := ParseCurve("nope"); err == nil {
-		t.Fatal("expected error for invalid curve")
+		t.Fatal("expected invalid curve to fail")
 	}
 }

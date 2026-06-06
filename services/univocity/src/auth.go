@@ -51,26 +51,33 @@ func (a API) requireAdminToken(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// bootstrapCache memoizes per-(chainId,contract) on-chain bootstrap keys.
+// bootstrapCache memoizes per-(chainId,contract) on-chain bootstrap (alg,key).
 type bootstrapCache struct {
 	mu   sync.Mutex
-	keys map[string][]byte
+	keys map[string]bootstrapEntry
+}
+
+type bootstrapEntry struct {
+	alg int64
+	key []byte
 }
 
 // NewBootstrapCache constructs an empty per-forest bootstrap key cache.
 func NewBootstrapCache() *bootstrapCache {
-	return &bootstrapCache{keys: make(map[string][]byte)}
+	return &bootstrapCache{keys: make(map[string]bootstrapEntry)}
 }
 
-func (c *bootstrapCache) get(key string) ([]byte, bool) {
+func (c *bootstrapCache) get(key string) (bootstrapEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	v, ok := c.keys[key]
 	return v, ok
 }
 
-func (c *bootstrapCache) put(key string, val []byte) {
+func (c *bootstrapCache) put(key string, alg int64, val []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.keys[key] = val
+	keyCopy := make([]byte, len(val))
+	copy(keyCopy, val)
+	c.keys[key] = bootstrapEntry{alg: alg, key: keyCopy}
 }

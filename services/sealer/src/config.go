@@ -45,12 +45,15 @@ type Config struct {
 	UnivocityAuthorityURL string
 	UnivocityAPIToken     string
 
+	// Delegated checkpoint keys are ES256 (P-256) only.
+	DelegationKeyCurve string
+
 	// Deprecated migration aliases (fall back when seam URLs/tokens unset).
 	CustodianURL      string
 	CustodianAppToken string
 
-	// Delegation key curve for ephemeral keys (secp256k1 or secp256r1)
-	DelegationKeyCurve string
+	// Read-only chain RPC for KS256 ERC-1271 delegation verification (optional).
+	ContractRPCURL string
 
 	// R2 access configuration (S3-compatible endpoint)
 	R2URL   string
@@ -160,6 +163,7 @@ func LoadConfig() Config {
 		UnivocityAuthorityURL: os.Getenv("UNIVOCITY_AUTHORITY_URL"),
 		UnivocityAPIToken:     os.Getenv("UNIVOCITY_API_TOKEN"),
 		DelegationKeyCurve: getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
+		ContractRPCURL:     os.Getenv("UNIVOCITY_CONTRACT_RPC_URL"),
 		R2URL:                               os.Getenv("R2_URL"),
 		R2Token:                             r2Token,
 		AWSAccessKeyID:                      os.Getenv("AWS_ACCESS_KEY_ID"),
@@ -199,6 +203,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
 	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
+	logConfigValue(logger, "UNIVOCITY_CONTRACT_RPC_URL", c.ContractRPCURL)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
 	logSecretDigest(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
@@ -241,8 +246,10 @@ func (c Config) Validate() error {
 	if c.DelegationIssuerToken == "" {
 		return fmt.Errorf("DELEGATION_ISSUER_TOKEN is required (or set CUSTODIAN_APP_TOKEN during migration)")
 	}
-	if _, err := delegationcert.ParseCurve(c.DelegationKeyCurve); err != nil {
+	if curve, err := delegationcert.ParseCurve(c.DelegationKeyCurve); err != nil {
 		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)
+	} else if curve != delegationcert.Secp256r1 {
+		return fmt.Errorf("DELEGATION_KEY_CURVE must be secp256r1 (ES256)")
 	}
 
 	if c.R2URL == "" {

@@ -24,14 +24,7 @@ func logIDHexFromWire(logID []byte) (string, error) {
 
 func algMatchesDelegationCurve(alg string, curve delegationcert.Curve) bool {
 	a := strings.TrimSpace(strings.ToUpper(alg))
-	switch curve {
-	case delegationcert.Secp256r1:
-		return a == "ES256"
-	case delegationcert.Secp256k1:
-		return a == "KS256" || a == "ES256K"
-	default:
-		return false
-	}
+	return curve == delegationcert.Secp256r1 && a == "ES256"
 }
 
 func delegationIDFromRequest(requestID []byte) ([]byte, error) {

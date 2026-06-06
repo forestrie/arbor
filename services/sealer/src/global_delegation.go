@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"github.com/forestrie/arbor/services/pkgs/logredact"
 	"github.com/fxamacker/cbor/v2"
@@ -55,9 +54,6 @@ func (d *DelegationLease) COSESigner() (cose.Signer, []byte, *ecdsa.PublicKey, e
 	switch d.Curve {
 	case delegationcert.Secp256r1:
 		s, err := cose.NewSigner(cose.AlgorithmES256, d.PrivateKey)
-		return s, kid, d.PublicKey, err
-	case delegationcert.Secp256k1:
-		s, err := NewES256KSigner(d.PrivateKey)
 		return s, kid, d.PublicKey, err
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported delegation curve %q", d.Curve)
@@ -102,30 +98,16 @@ func RequestGlobalDelegationLease(
 	expiresAtUnix := uint64(now.Add(ttl).Unix())
 
 	var priv *ecdsa.PrivateKey
-	switch curve {
-	case delegationcert.Secp256r1:
-		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		if err != nil {
-			return nil, fmt.Errorf("generate P-256 key: %w", err)
-		}
-		priv = k
-	case delegationcert.Secp256k1:
-		k, err := secp256k1.GeneratePrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("generate secp256k1 key: %w", err)
-		}
-		priv = k.ToECDSA()
-	default:
-		return nil, fmt.Errorf("unsupported curve %q", curve)
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate P-256 key: %w", err)
 	}
+	priv = k
 
 	pub := &priv.PublicKey
 
 	// delegated_pubkey is a COSE_Key EC2 map with integer labels.
-	crv := int64(8) // secp256k1
-	if curve == delegationcert.Secp256r1 {
-		crv = 1
-	}
+	crv := int64(1) // P-256
 
 	x := make([]byte, 32)
 	y := make([]byte, 32)

@@ -35,11 +35,13 @@ func newAuthorityServer(t *testing.T, pub *ecdsa.PublicKey, notFound bool) *http
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		key := make([]byte, 64)
+		copy(key[:32], x)
+		copy(key[32:], y)
 		body, _ := cbor.Marshal(authorityResponse{
 			RootLogID: make([]byte, 32),
-			Alg:       "ES256",
-			X:         x,
-			Y:         y,
+			Alg:       coseAlgES256,
+			Key:       key,
 			ChainID:   "84532",
 			Contract:  "0x000000000000000000000000000000000000abcd",
 			Source:    "grant",
@@ -69,7 +71,7 @@ func TestRequestLogDelegationLease_UnivocityAuthority(t *testing.T) {
 	}
 
 	lease, err := requestLogDelegationLeaseWithKeyPair(
-		context.Background(), NewHTTPClient(nil), nil, resolver, issuer,
+		context.Background(), NewHTTPClient(nil), nil, resolver, issuer, nil,
 		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
 	)
 	if err != nil {
@@ -98,6 +100,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorityUnresolved(t *testing.T) {
 		context.Background(), NewHTTPClient(nil), nil,
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
+		nil,
 		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
 	)
 	if err == nil {
@@ -125,6 +128,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorityWrongKey(t *testing.T) {
 		context.Background(), NewHTTPClient(nil), nil,
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
+		nil,
 		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
 	)
 	if err == nil {

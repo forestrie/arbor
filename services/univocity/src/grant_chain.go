@@ -1,7 +1,6 @@
 package univocity
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -17,13 +16,13 @@ const maxGrantChainDepth = 32
 // read (chain not configured or contract call failed).
 var ErrBootstrapUnavailable = errors.New("on-chain bootstrap anchor unavailable")
 
-// AuthorityResult is the resolved authority for a logId: the authoritative
-// ES256 root key plus the forest root and chain binding.
+// AuthorityResult is the resolved authority for a logId: the authoritative root
+// identity (alg + opaque key) plus the forest root and chain binding.
 type AuthorityResult struct {
 	LogID     logid.UUID
 	RootLogID logid.UUID
-	KeyX      [32]byte
-	KeyY      [32]byte
+	Alg       int64
+	Key       []byte // opaque 64 (ES256) or 20 (KS256)
 	ChainID   uint64
 	Contract  common.Address
 	Source    string // "chain" | "grant"
@@ -41,57 +40,68 @@ func isContractReadUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "attempting to unmarshal an empty string")
 }
 
-// bootstrapKeyFromStore loads the genesis key from the owned store when the
+// bootstrapConfigFromStore loads genesis (alg,key) from the owned store when the
 // on-chain anchor is unavailable (unanchored dev/e2e mode).
-func (a API) bootstrapKeyFromStore(ctx context.Context, forest ForestEntry) ([]byte, error) {
+func (a API) bootstrapConfigFromStore(ctx context.Context, forest ForestEntry) (int64, []byte, error) {
 	if a.Store == nil {
-		return nil, ErrStoreNotConfigured
+		return 0, nil, ErrStoreNotConfigured
 	}
 	body, err := a.Store.GetGenesis(ctx, forest.R)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	doc, err := parseGenesisDoc(body)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
-	return doc.GenesisKeyBytes(), nil
+	return doc.Alg, doc.GenesisKeyBytes(), nil
 }
 
-// bootstrapKey returns the 64-byte bootstrap key (x||y) for a forest, cached per
-// (chainId, contract). Prefer on-chain bootstrapConfig(); when
-// AllowUnanchoredGenesis is set, fall back to the stored genesis document.
-func (a API) bootstrapKey(
+// bootstrapConfig returns the on-chain bootstrap (alg,key) for a forest, cached
+// per (chainId, contract). Prefer bootstrapConfig(); when AllowUnanchoredGenesis
+// is set, fall back to the stored genesis document.
+func (a API) bootstrapConfig(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
-) ([]byte, error) {
+) (int64, []byte, error) {
 	cacheKey := fmt.Sprintf("%d|%s", forest.ChainID, forest.Contract.Hex())
 	if a.Bootstrap != nil {
-		if k, ok := a.Bootstrap.get(cacheKey); ok {
-			return k, nil
+		if e, ok := a.Bootstrap.get(cacheKey); ok {
+			return e.alg, e.key, nil
 		}
 	}
-	_, key, err := reader.BootstrapConfig(ctx)
-	if err != nil || len(key) != 64 {
+	alg, key, err := reader.BootstrapConfig(ctx)
+	if err != nil || !validBootstrapIdentity(alg, key) {
 		if a.AllowUnanchoredGenesis {
-			storeKey, serr := a.bootstrapKeyFromStore(ctx, forest)
-			if serr == nil && len(storeKey) == 64 {
+			storeAlg, storeKey, serr := a.bootstrapConfigFromStore(ctx, forest)
+			if serr == nil && validBootstrapIdentity(storeAlg, storeKey) {
 				if a.Bootstrap != nil {
-					a.Bootstrap.put(cacheKey, storeKey)
+					a.Bootstrap.put(cacheKey, storeAlg, storeKey)
 				}
-				return storeKey, nil
+				return storeAlg, storeKey, nil
 			}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
+			return 0, nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
 		}
-		return nil, fmt.Errorf("bootstrap key must be 64 bytes, got %d", len(key))
+		return 0, nil, fmt.Errorf("bootstrap key invalid for alg %d (len %d)", alg, len(key))
 	}
 	if a.Bootstrap != nil {
-		a.Bootstrap.put(cacheKey, key)
+		a.Bootstrap.put(cacheKey, alg, key)
 	}
-	return key, nil
+	return alg, key, nil
+}
+
+func validBootstrapIdentity(alg int64, key []byte) bool {
+	switch alg {
+	case coseAlgES256:
+		return len(key) == 64
+	case coseAlgKS256:
+		return len(key) == 20
+	default:
+		return false
+	}
 }
 
 func (a API) isLogInitialized(
@@ -126,140 +136,134 @@ func (a API) verifyGrantChainDepth(
 	depth int,
 ) error {
 	g := ts.Grant
-	ox, oy, err := a.ownerKeyXY(ctx, forest, reader, g.OwnerLogID, depth)
+	ownerAlg, ownerKey, err := a.ownerRootKey(ctx, forest, reader, g.OwnerLogID, depth)
 	if err != nil {
 		return err
 	}
-	if err := verifyCoseSign1ES256(ts.cose, ox, oy); err != nil {
+	if err := verifyGrantEnvelope(ctx, ts.cose, ownerAlg, ownerKey, reader); err != nil {
 		return fmt.Errorf("grant envelope not signed by owner root key: %w", err)
 	}
 	if g.LogID == forest.R {
 		if g.OwnerLogID != forest.R {
 			return errors.New("root grant must be self-owned (owner == R)")
 		}
-		key, err := a.bootstrapKey(ctx, forest, reader)
+		bootAlg, bootKey, err := a.bootstrapConfig(ctx, forest, reader)
 		if err != nil {
 			return err
 		}
-		if !bytes.Equal(g.GrantData, key) {
+		grantAlg, grantKey, ok := grantDataIdentity(g.GrantData)
+		if !ok || !bootstrapKeysEqual(grantAlg, grantKey, bootAlg, bootKey) {
 			return errors.New("root grantData does not match on-chain bootstrap key")
 		}
 	}
 	return nil
 }
 
-// ownerKeyXY resolves an owner/authority log's ES256 root key (x,y), preferring
-// the on-chain logRootKey and falling back to the off-chain grant chain. The
-// recursion anchors at the forest bootstrap key (owner == R).
-func (a API) ownerKeyXY(
+// ownerRootKey resolves an owner/authority log's root identity (alg,key),
+// preferring on-chain logConfig.rootKey and falling back to the off-chain grant
+// chain. The recursion anchors at the forest bootstrap key (owner == R).
+func (a API) ownerRootKey(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
 	owner logid.UUID,
 	depth int,
-) (x, y [32]byte, err error) {
+) (alg int64, key []byte, err error) {
 	if depth > maxGrantChainDepth {
-		return [32]byte{}, [32]byte{}, errors.New("grant chain exceeds max depth")
+		return 0, nil, errors.New("grant chain exceeds max depth")
 	}
 	if owner == forest.R {
-		key, err := a.bootstrapKey(ctx, forest, reader)
-		if err != nil {
-			return [32]byte{}, [32]byte{}, err
-		}
-		bx, by, ok := grantDataToXY(key)
-		if !ok {
-			return [32]byte{}, [32]byte{}, errors.New("bootstrap key is not 64 bytes")
-		}
-		return bx, by, nil
+		return a.bootstrapConfig(ctx, forest, reader)
 	}
 	initialized, err := a.isLogInitialized(ctx, reader, owner)
 	if err != nil {
-		return [32]byte{}, [32]byte{}, fmt.Errorf("isLogInitialized(owner): %w", err)
+		return 0, nil, fmt.Errorf("isLogInitialized(owner): %w", err)
 	}
 	if initialized {
-		kx, ky, err := reader.LogRootKey(ctx, owner)
+		cfg, err := reader.LogConfig(ctx, owner)
 		if err != nil {
-			return [32]byte{}, [32]byte{}, fmt.Errorf("logRootKey(owner): %w", err)
+			return 0, nil, fmt.Errorf("logConfig(owner): %w", err)
 		}
-		return kx, ky, nil
+		alg, key, ok := grantDataIdentity(cfg.RootKey)
+		if !ok {
+			return 0, nil, fmt.Errorf("on-chain rootKey has invalid length %d", len(cfg.RootKey))
+		}
+		return alg, key, nil
 	}
 	if a.Store == nil {
-		return [32]byte{}, [32]byte{}, ErrStoreNotConfigured
+		return 0, nil, ErrStoreNotConfigured
 	}
 	body, err := a.Store.GetGrant(ctx, forest.R, owner)
 	if err != nil {
-		return [32]byte{}, [32]byte{}, fmt.Errorf("owner grant unavailable: %w", err)
+		return 0, nil, fmt.Errorf("owner grant unavailable: %w", err)
 	}
 	ts, err := decodeTransparentStatement(body)
 	if err != nil {
-		return [32]byte{}, [32]byte{}, fmt.Errorf("decode owner grant: %w", err)
+		return 0, nil, fmt.Errorf("decode owner grant: %w", err)
 	}
 	if ts.Grant.LogID != owner {
-		return [32]byte{}, [32]byte{}, errors.New("owner grant subject mismatch")
+		return 0, nil, errors.New("owner grant subject mismatch")
 	}
 	if err := a.verifyGrantChainDepth(ctx, forest, reader, ts, depth+1); err != nil {
-		return [32]byte{}, [32]byte{}, err
+		return 0, nil, err
 	}
-	kx, ky, ok := grantDataToXY(ts.Grant.GrantData)
+	alg, key, ok := grantDataIdentity(ts.Grant.GrantData)
 	if !ok {
-		return [32]byte{}, [32]byte{}, errors.New("owner grantData is not a 64-byte ES256 key")
+		return 0, nil, errors.New("owner grantData is not a valid opaque root key")
 	}
-	return kx, ky, nil
+	return alg, key, nil
 }
 
-// logRootKeyXY resolves the ES256 root key that signs a log's delegation /
-// checkpoint: on-chain logRootKey when initialized, else the (chain-valid)
+// logRootKey resolves the opaque root identity that signs a log's delegation /
+// checkpoint: on-chain logConfig.rootKey when initialized, else the (chain-valid)
 // stored grantData. For the forest root it is the on-chain bootstrap key.
-func (a API) logRootKeyXY(
+func (a API) logRootKey(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
 	logID logid.UUID,
-) (x, y [32]byte, source string, err error) {
+) (alg int64, key []byte, source string, err error) {
 	if logID == forest.R {
-		key, err := a.bootstrapKey(ctx, forest, reader)
-		if err != nil {
-			return [32]byte{}, [32]byte{}, "", err
-		}
-		bx, by, ok := grantDataToXY(key)
-		if !ok {
-			return [32]byte{}, [32]byte{}, "", errors.New("bootstrap key is not 64 bytes")
-		}
-		return bx, by, "chain", nil
+		alg, key, err := a.bootstrapConfig(ctx, forest, reader)
+		return alg, key, "chain", err
 	}
 	initialized, err := a.isLogInitialized(ctx, reader, logID)
 	if err != nil {
-		return [32]byte{}, [32]byte{}, "", fmt.Errorf("isLogInitialized: %w", err)
+		return 0, nil, "", fmt.Errorf("isLogInitialized: %w", err)
 	}
 	if initialized {
-		kx, ky, err := reader.LogRootKey(ctx, logID)
+		cfg, err := reader.LogConfig(ctx, logID)
 		if err != nil {
-			return [32]byte{}, [32]byte{}, "", fmt.Errorf("logRootKey: %w", err)
+			return 0, nil, "", fmt.Errorf("logConfig: %w", err)
 		}
-		return kx, ky, "chain", nil
+		alg, key, ok := grantDataIdentity(cfg.RootKey)
+		if !ok {
+			return 0, nil, "", fmt.Errorf("on-chain rootKey has invalid length %d", len(cfg.RootKey))
+		}
+		return alg, key, "chain", nil
 	}
 	if a.Store == nil {
-		return [32]byte{}, [32]byte{}, "", ErrStoreNotConfigured
+		return 0, nil, "", ErrStoreNotConfigured
 	}
 	body, err := a.Store.GetGrant(ctx, forest.R, logID)
 	if err != nil {
-		return [32]byte{}, [32]byte{}, "", fmt.Errorf("grant unavailable: %w", err)
+		return 0, nil, "", fmt.Errorf("grant unavailable: %w", err)
 	}
 	ts, err := decodeTransparentStatement(body)
 	if err != nil {
-		return [32]byte{}, [32]byte{}, "", fmt.Errorf("decode grant: %w", err)
+		return 0, nil, "", fmt.Errorf("decode grant: %w", err)
 	}
 	if ts.Grant.LogID != logID {
-		return [32]byte{}, [32]byte{}, "", errors.New("grant subject mismatch")
+		return 0, nil, "", errors.New("grant subject mismatch")
 	}
 	if err := a.verifyGrantChain(ctx, forest, reader, ts); err != nil {
-		return [32]byte{}, [32]byte{}, "", err
+		return 0, nil, "", err
 	}
-	kx, ky, ok := grantDataToXY(ts.Grant.GrantData)
+	alg, key, ok := grantDataIdentity(ts.Grant.GrantData)
 	if !ok {
-		return [32]byte{}, [32]byte{}, "", errors.New("grantData is not a 64-byte ES256 key")
+		return 0, nil, "", errors.New("grantData is not a valid opaque root key")
 	}
-	return kx, ky, "grant", nil
+	return alg, key, "grant", nil
 }
 
 // resolveAuthority resolves the authoritative root key + chain binding for a
@@ -275,15 +279,17 @@ func (a API) resolveAuthority(
 	if err != nil {
 		return AuthorityResult{}, err
 	}
-	kx, ky, source, err := a.logRootKeyXY(ctx, forest, reader, logID)
+	alg, key, source, err := a.logRootKey(ctx, forest, reader, logID)
 	if err != nil {
 		return AuthorityResult{}, err
 	}
+	keyCopy := make([]byte, len(key))
+	copy(keyCopy, key)
 	return AuthorityResult{
 		LogID:     logID,
 		RootLogID: forest.R,
-		KeyX:      kx,
-		KeyY:      ky,
+		Alg:       alg,
+		Key:       keyCopy,
 		ChainID:   forest.ChainID,
 		Contract:  forest.Contract,
 		Source:    source,

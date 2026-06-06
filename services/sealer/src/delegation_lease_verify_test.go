@@ -76,7 +76,7 @@ func TestVerifyDelegationLease_acceptsValidCert(t *testing.T) {
 		ExpiresAt:   time.Unix(int64(expiresAt), 0).UTC(),
 	}
 	_, err = VerifyDelegationLease(
-		LogSigningKey{PublicKeyPEM: pemStr, Alg: "ES256"},
+		LogSigningKey{PublicKeyPEM: pemStr, Alg: "ES256", AlgInt: coseAlgES256},
 		issuerResp,
 		LeaseVerificationInput{
 			LogIdHex:           logIdHex,
@@ -85,6 +85,7 @@ func TestVerifyDelegationLease_acceptsValidCert(t *testing.T) {
 			Curve:              delegationcert.Secp256r1,
 			DelegatedPublicKey: &delegPriv.PublicKey,
 		},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("expected valid lease, got %v", err)
@@ -158,7 +159,7 @@ func TestVerifyDelegationLease_rejectsWrongDelegatedKey(t *testing.T) {
 		ExpiresAt:   time.Unix(int64(expiresAt), 0).UTC(),
 	}
 	_, err = VerifyDelegationLease(
-		LogSigningKey{PublicKeyPEM: pemStr, Alg: "ES256"},
+		LogSigningKey{PublicKeyPEM: pemStr, Alg: "ES256", AlgInt: coseAlgES256},
 		issuerResp,
 		LeaseVerificationInput{
 			LogIdHex:           logIdHex,
@@ -167,6 +168,7 @@ func TestVerifyDelegationLease_rejectsWrongDelegatedKey(t *testing.T) {
 			Curve:              delegationcert.Secp256r1,
 			DelegatedPublicKey: &otherPriv.PublicKey,
 		},
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected delegated key mismatch error")

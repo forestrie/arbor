@@ -36,8 +36,8 @@ func parseGenesisV1(bytes []byte) (ForestEntry, error) {
 		return ForestEntry{}, fmt.Errorf("legacy univocity-chainids not supported")
 	}
 	version, ok := m.uint(labelGenesisVersion)
-	if !ok || version != genesisSchemaV1 {
-		return ForestEntry{}, fmt.Errorf("genesis-version must be 1")
+	if !ok || !validGenesisSchemaVersion(version) {
+		return ForestEntry{}, fmt.Errorf("genesis-version must be 1 or 2")
 	}
 	boot, ok := m.bytes32(labelBootstrapLogID)
 	if !ok {

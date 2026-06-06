@@ -7,8 +7,10 @@ import (
 
 // LogSigningKey is the expected log signing (trust-root) public key material.
 type LogSigningKey struct {
-	PublicKeyPEM string
-	Alg          string
+	PublicKeyPEM string // ES256 SPKI PEM (empty for KS256)
+	Alg          string // "ES256" | "KS256"
+	AlgInt       int64  // COSE alg (-7 | -65799)
+	KS256Signer  []byte // 20-byte address when Alg is KS256
 }
 
 // TrustRootClient reads the expected log signing key for delegation verification.

@@ -40,6 +40,7 @@ type DelegationLeaseManager struct {
 	trustRoot   TrustRootClient
 	resolver    AuthorityResolver
 	issuer      DelegationIssuer
+	erc1271     delegationcert.ERC1271Verifier
 	mu          sync.Mutex
 	leases      map[string]*list.Element // logIdHex -> list element
 	pendingKeys map[string]*pendingKeyEntry
@@ -76,6 +77,10 @@ func NewDelegationLeaseManager(
 // the manager resolves a log's root key (and chain binding) by logId from
 // univocity (which can resolve cold logs from the grant chain) rather than the
 // legacy trust-root-by-logId lookup.
+func (m *DelegationLeaseManager) SetERC1271Verifier(v delegationcert.ERC1271Verifier) {
+	m.erc1271 = v
+}
+
 func (m *DelegationLeaseManager) SetAuthorityResolver(a AuthorityResolver) {
 	m.resolver = a
 }
@@ -125,7 +130,7 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 	}
 
 	lease, err := requestLogDelegationLeaseWithKeyPair(
-		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, curve, m.ttl,
+		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
 		logIdHex, mmrStart, mmrEnd, keyPair,
 	)
 	if err != nil {

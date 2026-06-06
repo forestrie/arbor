@@ -131,8 +131,8 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 		if err := cbor.Unmarshal(rec.Body.Bytes(), &record); err != nil {
 			t.Fatalf("cbor: %v", err)
 		}
-		if record.Alg != "ES256" || len(record.X) != 32 || len(record.Y) != 32 {
-			t.Fatalf("unexpected record %+v", record)
+		if record.Alg != coseAlgES256 || len(record.Key) != 64 {
+			t.Fatalf("unexpected record alg=%d keyLen=%d", record.Alg, len(record.Key))
 		}
 	})
 
