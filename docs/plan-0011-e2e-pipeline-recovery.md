@@ -154,11 +154,20 @@ dig +short univocity.a.forest-2.forestrie.dev
 curl -sf https://univocity.a.forest-2.forestrie.dev/healthz
 ```
 
+### Post-cleanup verification (2026-06-06)
+
+- `curl https://univocity.a.forest-2.forestrie.dev/healthz` → **200** (direct).
+- Deployed worker version has `UNIVOCITY_SERVICE_URL` and **no**
+  `UNIVOCITY_RESOLVE_OVERRIDE`.
+- `grants-bootstrap` system e2e genesis POST still returns **503** with detail
+  `univocity genesis returned 502: error code: 502` — Worker subrequest to
+  grey-cloud origin fails at CF edge (not univocity app JSON).
+
 ### Follow-up (not Phase 2)
 
-- If Worker→grey-cloud subrequests regress to CF 502 under load, evaluate
-  **Cloudflare Tunnel** or explicit allowlist — do **not** re-add
-  `resolveOverride`.
+- **Active:** Worker→grey-cloud subrequests fail for genesis POST after
+  `resolveOverride` removal. Evaluate **Cloudflare Tunnel** or explicit
+  allowlist — do **not** re-add `resolveOverride`.
 - **Chain-binding e2e** (`univocity-genesis-chain-binding.spec.ts`) remains
   blocked on ES256 Univocity deploy vs on-chain KS256/Safe bootstrap at
   `0x611dd70B…` — separate from DNS cleanup.
