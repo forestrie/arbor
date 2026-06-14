@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -52,6 +53,29 @@ func protectedES256(t *testing.T) []byte {
 	return b
 }
 
+func protectedKS256(t *testing.T) []byte {
+	t.Helper()
+	b, err := cbor.Marshal(map[int]interface{}{1: coseAlgKS256})
+	if err != nil {
+		t.Fatalf("encode protected: %v", err)
+	}
+	return b
+}
+
+func mustKS256Key(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	k, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("generate secp256k1 key: %v", err)
+	}
+	return k
+}
+
+func ks256AddressFromKey(t *testing.T, priv *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	return crypto.PubkeyToAddress(priv.PublicKey).Bytes()
+}
+
 func signSign1(t *testing.T, priv *ecdsa.PrivateKey, protected, payload []byte) []byte {
 	t.Helper()
 	sig := []interface{}{"Signature1", protected, []byte{}, payload}
@@ -67,6 +91,21 @@ func signSign1(t *testing.T, priv *ecdsa.PrivateKey, protected, payload []byte) 
 	out := make([]byte, 64)
 	r.FillBytes(out[:32])
 	s.FillBytes(out[32:])
+	return out
+}
+
+func signSign1KS256(t *testing.T, priv *ecdsa.PrivateKey, protected, payloadDigest []byte) []byte {
+	t.Helper()
+	sig := []interface{}{"Signature1", protected, []byte{}, payloadDigest}
+	sb, err := cbor.Marshal(sig)
+	if err != nil {
+		t.Fatalf("encode sig structure: %v", err)
+	}
+	hash := crypto.Keccak256(sb)
+	out, err := crypto.Sign(hash, priv)
+	if err != nil {
+		t.Fatalf("sign KS256: %v", err)
+	}
 	return out
 }
 
@@ -89,6 +128,37 @@ func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []b
 	protected := protectedES256(t)
 	digest := sha256.Sum256(embedded)
 	sig := signSign1(t, ownerPriv, protected, digest[:])
+	unprot := map[interface{}]interface{}{
+		headerForestrieGrant: embedded,
+		headerIdtimestamp:    make([]byte, 8),
+	}
+	cose := []interface{}{protected, unprot, digest[:], sig}
+	out, err := cbor.Marshal(cose)
+	if err != nil {
+		t.Fatalf("encode cose: %v", err)
+	}
+	return out
+}
+
+func buildGrantStatementKS256(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []byte {
+	t.Helper()
+	logWire := g.LogID.ToPaddedWire32()
+	ownerWire := g.OwnerLogID.ToPaddedWire32()
+	inner := map[int]interface{}{
+		grantKeyLogID:      logWire[:],
+		grantKeyOwnerLogID: ownerWire[:],
+		grantKeyFlags:      g.Flags,
+		grantKeyMaxHeight:  g.MaxHeight,
+		grantKeyMinGrowth:  g.MinGrowth,
+		grantKeyGrantData:  g.GrantData,
+	}
+	embedded, err := cbor.Marshal(inner)
+	if err != nil {
+		t.Fatalf("encode grant: %v", err)
+	}
+	protected := protectedKS256(t)
+	digest := sha256.Sum256(embedded)
+	sig := signSign1KS256(t, ownerPriv, protected, digest[:])
 	unprot := map[interface{}]interface{}{
 		headerForestrieGrant: embedded,
 		headerIdtimestamp:    make([]byte, 8),
@@ -231,6 +301,14 @@ func newChainColdAnchored(boot *ecdsa.PrivateKey) *mockChain {
 	}
 }
 
+func newChainColdAnchoredKS256(boot *ecdsa.PrivateKey) *mockChain {
+	return &mockChain{
+		bootstrapAlg:   coseAlgKS256,
+		bootstrapKey:   crypto.PubkeyToAddress(boot.PublicKey).Bytes(),
+		logInitialized: false,
+	}
+}
+
 func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)
@@ -278,6 +356,48 @@ func TestVerifyGrantChain_RootAndChild(t *testing.T) {
 	}
 	if err := api.verifyGrantChain(context.Background(), forest, chain, wrongTS); err == nil {
 		t.Fatal("expected root grantData mismatch to be rejected")
+	}
+}
+
+func TestVerifyGrantChain_KS256Root(t *testing.T) {
+	logger, _ := NewLogger(0)
+	boot := mustKS256Key(t)
+	child := mustKey(t)
+
+	R := testLogID(10)
+	A := testLogID(11)
+	bootAddr := ks256AddressFromKey(t, boot)
+
+	chain := newChainColdAnchoredKS256(boot)
+	store := newFakeStore()
+	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
+	forest := ForestEntry{R: R, ChainID: 84532, Contract: common.HexToAddress("0x1")}
+
+	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: bootAddr}
+	rootTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, boot, rootGrant))
+	if err != nil {
+		t.Fatalf("decode KS256 root: %v", err)
+	}
+	if err := api.verifyGrantChain(context.Background(), forest, chain, rootTS); err != nil {
+		t.Fatalf("KS256 root chain invalid: %v", err)
+	}
+
+	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
+	childTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, boot, childGrant))
+	if err != nil {
+		t.Fatalf("decode KS256 child: %v", err)
+	}
+	if err := api.verifyGrantChain(context.Background(), forest, chain, childTS); err != nil {
+		t.Fatalf("KS256 child chain invalid: %v", err)
+	}
+
+	bad := buildGrantStatementKS256(t, child, childGrant)
+	badTS, err := decodeTransparentStatement(bad)
+	if err != nil {
+		t.Fatalf("decode bad KS256 child: %v", err)
+	}
+	if err := api.verifyGrantChain(context.Background(), forest, chain, badTS); err == nil {
+		t.Fatal("expected self-signed KS256 child grant to be rejected")
 	}
 }
 
