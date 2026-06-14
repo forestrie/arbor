@@ -410,7 +410,19 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				mu.Lock()
 				failures++
 				mu.Unlock()
-				q.logger.Warn("log checkpointing failed", "logID", keyFromLogIDBytes(w.logIDBytes), "massifHeight", w.massifHeight, "error", err)
+				errMsg := err.Error()
+				if strings.Contains(errMsg, "custodian returned status=404") {
+					q.logger.Error(
+						"log checkpointing failed: custody key 404 on wallet-managed log — "+
+							"stale sealer image or wrong-slot queue consumer; "+
+							"upgrade sealer or fix per-slot pipeline isolation",
+						"logID", keyFromLogIDBytes(w.logIDBytes),
+						"massifHeight", w.massifHeight,
+						"error", err,
+					)
+				} else {
+					q.logger.Warn("log checkpointing failed", "logID", keyFromLogIDBytes(w.logIDBytes), "massifHeight", w.massifHeight, "error", err)
+				}
 				// Don't ack messages for this log; they will be retried after visibility timeout.
 				return
 			}

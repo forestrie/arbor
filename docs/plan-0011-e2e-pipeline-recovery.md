@@ -180,6 +180,43 @@ curl -sf https://univocity.a.forest-2.forestrie.dev/healthz
 
 ## Phase 3 — Receipt pipeline RCA (sealer) — primary focus
 
+### Bootstrap e2e fix (2026-06): coordinator delegation loop
+
+Receipt 404 on bootstrap specs was traced to **delegation issuance**, not ranger
+or ingress. Ephemeral contract-bootstrap root logs have no Custodian custody
+key; sealer proxies to coordinator and stalls on **pending** until material
+exists. BYOK specs already upload wallet-signed material via Playwright; bootstrap
+receipt specs now mirror that loop (`bootstrap-delegation-coordinator.ts`):
+
+- `POST …/signing-route { mode: wallet }`
+- Poll: `GET pending-delegation` + `POST delegations/material` with provision
+  ES256 PEM / KS256 wallet key
+- Sealer verifies cert against univocity authority and writes `.sth`
+
+See also [grants-bootstrap.md](../../canopy/packages/tests/canopy-api/tests/system/docs/grants-bootstrap.md).
+
+### Follow-up: per-slot pipeline isolation — SHIPPED
+
+Root cause: shared sealer queue + stale slot-b sealer (custody 404, message drop).
+
+**Implemented** in forest-1 [ARC-0002](https://github.com/forestrie/forest-1/blob/main/docs/arc-0002-per-slot-pipeline-isolation.md),
+arbor-flux per-slot `QUEUE_URL`/`R2_URL`, canopy per-slot ingress Workers.
+
+**Immediate unblock** (before Terraform apply on a cluster):
+
+```bash
+cd forest-1 && task ops-slot-b:suspend-consumers
+```
+
+**After rollout** ([plan-0002](https://github.com/forestrie/forest-1/blob/main/docs/plans/plan-0002-per-slot-pipeline-rollout.md)):
+
+```bash
+task ops-slot-b:resume-consumers
+```
+
+Sealer now logs **Error** (not Warn) when custody-key 404 indicates a stale
+wrong-slot consumer.
+
 Decision tree:
 
 1. `.log` missing → ranger / ingress

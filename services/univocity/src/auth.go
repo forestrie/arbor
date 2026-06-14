@@ -62,7 +62,7 @@ type bootstrapEntry struct {
 	key []byte
 }
 
-// NewBootstrapCache constructs an empty per-forest bootstrap key cache.
+// NewBootstrapCache constructs an empty per-(chainId, contract) on-chain bootstrap key cache.
 func NewBootstrapCache() *bootstrapCache {
 	return &bootstrapCache{keys: make(map[string]bootstrapEntry)}
 }
