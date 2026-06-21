@@ -56,24 +56,9 @@ func TestQueryLogIDTreatAsLogID(t *testing.T) {
 }
 
 func TestResolveCustodianKeyFromEntries_NoKeysNotRootReturnsSentinel(t *testing.T) {
-	_, err := resolveCustodianKeyFromEntries("abcd00000000000000000000000000", nil, "fedcba000000000000000000000000", nil)
+	_, err := resolveCustodianKeyFromEntries("abcd00000000000000000000000000", nil, nil)
 	if !errors.Is(err, ErrNoCustodianKeyForLogID) {
 		t.Fatalf("expected ErrNoCustodianKeyForLogID, got %v", err)
-	}
-}
-
-func TestResolveCustodianKeyFromEntries_NoKeysRootMatchReturnsBootstrap(t *testing.T) {
-	kid, err := resolveCustodianKeyFromEntries(
-		"123e4567e89b12d3a456426614174000",
-		nil,
-		"123e4567-e89b-12d3-a456-426614174000",
-		nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if kid != BootstrapKeyAlias {
-		t.Fatalf("got %q", kid)
 	}
 }
 
@@ -81,7 +66,6 @@ func TestResolveCustodianKeyFromEntries_SingleKey(t *testing.T) {
 	kid, err := resolveCustodianKeyFromEntries(
 		"abcd00000000000000000000000000",
 		[]KeyListEntry{{KeyID: "short-kid", Version: 1}},
-		"",
 		nil,
 	)
 	if err != nil {
@@ -96,7 +80,6 @@ func TestResolveCustodianKeyFromEntries_Ambiguous(t *testing.T) {
 	_, err := resolveCustodianKeyFromEntries(
 		"abcd00000000000000000000000000",
 		[]KeyListEntry{{KeyID: "a", Version: 1}, {KeyID: "b", Version: 1}},
-		"",
 		nil,
 	)
 	if !errors.Is(err, ErrAmbiguousCustodianLogID) {

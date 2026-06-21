@@ -16,7 +16,7 @@ type kmsCOSESigner struct {
 	ctx       context.Context
 	sign      func(context.Context, []byte) ([]byte, error)
 	log       *slog.Logger // optional; Sign logs Sig_structure digest for cross-check with Canopy
-	signKeyID string       // HTTP key id (e.g. ":bootstrap") when log != nil
+	signKeyID string       // HTTP key id (custody short id) for COSE kid metadata
 }
 
 func (s *kmsCOSESigner) Algorithm() cose.Algorithm { return s.alg }
