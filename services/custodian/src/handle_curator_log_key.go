@@ -7,7 +7,7 @@ import (
 )
 
 // handleCuratorLogKey implements GET /api/keys/curator/log-key?logId=...
-// Normal app token required. Response: CBOR { keyId } (custody id or :bootstrap).
+// Normal app token required. Response: CBOR { keyId } (custody short id).
 func (a *API) handleCuratorLogKey(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		a.writeProblem(w, r, http.StatusMethodNotAllowed, "about:blank", "method not allowed", "")

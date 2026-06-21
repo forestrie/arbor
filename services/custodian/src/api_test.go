@@ -62,29 +62,6 @@ func TestRegisterRoutes_PublicKey_CacheHitSkipsKMS(t *testing.T) {
 	}
 }
 
-func TestRegisterRoutes_BootstrapPublic_503WhenBootstrapKeyIDEmpty(t *testing.T) {
-	cfg := LoadConfig()
-	cfg.BootstrapKMSCryptoKeyID = ""
-	logger, _ := NewLogger(0)
-	api := NewAPI(logger, cfg)
-	mux := http.NewServeMux()
-	api.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/keys/"+BootstrapKeyAlias+"/public", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 when BOOTSTRAP_KMS_CRYPTO_KEY_ID unset, got %d", rec.Code)
-	}
-	var pd ProblemDetail
-	if err := custodianCBORdm.Unmarshal(rec.Body.Bytes(), &pd); err != nil {
-		t.Fatalf("problem body: %v", err)
-	}
-	if pd.Detail != "BOOTSTRAP_KMS_CRYPTO_KEY_ID not set" {
-		t.Errorf("detail: got %q", pd.Detail)
-	}
-}
-
 func TestRegisterRoutes_EnsureKey_Unauthorized(t *testing.T) {
 	cfg := LoadConfig()
 	cfg.AppToken = "secret"
@@ -288,33 +265,6 @@ func TestRegisterRoutes_SignKey_RequiresNormalApp(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 without token, got %d", rec.Code)
-	}
-}
-
-func TestRegisterRoutes_SignBootstrap_RequiresBootstrapApp(t *testing.T) {
-	cfg := LoadConfig()
-	cfg.BootstrapAppToken = "boot"
-	cfg.AppToken = "normal"
-	logger, _ := NewLogger(0)
-	api := NewAPI(logger, cfg)
-	mux := http.NewServeMux()
-	api.RegisterRoutes(mux)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/keys/"+BootstrapKeyAlias+"/sign", nil)
-	req.Header.Set("Content-Type", cborContentType)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 without token, got %d", rec.Code)
-	}
-
-	req2 := httptest.NewRequest(http.MethodPost, "/api/keys/"+BootstrapKeyAlias+"/sign", nil)
-	req2.Header.Set("Authorization", "Bearer normal")
-	req2.Header.Set("Content-Type", cborContentType)
-	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 with normal token for bootstrap sign, got %d", rec2.Code)
 	}
 }
 

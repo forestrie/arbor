@@ -273,5 +273,6 @@ Success: all receipt-polling system specs pass, including
 ## Out of scope
 
 - Solidity changes
-- Per-run R2/MMR log cleanup automation
+- Per-run R2/MMR log cleanup automation — see forest-1
+  [`docs/ops/content-reset.md`](../../forest-1/docs/ops/content-reset.md) (`task content-reset`)
 - Sealer R-disagreement hardening

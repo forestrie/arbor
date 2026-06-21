@@ -18,7 +18,7 @@ type Config struct {
 
 	// Application tokens (Bearer); log only digests.
 	AppToken          string // Normal: key ensure, list keys, public key, custody key signing
-	BootstrapAppToken string // Bootstrap: key destruction, POST .../:bootstrap/sign
+	BootstrapAppToken string // Privileged: key destruction (POST .../delete)
 
 	// GCP: custody signer SA (IAM grants per key) and custody key ring for key creation.
 	CustodySignerSAEmail string
@@ -27,13 +27,9 @@ type Config struct {
 	// custody key so SignAsymmetric and GetPublicKey succeed for that identity.
 	CustodianRuntimeSAEmail string
 	CustodyKeyRingID        string // Full key ring ID (projects/.../locations/.../keyRings/...)
-	// BootstrapKMSCryptoKeyID is the full KMS CryptoKey resource for alias :bootstrap (not custody ring).
-	BootstrapKMSCryptoKeyID string
 	GCPProjectID            string // Project ID (for KMS API)
 	GCPLocation             string // Location (e.g. europe-west2)
 
-	// RootLogID (lowercase hex) for KMS list miss → :bootstrap when bootstrap is not in custody ring.
-	RootLogID string
 	// LogIDCacheSize caps in-memory log id → key id LRU.
 	// Default 1024 when LOG_ID_CACHE_SIZE is unset; set env to "0" to disable.
 	LogIDCacheSize int
@@ -114,10 +110,8 @@ func LoadConfig() Config {
 		CustodySignerSAEmail:    os.Getenv("CUSTODY_SIGNER_SA_EMAIL"),
 		CustodianRuntimeSAEmail: strings.TrimSpace(os.Getenv("CUSTODIAN_RUNTIME_SA_EMAIL")),
 		CustodyKeyRingID:        os.Getenv("CUSTODY_KEY_RING_ID"),
-		BootstrapKMSCryptoKeyID: os.Getenv("BOOTSTRAP_KMS_CRYPTO_KEY_ID"),
 		GCPProjectID:            os.Getenv("GCP_PROJECT_ID"),
 		GCPLocation:             getEnvOrDefault("GCP_LOCATION", "europe-west2"),
-		RootLogID:               strings.TrimSpace(os.Getenv("ROOT_LOG_ID")),
 		LogIDCacheSize:          logCache,
 		DelegationCoordinatorURL: strings.TrimRight(
 			strings.TrimSpace(os.Getenv("DELEGATION_COORDINATOR_URL")),
@@ -137,10 +131,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "CUSTODY_SIGNER_SA_EMAIL", "value", c.CustodySignerSAEmail)
 	logger.Warn("config value", "name", "CUSTODIAN_RUNTIME_SA_EMAIL", "value", c.CustodianRuntimeSAEmail)
 	logger.Warn("config value", "name", "CUSTODY_KEY_RING_ID", "value", c.CustodyKeyRingID)
-	logger.Warn("config value", "name", "BOOTSTRAP_KMS_CRYPTO_KEY_ID", "value", c.BootstrapKMSCryptoKeyID)
 	logger.Warn("config value", "name", "GCP_PROJECT_ID", "value", c.GCPProjectID)
 	logger.Warn("config value", "name", "GCP_LOCATION", "value", c.GCPLocation)
-	logger.Warn("config value", "name", "ROOT_LOG_ID", "value", c.RootLogID)
 	logger.Warn("config value", "name", "LOG_ID_CACHE_SIZE", "value", c.LogIDCacheSize)
 	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_URL", "value", c.DelegationCoordinatorURL)
 	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_TOKEN", "value", secretDigest(c.DelegationCoordinatorToken))
