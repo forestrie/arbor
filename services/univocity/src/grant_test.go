@@ -401,6 +401,71 @@ func TestVerifyGrantChain_KS256Root(t *testing.T) {
 	}
 }
 
+func buildGenesisDocKS256(
+	t *testing.T,
+	r logid.UUID,
+	boot *ecdsa.PrivateKey,
+	chainID uint64,
+	addr common.Address,
+) []byte {
+	t.Helper()
+	bootAddr := ks256AddressFromKey(t, boot)
+	m := map[int]interface{}{
+		labelGenesisVersion: genesisSchemaV2,
+		labelBootstrapAlg:   coseAlgKS256,
+		labelBootstrapKey:   bootAddr,
+		labelBootstrapLogID: func() []byte { w := r.ToPaddedWire32(); return w[:] }(),
+		labelUnivocityAddr:  addr.Bytes(),
+		labelChainID:        strconv.FormatUint(chainID, 10),
+	}
+	b, err := cbor.Marshal(m)
+	if err != nil {
+		t.Fatalf("encode KS256 genesis: %v", err)
+	}
+	return b
+}
+
+func TestVerifyGrantChain_KS256ByokGenesisAuthoritative(t *testing.T) {
+	logger, _ := NewLogger(0)
+	deployer := mustKS256Key(t)
+	user := mustKS256Key(t)
+
+	R := testLogID(12)
+	addr := common.HexToAddress("0xabc")
+	userAddr := ks256AddressFromKey(t, user)
+
+	chain := newChainColdAnchoredKS256(deployer)
+	store := newFakeStore()
+	store.genesis[R.String()] = buildGenesisDocKS256(t, R, user, 84532, addr)
+
+	api := API{
+		Logger:    logger,
+		Pool:      &mockPool{chain: chain},
+		Store:     store,
+		Bootstrap: NewBootstrapCache(),
+	}
+	forest := ForestEntry{R: R, ChainID: 84532, Contract: addr}
+
+	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: userAddr}
+	rootTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, user, rootGrant))
+	if err != nil {
+		t.Fatalf("decode BYOK KS256 root: %v", err)
+	}
+	if err := api.verifyGrantChain(context.Background(), forest, chain, rootTS); err != nil {
+		t.Fatalf("BYOK KS256 root chain invalid: %v", err)
+	}
+
+	deployerAddr := ks256AddressFromKey(t, deployer)
+	wrongRoot := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: deployerAddr}
+	wrongTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, deployer, wrongRoot))
+	if err != nil {
+		t.Fatalf("decode deployer root: %v", err)
+	}
+	if err := api.verifyGrantChain(context.Background(), forest, chain, wrongTS); err == nil {
+		t.Fatal("expected deployer-signed root grant to be rejected for BYOK genesis")
+	}
+}
+
 func TestResolveAuthority_ColdChild(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)

@@ -90,6 +90,16 @@ func (a API) bootstrapConfig(
 	if a.Bootstrap != nil {
 		a.Bootstrap.put(cacheKey, alg, key)
 	}
+	// When stored genesis declares a different root than the contract deployer
+	// key, prefer genesis (Mode C BYOK — ADR-0006 / ARC-0022).
+	if storeAlg, storeKey, serr := a.bootstrapConfigFromStore(ctx, forest); serr == nil &&
+		validBootstrapIdentity(storeAlg, storeKey) &&
+		!bootstrapKeysEqual(storeAlg, storeKey, alg, key) {
+		if a.Bootstrap != nil {
+			a.Bootstrap.put(cacheKey, storeAlg, storeKey)
+		}
+		return storeAlg, storeKey, nil
+	}
 	return alg, key, nil
 }
 

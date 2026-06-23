@@ -127,14 +127,9 @@ func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 		return err
 	}
 	if !bootstrapKeysEqual(doc.Alg, doc.GenesisKeyBytes(), bootAlg, bootKey) {
-		if a.AllowUnanchoredGenesis {
-			a.Logger.Warn("genesis anchor skipped: bootstrap key mismatch (unanchored mode)",
-				"R", doc.Forest.R.String(),
-				"genesisAlg", doc.Alg,
-				"onChainAlg", bootAlg)
-			return nil
-		}
-		return errors.New("genesis (alg,key) does not match on-chain bootstrapConfig()")
+		// Genesis-declared root may differ from contract bootstrapConfig()
+		// (Mode C BYOK). Grant verification uses stored genesis identity.
+		return nil
 	}
 	return nil
 }
