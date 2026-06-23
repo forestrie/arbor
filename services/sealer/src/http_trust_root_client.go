@@ -23,6 +23,10 @@ var ErrTrustRootNotFound = errors.New("trust root not found")
 // service. The wire format is the plan-0003 CBOR shape returned by
 // GET {BaseURL}/api/logs/{logIdHex}/public-root.
 //
+// Authorization is optional: the coordinator exposes this as a public read.
+// When Token is set, it is sent for transitional deployments; unauthenticated
+// GET succeeds on FOR-129+ coordinators.
+//
 // The client treats the upstream as an untrusted read proxy of contract
 // state: it never talks to contracts directly. Production wiring will point
 // BaseURL at services/univocity once that service exposes a non-mock
