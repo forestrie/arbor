@@ -466,6 +466,57 @@ func TestVerifyGrantChain_KS256ByokGenesisAuthoritative(t *testing.T) {
 	}
 }
 
+func TestBootstrapConfig_CachePerForestNotSharedContract(t *testing.T) {
+	logger, _ := NewLogger(0)
+	deployer := mustKS256Key(t)
+	user := mustKS256Key(t)
+
+	R1 := testLogID(12)
+	R2 := testLogID(13)
+	addr := common.HexToAddress("0xabc")
+	userAddr := ks256AddressFromKey(t, user)
+
+	chain := newChainColdAnchoredKS256(deployer)
+	store := newFakeStore()
+	store.genesis[R1.String()] = buildGenesisDocKS256(t, R1, deployer, 84532, addr)
+	store.genesis[R2.String()] = buildGenesisDocKS256(t, R2, user, 84532, addr)
+
+	api := API{
+		Logger:    logger,
+		Pool:      &mockPool{chain: chain},
+		Store:     store,
+		Bootstrap: NewBootstrapCache(),
+	}
+	forestContract := ForestEntry{R: R1, ChainID: 84532, Contract: addr}
+
+	alg1, key1, err := api.bootstrapConfig(context.Background(), forestContract, chain)
+	if err != nil {
+		t.Fatalf("bootstrap R1: %v", err)
+	}
+	deployerAddr := ks256AddressFromKey(t, deployer)
+	if alg1 != coseAlgKS256 || !bytes.Equal(key1, deployerAddr) {
+		t.Fatalf("R1 bootstrap: got alg=%d key=%x want deployer %x", alg1, key1, deployerAddr)
+	}
+
+	forestByok := ForestEntry{R: R2, ChainID: 84532, Contract: addr}
+	alg2, key2, err := api.bootstrapConfig(context.Background(), forestByok, chain)
+	if err != nil {
+		t.Fatalf("bootstrap R2: %v", err)
+	}
+	if alg2 != coseAlgKS256 || !bytes.Equal(key2, userAddr) {
+		t.Fatalf("R2 bootstrap: got alg=%d key=%x want BYOK user %x", alg2, key2, userAddr)
+	}
+
+	rootGrant := Grant{LogID: R2, OwnerLogID: R2, Flags: authLogFlags(), GrantData: userAddr}
+	rootTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, user, rootGrant))
+	if err != nil {
+		t.Fatalf("decode BYOK root: %v", err)
+	}
+	if err := api.verifyGrantChain(context.Background(), forestByok, chain, rootTS); err != nil {
+		t.Fatalf("BYOK root grant after contract-anchored cache warm: %v", err)
+	}
+}
+
 func TestResolveAuthority_ColdChild(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)

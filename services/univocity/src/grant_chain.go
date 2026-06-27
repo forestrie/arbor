@@ -58,14 +58,16 @@ func (a API) bootstrapConfigFromStore(ctx context.Context, forest ForestEntry) (
 }
 
 // bootstrapConfig returns the on-chain bootstrap (alg,key) for a forest, cached
-// per (chainId, contract). Prefer bootstrapConfig(); when AllowUnanchoredGenesis
-// is set, fall back to the stored genesis document.
+// per (chainId, contract, R). Prefer on-chain bootstrapConfig(); when stored
+// genesis declares a different root than the contract deployer key, prefer
+// genesis (Mode C BYOK — ADR-0006). When AllowUnanchoredGenesis is set, fall
+// back to the stored genesis document if the anchor is unavailable.
 func (a API) bootstrapConfig(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
 ) (int64, []byte, error) {
-	cacheKey := fmt.Sprintf("%d|%s", forest.ChainID, forest.Contract.Hex())
+	cacheKey := fmt.Sprintf("%d|%s|%s", forest.ChainID, forest.Contract.Hex(), forest.R.String())
 	if a.Bootstrap != nil {
 		if e, ok := a.Bootstrap.get(cacheKey); ok {
 			return e.alg, e.key, nil
