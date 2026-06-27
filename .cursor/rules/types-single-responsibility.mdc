@@ -1,0 +1,32 @@
+---
+description: One primary Go type per file; avoid monolithic types.go
+alwaysApply: true
+---
+
+# Types and single responsibility (Go)
+
+Do **not** use monolithic `types.go` files that accumulate unrelated structs.
+
+## Rule
+
+- Put each **primary exported type** (struct, interface, or type alias) in its
+  own file when the type carries a distinct domain or wire contract.
+- Include **closely related** helpers in the same file (e.g. `PullRequest` and
+  `EncodePullRequest`, or a small interface and its sole implementation when
+  they are inseparable).
+- A package may keep a thin **`interfaces.go`** for a small set of shared
+  interfaces — not a dumping ground for every struct in the service.
+- Avoid **`types.go`** as a catch-all; prefer names that match the type
+  (`pullrequest.go`, `trust_root_client.go`).
+
+## File naming
+
+- Name the file after the primary type in **snake_case** (Go convention).
+- Multi-word domain names use underscores (`genesis_doc.go`, `grant_chain.go`).
+
+## Imports
+
+- Prefer importing concrete packages; keep type definitions near the code that
+  owns the contract (HTTP handler, queue consumer, KMS signer).
+- When splitting an overloaded file, move one type at a time and update tests
+  in the same change.

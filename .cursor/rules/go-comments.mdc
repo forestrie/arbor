@@ -1,0 +1,103 @@
+---
+description: Go comment policy — purpose, cross-repo signposts, and coverage
+globs: **/*.go
+alwaysApply: false
+---
+
+# Go comments
+
+Forestrie is a **highly distributed system**. The "why" of local code often
+depends on adjacent apps or repositories. Comments must make that context
+reachable without duplicating platform docs.
+
+## Principles
+
+1. **Signpost, don't silo.** At package and function level, state how the local
+   code fits the wider picture: assumptions about other components, contracts
+   honoured, and where to read more.
+2. **Brief with a pointer.** One or two sentences plus a reference is enough
+   in most cases. Only the most delicate interactions warrant longer prose.
+3. **Explain purpose, not syntax.** Comments describe the **problem** or
+   **role** of the following code. Restating what the code literally does is
+   pointless.
+4. **Non-obvious details only at line level.** Imperative logic a typical
+   engineer would read straight through needs no comment. Line comments are for
+   surprising mechanics, platform limits, ordering constraints, or wire-format
+   quirks.
+5. **Full coverage of exported surfaces.** Every **exported** function,
+   method, type, constant, and variable must have a godoc comment describing its
+   role. Document parameters and return semantics when not obvious from names
+   and types.
+
+## Package comments
+
+Use `doc.go` (or the first file in the package) for a **package comment** that
+states the service role, primary upstream/downstream dependencies, and links to
+platform docs when the package sits on a cross-repo boundary (e.g. ranger queue
+consumer ↔ canopy forestrie-ingress).
+
+## Cross-repo and cross-service signposts
+
+Prefer stable **GitHub blob links** with heading anchors:
+
+```go
+// ResolveLogSigningKey fetches the target log's active signer from Univocity
+// public-root (GET /api/logs/{logId}/public-root). Grant verification model:
+// https://github.com/forestrie/devdocs/blob/main/arc/arc-0019-grant-verification-model.md
+```
+
+| Target | Link form |
+|--------|-----------|
+| Same repo doc | `https://github.com/forestrie/arbor/blob/main/docs/…` |
+| Platform ADR/ARC | `https://github.com/forestrie/devdocs/blob/main/arc/…` or `adr/…` |
+| Sibling service | `https://github.com/forestrie/canopy/blob/main/packages/…` |
+| On-chain behaviour | `https://github.com/forestrie/univocity/blob/main/docs/arc/…` |
+| Ops runbooks | `https://github.com/forestrie/devdocs/blob/main/ops/…` |
+
+Name the **remote component**, the **contract** (HTTP route, queue message,
+COSE field, env var), and what this code **assumes** vs **guarantees**.
+
+## What to write at each level
+
+| Level | Comment answers |
+|-------|-----------------|
+| **Package** | Role in the distributed flow; primary dependencies and emitted side effects. |
+| **Type** | Domain object or boundary; invariants callers must respect. |
+| **Function / method** | Operation in the flow; preconditions, side effects, error semantics. |
+| **Block** | Why this branch exists when the function comment is not enough. |
+| **Line** | Non-obvious mechanics only. |
+
+Good — wire-format constraint:
+
+```go
+// PullRequest is sent to POST /queue/pull on forestrie-ingress SequencingQueue.
+// Fields are CBOR-tagged for SCRAPI worker compatibility.
+type PullRequest struct {
+```
+
+Bad — restates syntax:
+
+```go
+// increment i and append to slice
+for i := range items {
+```
+
+## Config and options structs
+
+Document **config fields** on the **innermost function or constructor that
+reads each field** — not at every callsite. Each documented field: meaning,
+valid values or source, behaviour when missing or invalid.
+
+## Godoc conventions
+
+- Comments on exported symbols must start with the **symbol name**.
+- Use complete sentences; wrap prose naturally (~79 chars is fine).
+- Link to docs with bare URLs in godoc (markdown links are not rendered in
+  `go doc`).
+- Do not copy ARC/ADR prose into source — link and state the local obligation.
+
+## When editing
+
+- Behaviour crossing a repo or service boundary → add or update signpost
+  comments in the same change.
+- If an exported symbol lacks a comment, add one before merging.
