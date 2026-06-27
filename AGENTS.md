@@ -35,3 +35,4 @@ Sibling repos: **canopy** (SCRAPI Workers), **forest-1** (GKE/Flux), **univocity
 - **Plans**: [docs/plans/README.md](docs/plans/README.md) (flat `docs/plan-*.md` today)
 - **Platform**: [../devdocs/](../devdocs/)
 - **Extended layout / service detail**: [docs/agents/services.md](docs/agents/services.md)
+- **Cursor rules**: [branch-naming](.cursor/rules/branch-naming.mdc), [go-comments](.cursor/rules/go-comments.mdc), [types-single-responsibility](.cursor/rules/types-single-responsibility.mdc)
