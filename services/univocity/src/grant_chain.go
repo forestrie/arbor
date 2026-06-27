@@ -89,18 +89,21 @@ func (a API) bootstrapConfig(
 		}
 		return 0, nil, fmt.Errorf("bootstrap key invalid for alg %d (len %d)", alg, len(key))
 	}
-	if a.Bootstrap != nil {
-		a.Bootstrap.put(cacheKey, alg, key)
-	}
 	// When stored genesis declares a different root than the contract deployer
 	// key, prefer genesis (Mode C BYOK — ADR-0006 / ARC-0022).
-	if storeAlg, storeKey, serr := a.bootstrapConfigFromStore(ctx, forest); serr == nil &&
+	storeAlg, storeKey, serr := a.bootstrapConfigFromStore(ctx, forest)
+	if serr == nil &&
 		validBootstrapIdentity(storeAlg, storeKey) &&
 		!bootstrapKeysEqual(storeAlg, storeKey, alg, key) {
 		if a.Bootstrap != nil {
 			a.Bootstrap.put(cacheKey, storeAlg, storeKey)
 		}
 		return storeAlg, storeKey, nil
+	}
+	// Do not cache chain-only bootstrap before genesis exists: verifyGenesisAnchor
+	// may call bootstrapConfig during genesis POST before the doc is persisted.
+	if a.Bootstrap != nil && serr == nil {
+		a.Bootstrap.put(cacheKey, alg, key)
 	}
 	return alg, key, nil
 }

@@ -466,6 +466,47 @@ func TestVerifyGrantChain_KS256ByokGenesisAuthoritative(t *testing.T) {
 	}
 }
 
+func TestBootstrapConfig_ReconcilesAfterGenesisStored(t *testing.T) {
+	logger, _ := NewLogger(0)
+	deployer := mustKS256Key(t)
+	user := mustKS256Key(t)
+
+	R := testLogID(14)
+	addr := common.HexToAddress("0xabc")
+	userAddr := ks256AddressFromKey(t, user)
+
+	chain := newChainColdAnchoredKS256(deployer)
+	store := newFakeStore()
+
+	api := API{
+		Logger:    logger,
+		Pool:      &mockPool{chain: chain},
+		Store:     store,
+		Bootstrap: NewBootstrapCache(),
+	}
+	forest := ForestEntry{R: R, ChainID: 84532, Contract: addr}
+
+	// verifyGenesisAnchor may resolve bootstrap before genesis is persisted.
+	alg0, key0, err := api.bootstrapConfig(context.Background(), forest, chain)
+	if err != nil {
+		t.Fatalf("bootstrap before genesis stored: %v", err)
+	}
+	deployerAddr := ks256AddressFromKey(t, deployer)
+	if alg0 != coseAlgKS256 || !bytes.Equal(key0, deployerAddr) {
+		t.Fatalf("pre-store bootstrap: got alg=%d key=%x want deployer %x", alg0, key0, deployerAddr)
+	}
+
+	store.genesis[R.String()] = buildGenesisDocKS256(t, R, user, 84532, addr)
+
+	alg1, key1, err := api.bootstrapConfig(context.Background(), forest, chain)
+	if err != nil {
+		t.Fatalf("bootstrap after BYOK genesis stored: %v", err)
+	}
+	if alg1 != coseAlgKS256 || !bytes.Equal(key1, userAddr) {
+		t.Fatalf("post-store bootstrap: got alg=%d key=%x want BYOK user %x", alg1, key1, userAddr)
+	}
+}
+
 func TestBootstrapConfig_CachePerForestNotSharedContract(t *testing.T) {
 	logger, _ := NewLogger(0)
 	deployer := mustKS256Key(t)
