@@ -4,6 +4,25 @@ Arbor: Go microservices for Forestrie (ranger, sealer, custodian, univocity
 HTTP service). Human setup: [README.md](README.md), [DEVELOPMENT.md](DEVELOPMENT.md).
 Platform glossary: [devdocs/glossary.md](../devdocs/glossary.md).
 
+## Git worktrees
+
+The **home clone** (`~/Dev/personal/forestrie/arbor`) stays on **`main`**
+(fast-forwarded to `origin/main`). Do not check out feature branches here.
+
+**Agents and parallel work** use a git worktree under **`../.worktrees/`**
+(resolves to `~/Dev/personal/forestrie/.worktrees/`):
+
+```bash
+git fetch origin
+git worktree add ../.worktrees/arbor-for-<issue>-<slug> \
+  -b robin/for-<issue>-<slug> origin/main
+git worktree add ../.worktrees/arbor-for-<issue>-<slug> robin/for-<issue>-<slug>
+```
+
+When work merges to `main`, remove the worktree:
+`git worktree remove ../.worktrees/<name>`. Do **not** use
+`~/Dev/personal/forestrie-wt/` (retired).
+
 ## Services
 
 | Service | Role |
