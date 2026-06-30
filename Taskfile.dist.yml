@@ -29,6 +29,9 @@ includes:
   univocity:
     taskfile: taskfiles/service-univocity.yml
     dir: .
+  release:
+    taskfile: taskfiles/release.yml
+    dir: .
 tasks:
   registry-auth:
     desc: Configure Docker authentication for Artifact Registry
