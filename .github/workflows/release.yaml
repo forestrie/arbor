@@ -1,5 +1,9 @@
 name: Release
 
+# Semver v* tag: build, test, and publish images only. Ledger-b GitOps bumps
+# are owned by release-orchestrator (FOR-254 / ARC-0025); this workflow no
+# longer opens arbor-flux promotion PRs.
+
 on:
   push:
     tags:
@@ -82,85 +86,3 @@ jobs:
           for service in ranger scout sealer custodian; do
             task release:build-push SERVICE="$service"
           done
-
-  create-release-pr:
-    name: Create Release PR
-    needs: build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Generate GitHub App Token
-        id: app-token
-        uses: tibdex/github-app-token@v1
-        with:
-          app_id: ${{ vars.GITAPP_ID }}
-          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
-
-      - name: Checkout arbor-flux
-        uses: actions/checkout@v4
-        with:
-          repository: forestrie/arbor-flux
-          token: ${{ steps.app-token.outputs.token }}
-
-      - name: Install yq
-        uses: mikefarah/yq@master
-
-      - name: Update arbor-flux image tags for release
-        env:
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-
-          bump_if_present() {
-            local file=$1
-            if [ -f "$file" ]; then
-              yq eval ".images[0].newTag = \"$VERSION\"" -i "$file"
-              echo "updated $file"
-            fi
-          }
-
-          for svc in ranger sealer scout custodian; do
-            bump_if_present "clusters/ledger-b/services/${svc}/kustomization.yaml"
-            bump_if_present "clusters/gke-prod/services/${svc}/kustomization.yaml"
-          done
-
-          git config user.name "forestrie-cd[bot]"
-          git config user.email "forestrie-cd[bot]@users.noreply.github.com"
-          git checkout -b "release/${VERSION}"
-
-          git add clusters/ledger-b/services/custodian/kustomization.yaml \
-            clusters/ledger-b/services/ranger/kustomization.yaml \
-            clusters/ledger-b/services/scout/kustomization.yaml \
-            clusters/ledger-b/services/sealer/kustomization.yaml
-
-          if [ -d clusters/gke-prod/services ]; then
-            git add clusters/gke-prod/services || true
-          fi
-
-          if git diff --cached --quiet; then
-            echo "No image tag changes to commit (check arbor-flux paths)" >&2
-            exit 1
-          fi
-
-          git commit -m "chore: release ${VERSION} (ledger-b; gke-prod when present)" \
-            -m "Source: forestrie/arbor@${{ github.sha }}"
-
-          git push origin "release/${VERSION}"
-
-      - name: Create PR
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          gh pr create \
-            --repo forestrie/arbor-flux \
-            --base main \
-            --head "release/${VERSION}" \
-            --title "Release ${VERSION} (ledger-b)" \
-            --body "Bumps pinned images for slot B (\`clusters/ledger-b\`) to **${VERSION}**.
-
-          When \`clusters/gke-prod\` exists in this repo, those manifests are updated too.
-
-          Source commit: forestrie/arbor@${{ github.sha }}
-
-          Merge to roll out promoted images."
