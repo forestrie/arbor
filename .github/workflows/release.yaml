@@ -1,13 +1,28 @@
 name: Release
 
 # Semver v* tag: build, test, and publish images only. Ledger-b GitOps bumps
-# are owned by release-orchestrator (FOR-254 / ARC-0025); this workflow no
-# longer opens arbor-flux promotion PRs.
+# are owned by release-orchestrator (FOR-254 / ARC-0025). Orchestrator may
+# dispatch workflow_dispatch from main (ADR-0043) with patch-bump tag creation.
 
 on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      orchestrator_run_id:
+        description: Correlation id from release-orchestrator release.yml
+        required: true
+        type: string
+      skip_cross_repo_tests:
+        description: Accepted for ADR-0043 contract; unused in arbor release
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -16,6 +31,7 @@ permissions:
 jobs:
   build:
     name: Build Release
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -86,3 +102,141 @@ jobs:
           for service in ranger scout sealer custodian; do
             task release:build-push SERVICE="$service"
           done
+
+  orchestrator-release:
+    name: Orchestrator release (main)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Compute patch-bump release tag
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          latest=$(gh release list --repo "${{ github.repository }}" --limit 1 \
+            --json tagName -q '.[0].tagName // empty')
+          if [ -z "$latest" ]; then
+            version="v0.1.0"
+          else
+            base="${latest#v}"
+            IFS=. read -r major minor patch <<< "${base%%-*}"
+            patch=$((patch + 1))
+            version="v${major}.${minor}.${patch}"
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "Invalid computed version: $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Git Bootstrap
+        run: task bootstrap
+
+      - name: Unit Tests
+        run: task test:unit
+
+      - name: Integration Tests
+        run: task test:integration
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_SERVICE_ACCOUNT || format('{0}-github-ci@{0}.iam.gserviceaccount.com', vars.GCP_PROJECT_ID || 'forest-dev-1') }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west2-docker.pkg.dev
+
+      - name: Build and push release images
+        env:
+          IMAGE_TAG: ${{ steps.version.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_DATE: ${{ github.run_started_at }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
+        run: |
+          set -euo pipefail
+          for service in ranger scout sealer custodian; do
+            task release:build-push SERVICE="$service"
+          done
+
+      - name: Write release fragment
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ORCH_RUN_ID: ${{ github.event.inputs.orchestrator_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-metadata
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg tag "$VERSION" \
+            --arg sha "${{ github.sha }}" \
+            --arg ref "main" \
+            --arg orchestratorRunId "$ORCH_RUN_ID" \
+            --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schemaVersion: 3,
+              repo: $repo,
+              ref: $ref,
+              tag: $tag,
+              sha: $sha,
+              orchestratorRunId: $orchestratorRunId,
+              capturedAt: $capturedAt,
+              services: {
+                arbor: { repo: "forestrie/arbor", ref: $tag }
+              }
+            }' > release-metadata/release-fragment.jsonc
+          cat release-metadata/release-fragment.jsonc
+
+      - name: Upload release fragment
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-fragment
+          path: release-metadata/release-fragment.jsonc
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Create annotated tag and GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Orchestrator release $TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes "Orchestrator-driven release (run ${{ github.event.inputs.orchestrator_run_id }})."
