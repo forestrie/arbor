@@ -120,12 +120,9 @@ jobs:
 
       - name: Compute patch-bump release tag
         id: version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          latest=$(gh release list --repo "${{ github.repository }}" --limit 1 \
-            --json tagName -q '.[0].tagName // empty')
+          latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -1)
           if [ -z "$latest" ]; then
             version="v0.1.0"
           else
@@ -235,8 +232,16 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Orchestrator release $TAG"
-          git push origin "$TAG"
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --notes "Orchestrator-driven release (run ${{ github.event.inputs.orchestrator_run_id }})."
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping tag push"
+          else
+            git tag -a "$TAG" -m "Orchestrator release $TAG"
+            git push origin "$TAG"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists"
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "Orchestrator-driven release (run ${{ github.event.inputs.orchestrator_run_id }})."
+          fi
