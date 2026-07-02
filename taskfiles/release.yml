@@ -21,6 +21,6 @@ tasks:
             exit 1
             ;;
         esac
-        echo "Release build-push ${SERVICE}:${IMAGE_TAG}"
+        echo "Release build-push {{.SERVICE}}:${IMAGE_TAG}"
       - task: "{{.SERVICE}}:build"
       - task: "{{.SERVICE}}:push"
