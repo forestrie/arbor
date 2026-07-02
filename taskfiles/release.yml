@@ -22,5 +22,5 @@ tasks:
             ;;
         esac
         echo "Release build-push {{.SERVICE}}:${IMAGE_TAG}"
-      - task: "{{.SERVICE}}:build"
-      - task: "{{.SERVICE}}:push"
+      - task: ":{{.SERVICE}}:build"
+      - task: ":{{.SERVICE}}:push"
