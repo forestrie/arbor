@@ -211,7 +211,7 @@ jobs:
               orchestratorRunId: $orchestratorRunId,
               capturedAt: $capturedAt,
               services: {
-                arbor: { repo: "forestrie/arbor", ref: $tag }
+                arbor: { repo: "forestrie/arbor", ref: $tag, dockerTag: $tag }
               }
             }' > release-metadata/release-fragment.jsonc
           cat release-metadata/release-fragment.jsonc
