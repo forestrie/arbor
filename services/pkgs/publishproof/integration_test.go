@@ -253,7 +253,7 @@ const algKS256 = int64(-65799)
 
 func deployUnivocity(t *testing.T, client *ethclient.Client, signer common.Address) *chainHarness {
 	ctx := t.Context()
-	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.1.5.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.1.6.json"))
 	require.NoError(t, err)
 	var manifest deployManifest
 	require.NoError(t, json.Unmarshal(raw, &manifest))
@@ -341,11 +341,10 @@ func (h *chainHarness) publishCheckpoint(calldata []byte, what string) {
 	h.t.Fatalf("%s: CheckpointPublished not emitted", what)
 }
 
-// signReceiptKS256 signs the contract's Sig_structure over the consistency
-// commitment for the final accumulator, as the log signer.
+// signReceiptKS256 signs the contract's Sig_structure over the raw-concat
+// detached payload (format v3) for the final accumulator, as the log signer.
 func signReceiptKS256(t *testing.T, key *ecdsa.PrivateKey, protected []byte, finalAccumulator [][32]byte) []byte {
-	commitment := ConsistencyCommitment(finalAccumulator)
-	digest := crypto.Keccak256(SigStructure(protected, commitment[:]))
+	digest := crypto.Keccak256(SigStructure(protected, DetachedPayload(finalAccumulator)))
 	sig, err := crypto.Sign(digest, key)
 	require.NoError(t, err)
 	sig[64] += 27
