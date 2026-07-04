@@ -253,7 +253,7 @@ const algKS256 = int64(-65799)
 
 func deployUnivocity(t *testing.T, client *ethclient.Client, signer common.Address) *chainHarness {
 	ctx := t.Context()
-	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.1.6.json"))
 	require.NoError(t, err)
 	var manifest deployManifest
 	require.NoError(t, json.Unmarshal(raw, &manifest))
