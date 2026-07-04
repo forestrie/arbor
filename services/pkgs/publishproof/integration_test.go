@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -262,9 +263,17 @@ type chainHarness struct {
 	abi      abi.ABI
 }
 
-const algKS256 = int64(-65799)
+const (
+	algKS256 = int64(-65799)
+	algES256 = int64(-7)
+)
 
 func deployUnivocity(t *testing.T, client *ethclient.Client, signer common.Address) *chainHarness {
+	// KS256 bootstrap: the key is the 20-byte signer address.
+	return deployUnivocityKey(t, client, algKS256, signer.Bytes())
+}
+
+func deployUnivocityKey(t *testing.T, client *ethclient.Client, bootstrapAlg int64, bootstrapKey []byte) *chainHarness {
 	ctx := t.Context()
 	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.1.6.json"))
 	require.NoError(t, err)
@@ -284,9 +293,8 @@ func deployUnivocity(t *testing.T, client *ethclient.Client, signer common.Addre
 	chainID, err := client.ChainID(ctx)
 	require.NoError(t, err)
 
-	// constructor(int64 bootstrapAlg, bytes bootstrapKey): KS256 keys are the
-	// 20-byte signer address.
-	args, err := parsedABI.Pack("", algKS256, signer.Bytes())
+	// constructor(int64 bootstrapAlg, bytes bootstrapKey)
+	args, err := parsedABI.Pack("", bootstrapAlg, bootstrapKey)
 	require.NoError(t, err)
 
 	h := &chainHarness{t: t, client: client, key: key, from: from, chainID: chainID, abi: parsedABI}
@@ -739,6 +747,143 @@ func TestDelegatedPublishFromSealedCheckpoint(t *testing.T) {
 	extendSize := target.addLeaves(dataLeaves[3:]...)
 	target.commitAndSeal()
 	sealedState = publishSealedCheckpoint("delegated extend target checkpoint")
+	require.Equal(t, extendSize, sealedState.MMRSize)
+
+	state, err = ReadLogState(ctx, client, harness.contract, targetLogId32)
+	require.NoError(t, err)
+	require.Equal(t, extendSize, state.Size)
+	require.Equal(t, sealedState.Accumulator, state.Accumulator)
+}
+
+// TestES256RootDelegatedPublishFromSealedCheckpoints exercises the full
+// ES256-root delegated flow with no fabricated signatures anywhere: every
+// published artifact is a sealed checkpoint object. The ES256 root seals the
+// authority log directly (grantData = 64-byte x||y root key) and signs the
+// on-chain delegation - built with the delegationcert material the custodian
+// issuer produces - authorizing a delegated ES256 key that seals the target
+// log. This proves the custodian's OnchainDelegationProof bytes verify
+// on-chain (delegationVerifier.sol ES256 path, P256 sha256).
+func TestES256RootDelegatedPublishFromSealedCheckpoints(t *testing.T) {
+	ctx := t.Context()
+	client := startAnvil(t)
+
+	// The ES256 root: bootstrap identity, authority log sealer, and
+	// delegation signer. A separate delegate key seals the target log.
+	root := newFixtureSealer(t)
+	delegate := newFixtureSealer(t)
+
+	rootPub := make([]byte, 64)
+	root.key.PublicKey.X.FillBytes(rootPub[:32])
+	root.key.PublicKey.Y.FillBytes(rootPub[32:])
+
+	harness := deployUnivocityKey(t, client, algES256, rootPub)
+
+	rootLogID := mustHex(t, "404142434445464748494a4b4c4d4e4f")
+	targetLogID := mustHex(t, "505152535455565758595a5b5c5d5e5f")
+	rootLogId32 := bytes32FromLow(t, hex.EncodeToString(rootLogID))
+	targetLogId32 := bytes32FromLow(t, hex.EncodeToString(targetLogID))
+
+	g0 := PublishGrant{
+		LogId:      rootLogId32,
+		Grant:      new(big.Int).SetUint64(gfCreate | gfExtend | gfAuthLog),
+		Request:    gcAuthLog,
+		MaxHeight:  1000,
+		MinGrowth:  0,
+		OwnerLogId: [32]byte{},
+		GrantData:  rootPub,
+	}
+	idt0 := idTimestamp(1)
+	leafG0, err := g0.LeafCommitment(idt0)
+	require.NoError(t, err)
+
+	gTarget := PublishGrant{
+		LogId:      targetLogId32,
+		Grant:      new(big.Int).SetUint64(gfCreate | gfExtend | gfDataLog),
+		Request:    gcDataLog,
+		MaxHeight:  1000,
+		MinGrowth:  0,
+		OwnerLogId: rootLogId32,
+		GrantData:  rootPub,
+	}
+	idt1 := idTimestamp(2)
+	leafGT, err := gTarget.LeafCommitment(idt1)
+	require.NoError(t, err)
+
+	objects := newMemObjectClient()
+
+	publishSealed := func(f *fixtureLog, inclusion InclusionProof, idt [8]byte, grant PublishGrant, what string) SealedState {
+		cp, err := massifs.GetCheckpoint(ctx, f.reader(), 0)
+		require.NoError(t, err)
+		receipt, err := DecodeCheckpointReceipt(cp.Raw)
+		require.NoError(t, err)
+		calldata, err := EncodePublishCheckpoint(receipt, inclusion, idt, grant)
+		require.NoError(t, err)
+		harness.publishCheckpoint(calldata, what)
+
+		state, err := ReadSealedState(ctx, f.reader(), 0)
+		require.NoError(t, err)
+		return state
+	}
+	noInclusion := InclusionProof{Index: 0, Path: [][32]byte{}}
+
+	// Authority log: root-signed seals published directly (no delegation).
+	authority := newFixtureLog(t, objects, rootLogID, root)
+	authority.addLeaves(leafG0)
+	authority.commitAndSeal()
+	publishSealed(authority, noInclusion, idt0, g0, "bootstrap root log (ES256 direct)")
+
+	authoritySize := authority.addLeaves(leafGT)
+	authority.commitAndSeal()
+	publishSealed(authority, noInclusion, idt0, g0, "extend authority with target grant")
+
+	authorityMC, err := massifs.GetMassifContext(ctx, authority.reader(), 0)
+	require.NoError(t, err)
+	grantInclusion, err := BuildInclusionProof(&authorityMC, authoritySize, 1)
+	require.NoError(t, err)
+
+	// The on-chain delegation proof, exactly as the custodian issuer builds
+	// it: delegationcert to-be-signed material, root SHA-256 ECDSA signature,
+	// low-s assembly.
+	dx := make([]byte, 32)
+	dy := make([]byte, 32)
+	delegate.key.PublicKey.X.FillBytes(dx)
+	delegate.key.PublicKey.Y.FillBytes(dy)
+	delegatedKey, err := delegationcert.NewDelegatedCoseKey(delegationcert.Secp256r1, dx, dy)
+	require.NoError(t, err)
+	tbs, err := delegationcert.BuildOnchainDelegationToBeSigned(
+		hex.EncodeToString(targetLogID), 0, uint64(1)<<40, delegatedKey)
+	require.NoError(t, err)
+	digest := sha256.Sum256(tbs.SigStructure)
+	sr, ss, err := ecdsa.Sign(rand.Reader, &root.key, digest[:])
+	require.NoError(t, err)
+	rawSig := make([]byte, 64)
+	sr.FillBytes(rawSig[:32])
+	ss.FillBytes(rawSig[32:])
+	onchain, err := delegationcert.AssembleOnchainDelegationProof(tbs, 0, uint64(1)<<40, rawSig)
+	require.NoError(t, err)
+
+	// Target log: sealed by the delegate, delegation proof in every seal.
+	target := newFixtureLog(t, objects, targetLogID, delegate)
+	target.onchainProof = onchain
+
+	var dataLeaves [][32]byte
+	for i := range 5 {
+		dataLeaves = append(dataLeaves, bytes32FromLow(t, fmt.Sprintf("%02x", 0xf0+i)))
+	}
+
+	firstSize := target.addLeaves(dataLeaves[:3]...)
+	target.commitAndSeal()
+	sealedState := publishSealed(target, grantInclusion, idt1, gTarget, "delegated first target checkpoint (ES256 root)")
+	require.Equal(t, firstSize, sealedState.MMRSize)
+
+	state, err := ReadLogState(ctx, client, harness.contract, targetLogId32)
+	require.NoError(t, err)
+	require.Equal(t, firstSize, state.Size)
+	require.Equal(t, sealedState.Accumulator, state.Accumulator)
+
+	extendSize := target.addLeaves(dataLeaves[3:]...)
+	target.commitAndSeal()
+	sealedState = publishSealed(target, grantInclusion, idt1, gTarget, "delegated extend target checkpoint (ES256 root)")
 	require.Equal(t, extendSize, sealedState.MMRSize)
 
 	state, err = ReadLogState(ctx, client, harness.contract, targetLogId32)

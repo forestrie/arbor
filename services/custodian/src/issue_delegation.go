@@ -3,6 +3,7 @@ package custodian
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -115,11 +116,36 @@ func (a *API) issueDelegationForLog(
 		return nil, fmt.Errorf("assemble delegation cert: %w", err)
 	}
 
+	// Also sign the univocity on-chain delegation proof (plan-0003, FOR-314
+	// Outcome B): the same custody root key signs the contract's delegation
+	// Sig_structure, so the sealer can embed publishable delegation material
+	// in each checkpoint.
+	onchainTBS, err := delegationcert.BuildOnchainDelegationToBeSigned(
+		logIdHex, req.MMRStart, req.MMREnd, delegatedKey)
+	if err != nil {
+		return nil, fmt.Errorf("build onchain delegation tbs: %w", err)
+	}
+	onchainDigest := sha256.Sum256(onchainTBS.SigStructure)
+	onchainDER, err := kmsAsymmetricSignSHA256(ctx, client, versionName, onchainDigest[:])
+	if err != nil {
+		return nil, fmt.Errorf("kms sign onchain delegation: %w", err)
+	}
+	onchainRaw, err := ecdsaDERSignatureToIEEE1363(onchainDER, 32)
+	if err != nil {
+		return nil, fmt.Errorf("onchain delegation der to ieee p1363: %w", err)
+	}
+	onchainProof, err := delegationcert.AssembleOnchainDelegationProof(
+		onchainTBS, req.MMRStart, req.MMREnd, onchainRaw)
+	if err != nil {
+		return nil, fmt.Errorf("assemble onchain delegation proof: %w", err)
+	}
+
 	return &delegationcert.DelegationIssueResponse{
-		Version:     1,
-		IssuedAt:    int64(issuedAt),
-		ExpiresAt:   int64(expiresAt),
-		Certificate: certBytes,
+		Version:      1,
+		IssuedAt:     int64(issuedAt),
+		ExpiresAt:    int64(expiresAt),
+		Certificate:  certBytes,
+		OnchainProof: onchainProof,
 	}, nil
 }
 
