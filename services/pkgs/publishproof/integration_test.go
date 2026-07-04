@@ -103,22 +103,22 @@ type fixtureLog struct {
 	store  *merklelog.Store
 	mc     massifs.MassifContext
 	signer *fixtureSealer
+	// sealedSize is the mmr size committed by the last checkpoint written for
+	// this log; each seal chains its consistency proof from here (one seal ->
+	// one proof).
+	sealedSize uint64
 }
 
 type fixtureSealer struct {
-	rootSigner massifs.RootSigner
 	coseSigner *mlcose.TestCoseSigner
 	key        ecdsa.PrivateKey
 }
 
 func newFixtureSealer(t *testing.T) *fixtureSealer {
-	codec, err := massifs.NewCBORCodec()
-	require.NoError(t, err)
 	p256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	key := *p256
 	return &fixtureSealer{
-		rootSigner: massifs.NewRootSigner("publishproof-tests", codec),
 		coseSigner: mlcose.NewTestCoseSigner(t, key),
 		key:        key,
 	}
@@ -147,8 +147,10 @@ func (f *fixtureLog) addLeaves(leaves ...[32]byte) uint64 {
 	return size
 }
 
-// commitAndSeal writes the massif object and a sealer-format checkpoint for
-// the current mmr size, mirroring the production write path.
+// commitAndSeal writes the massif object and a format-v3 checkpoint receipt
+// for the current mmr size, mirroring the production write path: the
+// consistency proof chains from the previously sealed size (one seal -> one
+// proof).
 func (f *fixtureLog) commitAndSeal() {
 	ctx := f.t.Context()
 	require.NoError(f.t, massifs.CommitContext(ctx, f.store, &f.mc))
@@ -156,17 +158,14 @@ func (f *fixtureLog) commitAndSeal() {
 	size := f.mc.RangeCount()
 	peaks, err := mmr.PeakHashes(&f.mc, size-1)
 	require.NoError(f.t, err)
-	state := massifs.MMRState{
-		Version:   int(massifs.MMRStateVersionCurrent),
-		MMRSize:   size,
-		Peaks:     peaks,
-		Timestamp: time.Now().UnixMilli(),
-	}
-	pub := f.signer.key.PublicKey
-	subject := fmt.Sprintf("massif/%d", f.mc.Start.MassifIndex)
-	data, err := f.signer.rootSigner.Sign1(f.signer.coseSigner, "publishproof-test-key", &pub, subject, state, nil)
+	proof, err := massifs.BuildConsistencyProof(&f.mc, f.sealedSize, size)
+	require.NoError(f.t, err)
+	data, err := massifs.SignCheckpointReceipt(
+		f.signer.coseSigner, proof, peaks,
+		massifs.WithPeakReceipts([]byte("publishproof-test-key")))
 	require.NoError(f.t, err)
 	require.NoError(f.t, f.store.Put(ctx, f.mc.Start.MassifIndex, massifstorage.ObjectCheckpoint, data, false))
+	f.sealedSize = size
 }
 
 // reader returns a fresh store over the same objects, so publisher reads are

@@ -23,27 +23,23 @@ type SealedState struct {
 func ReadSealedState(
 	ctx context.Context, reader massifs.ObjectReader, massifIndex uint32,
 ) (SealedState, error) {
-	codec, err := massifs.NewCBORCodec()
-	if err != nil {
-		return SealedState{}, err
-	}
-	checkpoint, err := massifs.GetCheckpoint(ctx, reader, codec, massifIndex)
+	checkpoint, err := massifs.GetCheckpoint(ctx, reader, massifIndex)
 	if err != nil {
 		return SealedState{}, fmt.Errorf("read checkpoint %d: %w", massifIndex, err)
 	}
-	if checkpoint.MMRState.MMRSize == 0 {
+	if checkpoint.MMRSize == 0 {
 		return SealedState{}, fmt.Errorf("checkpoint %d has zero mmr size", massifIndex)
 	}
 	mc, err := massifs.GetMassifContext(ctx, reader, massifIndex)
 	if err != nil {
 		return SealedState{}, fmt.Errorf("read massif %d: %w", massifIndex, err)
 	}
-	peaks, err := mmr.PeakHashes(&mc, checkpoint.MMRState.MMRSize-1)
+	peaks, err := mmr.PeakHashes(&mc, checkpoint.MMRSize-1)
 	if err != nil {
 		return SealedState{}, fmt.Errorf("recover sealed accumulator: %w", err)
 	}
 	return SealedState{
-		MMRSize:     checkpoint.MMRState.MMRSize,
+		MMRSize:     checkpoint.MMRSize,
 		Accumulator: toBytes32Slice(peaks),
 	}, nil
 }

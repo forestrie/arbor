@@ -188,7 +188,7 @@ func CheckpointLog(
 		if err != nil {
 			return fmt.Errorf("failed to obtain delegation lease for log %s: %w", logIdHex, err)
 		}
-		coseSigner, _, _, err := lease.COSESigner()
+		coseSigner, kid, _, err := lease.COSESigner()
 		if err != nil {
 			return fmt.Errorf("delegation signer setup failed: %w", err)
 		}
@@ -203,12 +203,15 @@ func CheckpointLog(
 		// receipt from the previous checkpoint (baseState.MMRSize) to this seal
 		// (curSize). The on-chain delegation proof is added by a later slice;
 		// the sealer signs the detached raw-concat payload with the delegated
-		// key here.
+		// key here. Peak receipts are pre-signed with the same key so any
+		// holder of the checkpoint and replicated log data can mint inclusion
+		// receipts without the signing key.
 		proof, err := massifs.BuildConsistencyProof(&mc, baseState.MMRSize, curSize)
 		if err != nil {
 			return fmt.Errorf("build consistency proof (massif=%d): %w", mi, err)
 		}
-		receiptBytes, err := massifs.SignCheckpointReceipt(coseSigner, proof, newPeaks)
+		receiptBytes, err := massifs.SignCheckpointReceipt(
+			coseSigner, proof, newPeaks, massifs.WithPeakReceipts(kid))
 		if err != nil {
 			return fmt.Errorf("sign checkpoint receipt (massif=%d): %w", mi, err)
 		}

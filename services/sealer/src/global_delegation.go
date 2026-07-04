@@ -32,7 +32,7 @@ type DelegationLease struct {
 }
 
 // COSESigner returns a veraison/go-cose Signer + kid + public key to use with
-// go-merklelog RootSigner.
+// go-merklelog SignCheckpointReceipt.
 func (d *DelegationLease) COSESigner() (cose.Signer, []byte, *ecdsa.PublicKey, error) {
 	if d == nil || d.PrivateKey == nil || d.PublicKey == nil {
 		return nil, nil, nil, fmt.Errorf("delegation lease missing key material")
