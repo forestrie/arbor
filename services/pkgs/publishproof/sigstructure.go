@@ -1,19 +1,21 @@
 package publishproof
 
 import (
-	"crypto/sha256"
 	"fmt"
 )
 
-// ConsistencyCommitment returns the detached payload the contract verifies a
-// consistency receipt signature against: sha256 over the packed final
-// accumulator (buildDetachedPayloadCommitment in consistencyReceipt.sol).
-func ConsistencyCommitment(accumulator [][32]byte) [32]byte {
+// DetachedPayload returns the COSE detached payload the contract verifies a
+// consistency receipt signature against (ADR-0046 / FOR-321, checkpoint format
+// v3): the raw concatenation of the accumulator peaks in descending height
+// order — no hashing. This is exactly what univocity
+// buildDetachedPayloadCommitment returns, so a signer and the contract sign
+// and verify over the same bytes.
+func DetachedPayload(accumulator [][32]byte) []byte {
 	packed := make([]byte, 0, len(accumulator)*32)
 	for _, peak := range accumulator {
 		packed = append(packed, peak[:]...)
 	}
-	return sha256.Sum256(packed)
+	return packed
 }
 
 // SigStructure returns the COSE Sign1 Sig_structure the contract hashes for
