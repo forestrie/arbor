@@ -32,6 +32,9 @@ type IssuerLeaseResponse struct {
 	Certificate []byte
 	IssuedAt    time.Time
 	ExpiresAt   time.Time
+	// OnchainProof is the univocity publishCheckpoint delegation material
+	// (plan-0003); nil when the issuer does not produce it.
+	OnchainProof *delegationcert.OnchainDelegationProof
 }
 
 // DelegationIssuer obtains delegation lease material from an untrusted issuer.
@@ -123,9 +126,10 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 	}
 
 	return &IssuerLeaseResponse{
-		Certificate: issueResp.Certificate,
-		IssuedAt:    time.Unix(issueResp.IssuedAt, 0).UTC(),
-		ExpiresAt:   time.Unix(issueResp.ExpiresAt, 0).UTC(),
+		Certificate:  issueResp.Certificate,
+		IssuedAt:     time.Unix(issueResp.IssuedAt, 0).UTC(),
+		ExpiresAt:    time.Unix(issueResp.ExpiresAt, 0).UTC(),
+		OnchainProof: issueResp.OnchainProof,
 	}, nil
 }
 

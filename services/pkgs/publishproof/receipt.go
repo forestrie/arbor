@@ -3,7 +3,9 @@ package publishproof
 import (
 	"fmt"
 
+	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"github.com/forestrie/go-merklelog/massifs"
+	"github.com/fxamacker/cbor/v2"
 )
 
 // The format-v3 checkpoint receipt codec lives in go-merklelog massifs. These
@@ -34,9 +36,11 @@ func EncodeCheckpointReceipt(protectedHeader []byte, proof ConsistencyProof, sig
 }
 
 // DecodeCheckpointReceipt decodes a format-v3 checkpoint object into the
-// pre-decoded ConsistencyReceipt parts publishCheckpoint takes. The delegation
-// proof is empty here (root/authority KS256 path); ES256 delegated data-log
-// receipts carry it in a Forestrie unprotected label added with the sealer.
+// pre-decoded ConsistencyReceipt parts publishCheckpoint takes. When the
+// sealer embedded the univocity on-chain delegation proof (Forestrie
+// unprotected label, plan-0003 OnchainDelegationProof), it is wired into the
+// calldata delegationProof; otherwise the delegation proof is empty
+// (root/authority direct-signing path).
 func DecodeCheckpointReceipt(data []byte) (ConsistencyReceipt, error) {
 	r, err := massifs.DecodeCheckpointReceipt(data)
 	if err != nil {
@@ -46,15 +50,29 @@ func DecodeCheckpointReceipt(data []byte) (ConsistencyReceipt, error) {
 	if err != nil {
 		return ConsistencyReceipt{}, err
 	}
+	delegation := DelegationProof{
+		ProtectedHeader: []byte{},
+		DelegationKey:   []byte{},
+		Signature:       []byte{},
+	}
+	if raw, ok := r.Extras[massifs.SealDelegationProofLabel]; ok {
+		var onchain delegationcert.OnchainDelegationProof
+		if err := cbor.Unmarshal(raw, &onchain); err != nil {
+			return ConsistencyReceipt{}, fmt.Errorf("decode onchain delegation proof: %w", err)
+		}
+		delegation = DelegationProof{
+			ProtectedHeader: onchain.ProtectedHeader,
+			DelegationKey:   onchain.DelegationKey,
+			MmrStart:        onchain.MMRStart,
+			MmrEnd:          onchain.MMREnd,
+			Signature:       onchain.Signature,
+		}
+	}
 	return ConsistencyReceipt{
 		ProtectedHeader:   r.ProtectedHeader,
 		Signature:         r.Signature,
 		ConsistencyProofs: []ConsistencyProof{proof},
-		DelegationProof: DelegationProof{
-			ProtectedHeader: []byte{},
-			DelegationKey:   []byte{},
-			Signature:       []byte{},
-		},
+		DelegationProof:   delegation,
 	}, nil
 }
 

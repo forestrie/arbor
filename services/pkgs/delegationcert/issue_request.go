@@ -31,4 +31,23 @@ type DelegationIssueResponse struct {
 	IssuedAt    int64  `cbor:"issuedAt"`
 	ExpiresAt   int64  `cbor:"expiresAt"`
 	Certificate []byte `cbor:"certificate,omitempty"`
+	// OnchainProof is the univocity publishCheckpoint delegation material
+	// (plan-0003, FOR-314 Outcome B). Omitted by issuers that do not produce
+	// it; consumers remain wire-compatible either way.
+	OnchainProof *OnchainDelegationProof `cbor:"onchainProof,omitempty"`
+}
+
+// OnchainDelegationProof is the pre-decoded univocity DelegationProof
+// calldata material (plan-0003): the log root key's signature over the
+// contract's delegation Sig_structure, binding the delegated checkpoint
+// signing key to (logId, mmrStart, mmrEnd) under the
+// "forestrie.univocity.delegation.v1" domain (delegationVerifier.sol).
+// ProtectedHeader carries the root key algorithm (label 1: ES256 or KS256);
+// DelegationKey is the delegated P-256 public key as 64 bytes x||y.
+type OnchainDelegationProof struct {
+	ProtectedHeader []byte `cbor:"protectedHeader"`
+	DelegationKey   []byte `cbor:"delegationKey"`
+	MMRStart        uint64 `cbor:"mmrStart"`
+	MMREnd          uint64 `cbor:"mmrEnd"`
+	Signature       []byte `cbor:"signature"`
 }

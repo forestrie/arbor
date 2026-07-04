@@ -150,6 +150,7 @@ func requestLogDelegationLeaseWithKeyPair(
 
 	return &DelegationLease{
 		CertBytes:       issuerResp.Certificate,
+		OnchainProof:    issuerResp.OnchainProof,
 		Info:            info,
 		Curve:           curve,
 		PrivateKey:      keyPair.Private,

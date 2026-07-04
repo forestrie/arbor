@@ -16,6 +16,7 @@ import (
 	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/forestrie/go-merklelog/mmr"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
 )
 
@@ -201,17 +202,36 @@ func CheckpointLog(
 
 		// Checkpoint format v3 (ADR-0046): emit a draft-bryce consistency
 		// receipt from the previous checkpoint (baseState.MMRSize) to this seal
-		// (curSize). The on-chain delegation proof is added by a later slice;
-		// the sealer signs the detached raw-concat payload with the delegated
-		// key here. Peak receipts are pre-signed with the same key so any
+		// (curSize); the sealer signs the detached raw-concat payload with the
+		// delegated key. Peak receipts are pre-signed with the same key so any
 		// holder of the checkpoint and replicated log data can mint inclusion
-		// receipts without the signing key.
+		// receipts without the signing key. When the lease carries the
+		// univocity on-chain delegation proof it rides the unprotected header
+		// so the publisher can wire it into the publishCheckpoint calldata.
 		proof, err := massifs.BuildConsistencyProof(&mc, baseState.MMRSize, curSize)
 		if err != nil {
 			return fmt.Errorf("build consistency proof (massif=%d): %w", mi, err)
 		}
-		receiptBytes, err := massifs.SignCheckpointReceipt(
-			coseSigner, proof, newPeaks, massifs.WithPeakReceipts(kid))
+		signOpts := []massifs.CheckpointSignOption{massifs.WithPeakReceipts(kid)}
+		extras := map[int64]cbor.RawMessage{}
+		if len(lease.CertBytes) > 0 {
+			rawCert, err := cbor.Marshal(lease.CertBytes)
+			if err != nil {
+				return fmt.Errorf("encode delegation certificate (massif=%d): %w", mi, err)
+			}
+			extras[delegationCertUnprotectedLabel] = rawCert
+		}
+		if lease.OnchainProof != nil {
+			rawProof, err := cbor.Marshal(lease.OnchainProof)
+			if err != nil {
+				return fmt.Errorf("encode onchain delegation proof (massif=%d): %w", mi, err)
+			}
+			extras[massifs.SealDelegationProofLabel] = rawProof
+		}
+		if len(extras) > 0 {
+			signOpts = append(signOpts, massifs.WithUnprotectedExtras(extras))
+		}
+		receiptBytes, err := massifs.SignCheckpointReceipt(coseSigner, proof, newPeaks, signOpts...)
 		if err != nil {
 			return fmt.Errorf("sign checkpoint receipt (massif=%d): %w", mi, err)
 		}
