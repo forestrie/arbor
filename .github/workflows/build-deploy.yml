@@ -46,6 +46,11 @@ jobs:
         run: |
           task bootstrap
 
+      # publishproof's tracer-bullet test publishes against anvil; without
+      # foundry installed the test self-skips and the extend path is untested.
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
       - name: Unit Tests
         run: |
           task test:unit
