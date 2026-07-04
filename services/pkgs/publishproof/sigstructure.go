@@ -1,50 +1,29 @@
 package publishproof
 
-import (
-	"fmt"
-)
+import "github.com/forestrie/go-merklelog/massifs"
+
+// The format-v3 receipt profile (detached payload, COSE Sig_structure, and the
+// checkpoint receipt CBOR) lives in go-merklelog massifs — the single source
+// shared by the sealer (producer) and the verify/replicate consumers. These
+// are thin adapters over the calldata-shaped [32]byte types publishproof uses
+// for the on-chain ABI.
 
 // DetachedPayload returns the COSE detached payload the contract verifies a
-// consistency receipt signature against (ADR-0046 / FOR-321, checkpoint format
-// v3): the raw concatenation of the accumulator peaks in descending height
-// order — no hashing. This is exactly what univocity
-// buildDetachedPayloadCommitment returns, so a signer and the contract sign
-// and verify over the same bytes.
+// consistency receipt signature against: the raw concatenation of the
+// accumulator peaks (ADR-0046 / FOR-321).
 func DetachedPayload(accumulator [][32]byte) []byte {
-	packed := make([]byte, 0, len(accumulator)*32)
-	for _, peak := range accumulator {
-		packed = append(packed, peak[:]...)
-	}
-	return packed
+	return massifs.DetachedPayload(nodesFrom32(accumulator))
 }
 
-// SigStructure returns the COSE Sign1 Sig_structure the contract hashes for
-// signature verification (cosecbor.buildSigStructure): a deterministic CBOR
-// [ "Signature1", protected, h”, payload ] with no external AAD.
+// SigStructure returns the COSE Sign1 Sig_structure the signature is over.
 func SigStructure(protectedHeader, payload []byte) []byte {
-	out := []byte{0x84}
-	out = append(out, 0x6a)
-	out = append(out, []byte("Signature1")...)
-	out = append(out, cborBstr(protectedHeader)...)
-	out = append(out, 0x40)
-	out = append(out, cborBstr(payload)...)
-	return out
+	return massifs.SigStructure(protectedHeader, payload)
 }
 
-// cborBstr encodes a definite-length CBOR byte string header + bytes. Sizes
-// beyond 64KiB do not occur in checkpoint material.
-func cborBstr(data []byte) []byte {
-	n := len(data)
-	var head []byte
-	switch {
-	case n < 24:
-		head = []byte{0x40 + byte(n)}
-	case n < 256:
-		head = []byte{0x58, byte(n)}
-	case n < 1<<16:
-		head = []byte{0x59, byte(n >> 8), byte(n)}
-	default:
-		panic(fmt.Sprintf("publishproof: byte string of %d bytes exceeds checkpoint material bounds", n))
+func nodesFrom32(acc [][32]byte) [][]byte {
+	out := make([][]byte, len(acc))
+	for i := range acc {
+		out[i] = acc[i][:]
 	}
-	return append(head, data...)
+	return out
 }
