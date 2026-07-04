@@ -9,7 +9,7 @@ import (
 )
 
 // The contract (cosecbor.buildSigStructure) verifies receipt signatures over
-// Sig_structure = [ "Signature1", protected, external_aad = h'', payload ]
+// Sig_structure = [ "Signature1", protected, external_aad = h”, payload ]
 // with the detached payload being sha256 of the packed final accumulator.
 // Expected bytes are hand-assembled from RFC 9052 deterministic CBOR.
 func TestSigStructureMatchesContractCBOR(t *testing.T) {

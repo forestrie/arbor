@@ -18,7 +18,7 @@ func ConsistencyCommitment(accumulator [][32]byte) [32]byte {
 
 // SigStructure returns the COSE Sign1 Sig_structure the contract hashes for
 // signature verification (cosecbor.buildSigStructure): a deterministic CBOR
-// [ "Signature1", protected, h'', payload ] with no external AAD.
+// [ "Signature1", protected, h”, payload ] with no external AAD.
 func SigStructure(protectedHeader, payload []byte) []byte {
 	out := []byte{0x84}
 	out = append(out, 0x6a)
