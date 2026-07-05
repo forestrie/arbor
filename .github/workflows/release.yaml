@@ -68,8 +68,22 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The bootstrap clones private forestrie repos (go-univocity); the
+      # job's GITHUB_TOKEN only covers this repo, so mint a forestrie-cd app
+      # token and route https github clones through it (matches
+      # build-deploy.yml).
+      - name: Mint GitHub App token for private dep clones
+        id: gitapp
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GITAPP_ID }}
+          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
+
       - name: Git Bootstrap
-        run: task bootstrap
+        run: |
+          git config --global url."https://x-access-token:${{ steps.gitapp.outputs.token }}@github.com/".insteadOf "https://github.com/"
+          task bootstrap
+          git config --global --unset-all url."https://x-access-token:${{ steps.gitapp.outputs.token }}@github.com/".insteadOf
 
       - name: Unit Tests
         run: task test:unit
@@ -153,8 +167,22 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+      # The bootstrap clones private forestrie repos (go-univocity); the
+      # job's GITHUB_TOKEN only covers this repo, so mint a forestrie-cd app
+      # token and route https github clones through it (matches
+      # build-deploy.yml).
+      - name: Mint GitHub App token for private dep clones
+        id: gitapp
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GITAPP_ID }}
+          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
+
       - name: Git Bootstrap
-        run: task bootstrap
+        run: |
+          git config --global url."https://x-access-token:${{ steps.gitapp.outputs.token }}@github.com/".insteadOf "https://github.com/"
+          task bootstrap
+          git config --global --unset-all url."https://x-access-token:${{ steps.gitapp.outputs.token }}@github.com/".insteadOf
 
       - name: Unit Tests
         run: task test:unit
