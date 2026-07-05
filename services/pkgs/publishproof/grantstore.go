@@ -4,13 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/forestrie/go-merklelog/mmr"
+	"github.com/forestrie/go-merklelog/urkle"
+	"github.com/forestrie/go-univocity/grant"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -197,22 +202,61 @@ func paddedWire32(m map[int]any, label int) ([32]byte, bool) {
 	return out, true
 }
 
-// FindGrantLeafIndex locates the grant leaf commitment in the owner log by
-// scanning leaf positions in [0, LeafCount(mmrSize)) and returns its mmr node
-// index (the InclusionProof index the contract verifies). Content-agnostic:
-// non-grant leaves in the authority log are simply skipped. Authority logs
-// hold one leaf per grant, so a linear scan is proportionate.
-func FindGrantLeafIndex(store NodeGetter, mmrSize uint64, leaf [32]byte) (uint64, error) {
-	leaves := mmr.LeafCount(mmrSize)
-	for i := uint64(0); i < leaves; i++ {
-		nodeIndex := mmr.MMRIndex(i)
-		node, err := store.Get(nodeIndex)
-		if err != nil {
-			return 0, fmt.Errorf("read owner log leaf %d (node %d): %w", i, nodeIndex, err)
-		}
-		if bytes.Equal(node, leaf[:]) {
-			return nodeIndex, nil
-		}
+// ContentHash returns the grant's sequencing content hash (the grant
+// InnerHash): the value ranger commits under the grant's idtimestamp, so the
+// mmr leaf is sha256(idtimestampBe || ContentHash) == LeafCommitment.
+func (g StoredGrant) ContentHash() ([32]byte, error) {
+	if g.Grant.Grant == nil || g.Grant.Grant.Sign() < 0 || g.Grant.Grant.BitLen() > 64 {
+		return [32]byte{}, errors.New("grant flags must be a non-negative value fitting 8 bytes")
 	}
-	return 0, fmt.Errorf("%w: scanned %d leaves", ErrGrantLeafNotFound, leaves)
+	var flags [8]byte
+	g.Grant.Grant.FillBytes(flags[:])
+	return grant.InnerHash(
+		g.Grant.LogId[:],
+		flags[:],
+		g.Grant.MaxHeight,
+		g.Grant.MinGrowth,
+		g.Grant.OwnerLogId[:],
+		g.Grant.GrantData,
+	), nil
+}
+
+// GrantLeafMMRIndex locates the grant leaf in the owner log and returns its
+// mmr node index (the InclusionProof index the contract verifies).
+//
+// The position is computable, not scanned: idtimestamps are assigned in
+// strictly increasing order at commit (ranger NextIDTimestamp), so leaf order
+// equals key order and the massif's v2 index leaf table is binary-searchable
+// by the grant's idtimestamp. The mmr leaf at the found ordinal must verify
+// as the grant leaf commitment, so a stored grant that does not match what
+// was sequenced is rejected. mmrSize bounds the search to the owner's
+// on-chain accumulator range.
+func GrantLeafMMRIndex(
+	mc *massifs.MassifContext, mmrSize uint64, idtimestampBe [8]byte, leaf [32]byte,
+) (uint64, error) {
+	leafTable, err := mc.UrkleLeafTableRegion()
+	if err != nil {
+		return 0, fmt.Errorf("owner massif index leaf table: %w", err)
+	}
+	key := binary.BigEndian.Uint64(idtimestampBe[:])
+	leaves := mmr.LeafCount(mmrSize)
+	ordinal := sort.Search(int(leaves), func(i int) bool {
+		return urkle.LeafKey(leafTable, uint32(i)) >= key
+	})
+	if uint64(ordinal) >= leaves || urkle.LeafKey(leafTable, uint32(ordinal)) != key {
+		return 0, fmt.Errorf(
+			"%w: idtimestamp %d not committed within %d anchored leaves",
+			ErrGrantLeafNotFound, key, leaves)
+	}
+	nodeIndex := mmr.MMRIndex(uint64(ordinal))
+	node, err := mc.Get(nodeIndex)
+	if err != nil {
+		return 0, fmt.Errorf("read owner log leaf %d (node %d): %w", ordinal, nodeIndex, err)
+	}
+	if !bytes.Equal(node, leaf[:]) {
+		return 0, fmt.Errorf(
+			"%w: leaf at idtimestamp %d does not match the stored grant commitment",
+			ErrGrantLeafNotFound, key)
+	}
+	return nodeIndex, nil
 }

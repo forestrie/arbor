@@ -2,10 +2,12 @@ package publishproof
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"math/big"
 	"testing"
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/forestrie/go-merklelog/mmr"
 	"github.com/fxamacker/cbor/v2"
@@ -172,22 +174,78 @@ func TestReadStoredGrantErrors(t *testing.T) {
 	})
 }
 
-// The grant leaf is located in the owner log by scanning leaf positions for
-// the grant's leaf commitment — content-agnostic, so other leaf kinds in the
-// authority log are skipped over.
-func TestFindGrantLeafIndex(t *testing.T) {
-	store, sizes := newFixtureMMR(t, 5)
-	size := sizes[4]
-
-	// The fixture leaves are sha256(i); pick leaf ordinal 3 as "the grant".
-	wantNode := mmr.MMRIndex(3)
-	leafValue, err := store.Get(wantNode)
+// indexedFixtureMassif builds a massif the way ranger's committer does: for
+// each (idtimestamp, contentHash) entry the mmr leaf is
+// sha256(idtsBE || contentHash), appended and indexed under the idtimestamp.
+// Returns the context and the resulting mmr size.
+func indexedFixtureMassif(t *testing.T, entries []fixtureEntry) (*massifs.MassifContext, uint64) {
+	t.Helper()
+	mc, err := massifs.CreateFirstMassifContext(t.Context(), 0, fixtureMassifHeight)
 	require.NoError(t, err)
+	var size uint64
+	for _, e := range entries {
+		var idtsBE [8]byte
+		binary.BigEndian.PutUint64(idtsBE[:], e.idts)
+		leaf := sha256.Sum256(append(idtsBE[:], e.contentHash[:]...))
+		size, err = mc.AddIndexedEntry(leaf[:])
+		require.NoError(t, err)
+		require.NoError(t, mc.IndexLeaf(e.idts, e.contentHash[:]))
+	}
+	return &mc, size
+}
 
-	node, err := FindGrantLeafIndex(store, size, [32]byte(leafValue))
-	require.NoError(t, err)
-	require.Equal(t, wantNode, node)
+type fixtureEntry struct {
+	idts        uint64
+	contentHash [32]byte
+}
 
-	_, err = FindGrantLeafIndex(store, size, [32]byte{0xde, 0xad})
+// The grant leaf position is computable: idtimestamps are committed in
+// strictly increasing order (ranger NextIDTimestamp), so leaf order equals
+// key order and the v2 index leaf table binary-searches by idtimestamp. The
+// mmr leaf at the found ordinal must verify as the grant leaf commitment.
+func TestGrantLeafMMRIndex(t *testing.T) {
+	entries := []fixtureEntry{
+		{idts: 0, contentHash: sha256.Sum256([]byte("root-grant"))}, // zero-key root self-grant
+		{idts: 100, contentHash: sha256.Sum256([]byte("g1"))},
+		{idts: 250, contentHash: sha256.Sum256([]byte("g2"))},
+		{idts: 251, contentHash: sha256.Sum256([]byte("g3"))},
+	}
+	mc, size := indexedFixtureMassif(t, entries)
+
+	leafFor := func(e fixtureEntry) [32]byte {
+		var idtsBE [8]byte
+		binary.BigEndian.PutUint64(idtsBE[:], e.idts)
+		return sha256.Sum256(append(idtsBE[:], e.contentHash[:]...))
+	}
+
+	// Every entry is found at its ordinal's node index, including the
+	// zero-idtimestamp root grant at leaf 0.
+	for i, e := range entries {
+		var idts [8]byte
+		binary.BigEndian.PutUint64(idts[:], e.idts)
+		node, err := GrantLeafMMRIndex(mc, size, idts, leafFor(e))
+		require.NoError(t, err)
+		require.Equal(t, mmr.MMRIndex(uint64(i)), node)
+	}
+
+	// An idtimestamp between committed keys is absent.
+	var absent [8]byte
+	binary.BigEndian.PutUint64(absent[:], 200)
+	_, err := GrantLeafMMRIndex(mc, size, absent, leafFor(entries[1]))
+	require.ErrorIs(t, err, ErrGrantLeafNotFound)
+
+	// A present idtimestamp whose leaf does not verify is rejected (the
+	// stored grant does not match what was sequenced).
+	var idts100 [8]byte
+	binary.BigEndian.PutUint64(idts100[:], 100)
+	_, err = GrantLeafMMRIndex(mc, size, idts100, [32]byte{0xde, 0xad})
+	require.ErrorIs(t, err, ErrGrantLeafNotFound)
+
+	// The on-chain bound is respected: a leaf beyond the anchored size is
+	// not found even though it exists in the massif.
+	var idts251 [8]byte
+	binary.BigEndian.PutUint64(idts251[:], 251)
+	boundSize := mmr.MMRIndex(3) // complete size covering only leaves 0..2
+	_, err = GrantLeafMMRIndex(mc, boundSize, idts251, leafFor(entries[3]))
 	require.ErrorIs(t, err, ErrGrantLeafNotFound)
 }

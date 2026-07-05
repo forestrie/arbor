@@ -100,11 +100,11 @@ func AssemblePublish(
 		if err != nil {
 			return nil, SealedState{}, fmt.Errorf("read owner massif %d: %w", headIndex, err)
 		}
-		nodeIndex, err := FindGrantLeafIndex(&ownerMC, ownerOnchain.Size, leaf)
+		nodeIndex, err := GrantLeafMMRIndex(&ownerMC, ownerOnchain.Size, sg.IDTimestampBe, leaf)
 		if errors.Is(err, ErrGrantLeafNotFound) {
 			return nil, SealedState{}, fmt.Errorf(
-				"%w: grant leaf for %s not within owner on-chain size %d",
-				ErrOwnerNotAnchored, logID, ownerOnchain.Size)
+				"%w: grant leaf for %s not within owner on-chain size %d: %v",
+				ErrOwnerNotAnchored, logID, ownerOnchain.Size, err)
 		}
 		if err != nil {
 			return nil, SealedState{}, err

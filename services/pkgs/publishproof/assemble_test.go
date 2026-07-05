@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"testing"
@@ -74,16 +75,17 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 
 	rootGrant, err := ReadStoredGrant(ctx, grants, rootUUID, rootUUID)
 	require.NoError(t, err)
-	leafG0, err := rootGrant.LeafCommitment()
+	rootContent, err := rootGrant.ContentHash()
 	require.NoError(t, err)
 	targetGrant, err := ReadStoredGrant(ctx, grants, rootUUID, targetUUID)
 	require.NoError(t, err)
-	leafGT, err := targetGrant.LeafCommitment()
+	targetContent, err := targetGrant.ContentHash()
 	require.NoError(t, err)
 
-	// Authority log fixture: grant leaves, root-sealed.
+	// Authority log fixture: grant entries committed and indexed under their
+	// idtimestamps exactly as ranger sequences them, root-sealed.
 	authority := newFixtureLog(t, objects, rootLogID, root)
-	require.Equal(t, uint64(1), authority.addLeaves(leafG0))
+	require.Equal(t, uint64(1), authority.addEntry(0, rootContent))
 	authority.commitAndSeal()
 
 	zeroState := LogState{Accumulator: [][32]byte{}, Size: 0}
@@ -99,8 +101,9 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), rootState.Size)
 
-	// Extend the authority log with the target grant leaf.
-	require.Equal(t, uint64(3), authority.addLeaves(leafGT))
+	// Extend the authority log with the target grant entry.
+	require.Equal(t, uint64(3),
+		authority.addEntry(binary.BigEndian.Uint64(targetGrant.IDTimestampBe[:]), targetContent))
 	authority.commitAndSeal()
 
 	calldata, sealed, err = AssemblePublish(ctx, grants, rootUUID, rootUUID,
