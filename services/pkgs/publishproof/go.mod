@@ -25,6 +25,7 @@ require (
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
+	github.com/forestrie/arbor/services/pkgs/logid v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/bloom v0.0.0-00010101000000-000000000000 // indirect
 	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000 // indirect
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000 // indirect
@@ -61,3 +62,5 @@ replace (
 	github.com/forestrie/go-sigv4 => ../../_deps/go-sigv4
 	github.com/forestrie/go-univocity => ../../_deps/go-univocity
 )
+
+replace github.com/forestrie/arbor/services/pkgs/logid => ../logid
