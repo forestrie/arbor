@@ -2,6 +2,7 @@ package custodian
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -152,7 +153,23 @@ func (a *API) ensureKeyIAMAndPublicKey(ctx context.Context, client *kms.KeyManag
 		return "", fmt.Errorf("set key iam policy: %w", err)
 	}
 
-	versionName := keyName + "/cryptoKeyVersions/1"
+	// Resolve a live version rather than assuming version 1: content-reset
+	// (FOR-44) destroys all versions of the custody keys but the CryptoKey
+	// resources remain, so a re-ensured key may have no enabled versions -
+	// create a fresh one in that case.
+	versionName, _, err := kmsLatestEnabledSigningVersion(ctx, client, keyName)
+	if err != nil {
+		if !errors.Is(err, errKmsNoEnabledSigningVersion) {
+			return "", fmt.Errorf("resolve enabled key version: %w", err)
+		}
+		ver, cerr := client.CreateCryptoKeyVersion(ctx, &kmspb.CreateCryptoKeyVersionRequest{
+			Parent: keyName,
+		})
+		if cerr != nil {
+			return "", fmt.Errorf("create crypto key version: %w", cerr)
+		}
+		versionName = ver.Name
+	}
 	publicKeyPEM, err := getPublicKeyPEMWithRetry(ctx, client, versionName)
 	if err != nil {
 		return "", fmt.Errorf("get public key: %w", err)
@@ -192,10 +209,12 @@ func getPublicKeyPEMWithRetry(ctx context.Context, client *kms.KeyManagementClie
 		}
 		lastErr = err
 		st, ok := status.FromError(err)
-		if !ok || st.Code() != codes.PermissionDenied {
+		if !ok || (st.Code() != codes.PermissionDenied && st.Code() != codes.FailedPrecondition) {
 			return "", err
 		}
-		// IAM on new keys can lag slightly after SetIamPolicy.
+		// IAM on new keys can lag slightly after SetIamPolicy, and freshly
+		// created versions report FailedPrecondition until generation
+		// completes.
 		time.Sleep(time.Duration(50*(1<<attempt)) * time.Millisecond)
 	}
 	return "", lastErr
