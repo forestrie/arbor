@@ -221,16 +221,59 @@ func (g StoredGrant) ContentHash() ([32]byte, error) {
 	), nil
 }
 
-// GrantLeafMMRIndex locates the grant leaf in the owner log and returns its
-// mmr node index (the InclusionProof index the contract verifies).
+// FindGrantLeafMMRIndex locates the grant leaf across the owner log's massifs
+// and returns its global mmr node index (the InclusionProof index the contract
+// verifies), bounded to the owner's on-chain accumulator range (ownerOnchainSize).
+//
+// Because idtimestamps are strictly increasing across the whole log, each
+// massif covers a contiguous key range; the grant leaf lives in exactly one.
+// The massifs before the head are searched too, so authority logs that have
+// rolled past their first massif resolve correctly (the head-massif-only
+// assumption was R2 in plan-2607-03). Reads walk from massif 0 to the head;
+// for the common single-massif authority log this is one read.
+func FindGrantLeafMMRIndex(
+	ctx context.Context, owner massifs.ObjectReader, ownerOnchainSize uint64,
+	idtimestampBe [8]byte, leaf [32]byte,
+) (uint64, error) {
+	head, err := owner.HeadIndex(ctx, massifstorage.ObjectMassifData)
+	if err != nil {
+		return 0, fmt.Errorf("owner log head massif: %w", err)
+	}
+	key := binary.BigEndian.Uint64(idtimestampBe[:])
+	for mi := uint32(0); mi <= head; mi++ {
+		mc, err := massifs.GetMassifContext(ctx, owner, mi)
+		if err != nil {
+			return 0, fmt.Errorf("read owner massif %d: %w", mi, err)
+		}
+		nodeIndex, err := GrantLeafMMRIndex(&mc, ownerOnchainSize, idtimestampBe, leaf)
+		if errors.Is(err, ErrGrantLeafNotFound) {
+			continue // not in this massif's anchored range; try the next
+		}
+		if err != nil {
+			return 0, err
+		}
+		return nodeIndex, nil
+	}
+	return 0, fmt.Errorf(
+		"%w: idtimestamp %d not committed within owner on-chain size %d",
+		ErrGrantLeafNotFound, key, ownerOnchainSize)
+}
+
+// GrantLeafMMRIndex locates the grant leaf within a single owner massif and
+// returns its global mmr node index (the InclusionProof index the contract
+// verifies), or ErrGrantLeafNotFound if the grant's idtimestamp is not in this
+// massif's anchored range. Callers with multi-massif owner logs use
+// FindGrantLeafMMRIndex, which walks the massifs.
 //
 // The position is computable, not scanned: idtimestamps are assigned in
 // strictly increasing order at commit (ranger NextIDTimestamp), so leaf order
 // equals key order and the massif's v2 index leaf table is binary-searchable
-// by the grant's idtimestamp. The mmr leaf at the found ordinal must verify
-// as the grant leaf commitment, so a stored grant that does not match what
-// was sequenced is rejected. mmrSize bounds the search to the owner's
-// on-chain accumulator range.
+// by the grant's idtimestamp. The search runs over this massif's own leaf
+// ordinals; the found ordinal is mapped to a global mmr index via the massif's
+// first-leaf index (mc.Start.FirstIndex), so it is correct for any massif, not
+// only massif 0. The mmr leaf at that node must verify as the grant leaf
+// commitment, so a stored grant that does not match what was sequenced is
+// rejected. mmrSize bounds the search to the owner's on-chain accumulator range.
 func GrantLeafMMRIndex(
 	mc *massifs.MassifContext, mmrSize uint64, idtimestampBe [8]byte, leaf [32]byte,
 ) (uint64, error) {
@@ -239,16 +282,30 @@ func GrantLeafMMRIndex(
 		return 0, fmt.Errorf("owner massif index leaf table: %w", err)
 	}
 	key := binary.BigEndian.Uint64(idtimestampBe[:])
-	leaves := mmr.LeafCount(mmrSize)
-	ordinal := sort.Search(int(leaves), func(i int) bool {
+
+	// Map this massif's local leaf ordinals to the global leaf-index space and
+	// bound the search to the leaves the on-chain accumulator covers.
+	massifFirstLeaf := mmr.LeafIndex(mc.Start.FirstIndex)
+	onchainLeaves := mmr.LeafCount(mmrSize)
+	if massifFirstLeaf >= onchainLeaves {
+		return 0, fmt.Errorf(
+			"%w: idtimestamp %d: massif starts at leaf %d beyond on-chain leaves %d",
+			ErrGrantLeafNotFound, key, massifFirstLeaf, onchainLeaves)
+	}
+	searchable := mc.MassifLeafCount()
+	if rem := onchainLeaves - massifFirstLeaf; rem < searchable {
+		searchable = rem
+	}
+
+	ordinal := sort.Search(int(searchable), func(i int) bool {
 		return urkle.LeafKey(leafTable, uint32(i)) >= key
 	})
-	if uint64(ordinal) >= leaves || urkle.LeafKey(leafTable, uint32(ordinal)) != key {
+	if uint64(ordinal) >= searchable || urkle.LeafKey(leafTable, uint32(ordinal)) != key {
 		return 0, fmt.Errorf(
-			"%w: idtimestamp %d not committed within %d anchored leaves",
-			ErrGrantLeafNotFound, key, leaves)
+			"%w: idtimestamp %d not committed within this massif's anchored leaves",
+			ErrGrantLeafNotFound, key)
 	}
-	nodeIndex := mmr.MMRIndex(uint64(ordinal))
+	nodeIndex := urkle.LeafOrdinalToMMRIndex(mc.Start.FirstIndex, uint64(ordinal))
 	node, err := mc.Get(nodeIndex)
 	if err != nil {
 		return 0, fmt.Errorf("read owner log leaf %d (node %d): %w", ordinal, nodeIndex, err)

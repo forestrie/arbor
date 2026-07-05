@@ -92,15 +92,7 @@ func AssemblePublish(
 		if err != nil {
 			return nil, SealedState{}, fmt.Errorf("grant leaf commitment: %w", err)
 		}
-		headIndex, err := owner.HeadIndex(ctx, massifstorage.ObjectMassifData)
-		if err != nil {
-			return nil, SealedState{}, fmt.Errorf("owner log head massif: %w", err)
-		}
-		ownerMC, err := massifs.GetMassifContext(ctx, owner, headIndex)
-		if err != nil {
-			return nil, SealedState{}, fmt.Errorf("read owner massif %d: %w", headIndex, err)
-		}
-		nodeIndex, err := GrantLeafMMRIndex(&ownerMC, ownerOnchain.Size, sg.IDTimestampBe, leaf)
+		nodeIndex, err := FindGrantLeafMMRIndex(ctx, owner, ownerOnchain.Size, sg.IDTimestampBe, leaf)
 		if errors.Is(err, ErrGrantLeafNotFound) {
 			return nil, SealedState{}, fmt.Errorf(
 				"%w: grant leaf for %s not within owner on-chain size %d: %v",
@@ -109,9 +101,23 @@ func AssemblePublish(
 		if err != nil {
 			return nil, SealedState{}, err
 		}
-		inclusion, err = BuildInclusionProof(&ownerMC, ownerOnchain.Size, nodeIndex)
+		// The grant leaf's inclusion path can cross massif boundaries, so read
+		// nodes through a getter that routes each node to its owning massif.
+		ownerHead, err := owner.HeadIndex(ctx, massifstorage.ObjectMassifData)
+		if err != nil {
+			return nil, SealedState{}, fmt.Errorf("owner log head massif: %w", err)
+		}
+		ownerMC, err := massifs.GetMassifContext(ctx, owner, ownerHead)
+		if err != nil {
+			return nil, SealedState{}, fmt.Errorf("read owner massif %d: %w", ownerHead, err)
+		}
+		nodes := newOwnerNodeGetter(ctx, owner, ownerMC.Start.MassifHeight)
+		inclusion, err = BuildInclusionProof(nodes, ownerOnchain.Size, nodeIndex)
 		if err != nil {
 			return nil, SealedState{}, fmt.Errorf("grant inclusion proof: %w", err)
+		}
+		if err := verifyGrantInclusion(leaf, inclusion, ownerOnchain.Accumulator); err != nil {
+			return nil, SealedState{}, fmt.Errorf("grant inclusion self-check: %w", err)
 		}
 	}
 
