@@ -1,0 +1,74 @@
+# Build stage
+FROM golang:1.24-alpine AS builder
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+RUN apk add --no-cache git ca-certificates tzdata
+
+# Workspace root (Docker build context is expected to be the services/ directory)
+WORKDIR /build
+
+# Copy workspace file so Go sees all local modules
+COPY publisher/go.work ./publisher/go.work
+
+# Copy go module files for the publisher service
+COPY publisher/src/go.mod publisher/src/go.sum* ./publisher/src/
+
+# Copy shared packages used via go.work
+COPY pkgs/publishproof ./pkgs/publishproof
+COPY pkgs/s3storage ./pkgs/s3storage
+COPY pkgs/delegationcert ./pkgs/delegationcert
+COPY pkgs/logid ./pkgs/logid
+COPY pkgs/logredact ./pkgs/logredact
+
+# Copy local module clones explicitly so they are available to go.work and replaces
+COPY _deps/go-sigv4 ./_deps/go-sigv4
+COPY _deps/go-univocity ./_deps/go-univocity
+COPY _deps/go-datatrails-common ./_deps/go-datatrails-common
+COPY _deps/go-datatrails-serialization ./_deps/go-datatrails-serialization
+COPY _deps/go-datatrails-simplehash ./_deps/go-datatrails-simplehash
+COPY _deps/go-merklelog-azure ./_deps/go-merklelog-azure
+COPY _deps/go-merklelog-datatrails ./_deps/go-merklelog-datatrails
+COPY _deps/go-merklelog-fs ./_deps/go-merklelog-fs
+COPY _deps/go-merklelog-provider-testing ./_deps/go-merklelog-provider-testing
+COPY _deps/go-merklelog ./_deps/go-merklelog
+
+# Switch to module root for publisher
+WORKDIR /build/publisher/src
+
+# Download module dependencies (using go.work and replace directives)
+RUN go mod download
+
+# Copy application source
+COPY publisher/src/ .
+
+# Build the application
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+  -ldflags="-w -s -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
+  -o publisher \
+  ./cmd/publisher
+
+# Runtime stage
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates tzdata
+
+RUN addgroup -g 1000 publisher && \
+  adduser -D -u 1000 -G publisher publisher
+
+WORKDIR /app
+
+COPY --from=builder /build/publisher/src/publisher /app/publisher
+
+RUN chown -R publisher:publisher /app
+
+USER publisher
+
+EXPOSE 9090
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT:-9090}/healthz || exit 1
+
+ENTRYPOINT ["/app/publisher"]

@@ -1,0 +1,225 @@
+package publisher
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/forestrie/go-merklelog/massifs"
+
+	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
+)
+
+// MassifReaderFactory builds an R2-backed massif/checkpoint reader for a log.
+// *Readers is the production implementation; the interface lets tests inject
+// in-memory readers, mirroring the grants publishproof.ObjectGetter seam.
+type MassifReaderFactory interface {
+	Massif(logID logid.UUID, massifHeight uint8) (massifs.ObjectReader, error)
+}
+
+// PublishStatus is the terminal classification of a one-shot publish attempt.
+type PublishStatus int
+
+const (
+	// StatusPublished — the checkpoint was anchored on-chain by this attempt.
+	StatusPublished PublishStatus = iota
+	// StatusAlreadyAnchored — the on-chain state already covers this seal
+	// (idempotent success; natural under permissionless concurrency).
+	StatusAlreadyAnchored
+	// StatusOwnerNotAnchored — the grant's owner log is not yet anchored over
+	// the grant leaf; retry after the owner (root/authority) is published.
+	StatusOwnerNotAnchored
+	// StatusChainNotConfigured — the forest is bound to a chain absent from
+	// UNIVOCITY_RPC_URLS (D3); skip + alert, leave queued for later.
+	StatusChainNotConfigured
+	// StatusReverted — the contract rejected the submission (deterministic);
+	// alert with the decoded reason.
+	StatusReverted
+)
+
+func (s PublishStatus) String() string {
+	switch s {
+	case StatusPublished:
+		return "published"
+	case StatusAlreadyAnchored:
+		return "already_anchored"
+	case StatusOwnerNotAnchored:
+		return "owner_not_anchored"
+	case StatusChainNotConfigured:
+		return "chain_not_configured"
+	case StatusReverted:
+		return "reverted"
+	default:
+		return "unknown"
+	}
+}
+
+// PublishResult is the outcome of publishing one checkpoint object.
+type PublishResult struct {
+	Status   PublishStatus
+	Key      string
+	R        logid.UUID
+	LogID    logid.UUID
+	ChainID  uint64
+	Contract common.Address
+	TxHash   common.Hash
+	// SealedSize is the target seal's mmr size; OnchainSize is the resolved
+	// contract's logState size before this attempt (anchor-lag inputs).
+	SealedSize  uint64
+	OnchainSize uint64
+	Reason      string // decoded revert name, or skip explanation
+}
+
+// ShouldAck reports whether the queue message may be acked. Terminal outcomes
+// (published, already-anchored, deterministic revert) ack; transient outcomes
+// (owner not yet anchored, unconfigured chain) leave the message for redelivery.
+func (r PublishResult) ShouldAck() bool {
+	switch r.Status {
+	case StatusPublished, StatusAlreadyAnchored, StatusReverted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Publisher is the one-shot publish core: it turns a checkpoint object key into
+// an on-chain anchoring, resolving the forest's (chainId, contract) from public
+// R2 genesis (ADR-0047) and submitting with the gas-only EOA. It is safe for
+// concurrent use.
+type Publisher struct {
+	grants  publishproof.ObjectGetter
+	readers MassifReaderFactory
+	writer  *ChainWriter
+	logger  *slog.Logger
+}
+
+// NewPublisher wires the core from config. doer is the shared pooled HTTP
+// client; httpClient is its underlying *http.Client for the public grant store.
+func NewPublisher(cfg Config, httpClient *HTTPClient, logger *slog.Logger) (*Publisher, error) {
+	writer, err := NewChainWriter(cfg.RPCURLs, cfg.PublisherKeyHex)
+	if err != nil {
+		return nil, err
+	}
+	return &Publisher{
+		grants:  publishproof.NewPublicBucketGetter(cfg.GrantStoreURL, httpClient.GetClient()),
+		readers: NewReaders(cfg, httpClient, logger),
+		writer:  writer,
+		logger:  logger,
+	}, nil
+}
+
+// Close releases dialed chain clients.
+func (p *Publisher) Close() { p.writer.Close() }
+
+// From is the publisher's gas-only EOA address.
+func (p *Publisher) From() common.Address { return p.writer.From() }
+
+// Publish anchors a single checkpoint identified by its R2 object key. It never
+// returns an error for the expected "not yet / not here" outcomes — those are
+// carried in PublishResult.Status so the daemon can ack/nack correctly. A
+// non-nil error is an unexpected infrastructure failure worth retrying.
+func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, error) {
+	ck, err := ParseCheckpointKey(key)
+	if err != nil {
+		return PublishResult{}, err
+	}
+	res := PublishResult{Key: key, LogID: ck.LogID}
+
+	// 1. Resolve the forest's (R, chainId, contract) from public R2 genesis.
+	fc, err := publishproof.ResolveForestContract(ctx, p.grants, ck.LogID)
+	if err != nil {
+		if errors.Is(err, publishproof.ErrForestNotResolved) {
+			// No forest binding yet visible; retry later.
+			res.Status = StatusOwnerNotAnchored
+			res.Reason = "forest not resolved: " + err.Error()
+			return res, nil
+		}
+		return res, fmt.Errorf("resolve forest for %s: %w", ck.LogID, err)
+	}
+	res.R, res.ChainID, res.Contract = fc.R, fc.ChainID, fc.Contract
+
+	// 2. Select the chain client (D3: unconfigured chain -> skip + alert).
+	client, err := p.writer.Client(fc.ChainID)
+	if err != nil {
+		if errors.Is(err, ErrChainNotConfigured) {
+			res.Status = StatusChainNotConfigured
+			res.Reason = fmt.Sprintf("chainId %d not in UNIVOCITY_RPC_URLS", fc.ChainID)
+			return res, nil
+		}
+		return res, fmt.Errorf("chain client %d: %w", fc.ChainID, err)
+	}
+
+	// 3. Determine the grant's owner log so we can read its on-chain state and
+	//    build its reader (grant inclusion lives in the owner/authority log).
+	sg, err := publishproof.ReadStoredGrant(ctx, p.grants, fc.R, ck.LogID)
+	if err != nil {
+		return res, fmt.Errorf("read stored grant %s: %w", ck.LogID, err)
+	}
+
+	// 4. Build target + owner readers (forest-uniform massif height).
+	targetReader, err := p.readers.Massif(ck.LogID, ck.MassifHeight)
+	if err != nil {
+		return res, fmt.Errorf("target reader %s: %w", ck.LogID, err)
+	}
+	ownerReader := targetReader
+	if sg.OwnerLogID != ck.LogID {
+		ownerReader, err = p.readers.Massif(sg.OwnerLogID, ck.MassifHeight)
+		if err != nil {
+			return res, fmt.Errorf("owner reader %s: %w", sg.OwnerLogID, err)
+		}
+	}
+
+	// 5. Read on-chain state for both logs on the resolved contract.
+	targetState, err := publishproof.ReadLogState(ctx, client, fc.Contract, ck.LogID.ToContractBytes32())
+	if err != nil {
+		return res, fmt.Errorf("read logState(target) %s: %w", ck.LogID, err)
+	}
+	res.OnchainSize = targetState.Size
+	ownerState := targetState
+	if sg.OwnerLogID != ck.LogID {
+		ownerState, err = publishproof.ReadLogState(ctx, client, fc.Contract, sg.OwnerLogID.ToContractBytes32())
+		if err != nil {
+			return res, fmt.Errorf("read logState(owner) %s: %w", sg.OwnerLogID, err)
+		}
+	}
+
+	// 6. Assemble the publishCheckpoint calldata from public data.
+	calldata, sealed, err := publishproof.AssemblePublish(
+		ctx, p.grants, fc.R, ck.LogID,
+		targetReader, ck.MassifIndex, ownerReader,
+		targetState, ownerState,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, publishproof.ErrAlreadyAnchored):
+			res.Status = StatusAlreadyAnchored
+			res.SealedSize = targetState.Size
+			return res, nil
+		case errors.Is(err, publishproof.ErrOwnerNotAnchored):
+			res.Status = StatusOwnerNotAnchored
+			res.Reason = err.Error()
+			return res, nil
+		default:
+			return res, fmt.Errorf("assemble publish %s: %w", ck.LogID, err)
+		}
+	}
+	res.SealedSize = sealed.MMRSize
+
+	// 7. Submit and classify.
+	sub, err := p.writer.Submit(ctx, fc.ChainID, fc.Contract, calldata)
+	if err != nil {
+		return res, fmt.Errorf("submit %s chain %d: %w", ck.LogID, fc.ChainID, err)
+	}
+	res.TxHash = sub.TxHash
+	switch sub.Outcome {
+	case OutcomePublished:
+		res.Status = StatusPublished
+	case OutcomeReverted:
+		res.Status = StatusReverted
+		res.Reason = sub.Reason
+	}
+	return res, nil
+}
