@@ -36,9 +36,9 @@ var ErrOwnerNotAnchored = errors.New("owner log not anchored over the grant leaf
 // r is the forest root from ResolveForestContract; targetOnchain and
 // ownerOnchain are current logState reads from the resolved contract. owner
 // is the owner log's object reader (the same reader as target when the grant
-// is self-owned). The owner-side inclusion scan assumes the owner log's
-// leaves are within its head massif (authority logs hold one leaf per grant;
-// multi-massif authority logs are a documented follow-up).
+// is self-owned). The grant leaf is located across the owner log's massifs
+// (FindGrantLeafMMRIndex) and its inclusion proof is read through a
+// boundary-crossing node getter, so multi-massif authority logs are supported.
 func AssemblePublish(
 	ctx context.Context,
 	grants ObjectGetter,

@@ -234,12 +234,13 @@ func TestGrantLeafMMRIndex(t *testing.T) {
 	_, err := GrantLeafMMRIndex(mc, size, absent, leafFor(entries[1]))
 	require.ErrorIs(t, err, ErrGrantLeafNotFound)
 
-	// A present idtimestamp whose leaf does not verify is rejected (the
-	// stored grant does not match what was sequenced).
+	// A present idtimestamp whose leaf does not verify is an integrity failure
+	// (the stored grant does not match what was sequenced), distinct from the
+	// not-anchored case.
 	var idts100 [8]byte
 	binary.BigEndian.PutUint64(idts100[:], 100)
 	_, err = GrantLeafMMRIndex(mc, size, idts100, [32]byte{0xde, 0xad})
-	require.ErrorIs(t, err, ErrGrantLeafNotFound)
+	require.ErrorIs(t, err, ErrGrantLeafMismatch)
 
 	// The on-chain bound is respected: a leaf beyond the anchored size is
 	// not found even though it exists in the massif.

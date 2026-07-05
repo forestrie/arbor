@@ -50,9 +50,17 @@ var (
 	requestDataLog = new(big.Int).Lsh(big.NewInt(2), 224)
 )
 
-// ErrGrantLeafNotFound indicates the grant's leaf commitment is not present
-// in the scanned range of the owner log.
+// ErrGrantLeafNotFound indicates the grant's idtimestamp is not present in the
+// scanned (on-chain-bounded) range of the owner log — the grant is not yet
+// anchored, so the search moves on to the next massif.
 var ErrGrantLeafNotFound = errors.New("grant leaf not found in owner log")
+
+// ErrGrantLeafMismatch indicates the grant's idtimestamp is present in the
+// owner log but the committed leaf does not equal the stored grant's
+// commitment: the stored grant object is inconsistent with what was sequenced.
+// This is an integrity failure, distinct from "not anchored yet", so it is not
+// swallowed by the multi-massif walk.
+var ErrGrantLeafMismatch = errors.New("grant leaf does not match the stored grant commitment")
 
 // StoredGrant is the publish-grant material recovered from a stored grant
 // object: the calldata-shaped PublishGrant (Request derived from the grant
@@ -313,7 +321,7 @@ func GrantLeafMMRIndex(
 	if !bytes.Equal(node, leaf[:]) {
 		return 0, fmt.Errorf(
 			"%w: leaf at idtimestamp %d does not match the stored grant commitment",
-			ErrGrantLeafNotFound, key)
+			ErrGrantLeafMismatch, key)
 	}
 	return nodeIndex, nil
 }
