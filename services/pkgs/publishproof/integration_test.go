@@ -155,6 +155,19 @@ func (f *fixtureLog) addLeaves(leaves ...[32]byte) uint64 {
 	return size
 }
 
+// addEntry appends and indexes one entry exactly as the ranger committer
+// does: the mmr leaf is sha256(idtimestampBe || contentHash) and the v2 index
+// records the (idtimestamp, contentHash) pair at the leaf ordinal.
+func (f *fixtureLog) addEntry(idts uint64, contentHash [32]byte) uint64 {
+	var be [8]byte
+	binary.BigEndian.PutUint64(be[:], idts)
+	leaf := sha256.Sum256(append(be[:], contentHash[:]...))
+	size, err := f.mc.AddIndexedEntry(leaf[:])
+	require.NoError(f.t, err)
+	require.NoError(f.t, f.mc.IndexLeaf(idts, contentHash[:]))
+	return size
+}
+
 // commitAndSeal writes the massif object and a format-v3 checkpoint receipt
 // for the current mmr size, mirroring the production write path: the
 // consistency proof chains from the previously sealed size (one seal -> one

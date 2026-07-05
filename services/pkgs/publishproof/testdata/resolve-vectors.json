@@ -1,0 +1,92 @@
+{
+  "description": "Forest contract resolution conformance vectors (ADR-0047). Object keys are the public grant-store layout; bodies are base64. Both the univocity service resolution and publishproof must agree.",
+  "vectors": [
+    {
+      "name": "indexed data log resolves via index to genesis binding",
+      "logId": "20000000-0000-4000-8000-000000000002",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "pDoAAQmoAToAAQmpWCAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAQACAAAAAAAAAAToAAQmqVAAAAAAAAAAAAAAAAAAAAAAADA3gOgABCaxlODQ1MzI=",
+        "forests/index/forest/20000000-0000-4000-8000-000000000002": "MTAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      },
+      "want": {
+        "r": "10000000-0000-4000-8000-000000000001",
+        "chainId": 84532,
+        "contract": "0x00000000000000000000000000000000000c0De0"
+      }
+    },
+    {
+      "name": "forest root resolves without an index entry (self genesis)",
+      "logId": "10000000-0000-4000-8000-000000000001",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "pDoAAQmoAToAAQmpWCAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAQACAAAAAAAAAAToAAQmqVAAAAAAAAAAAAAAAAAAAAAAADA3gOgABCaxlODQ1MzI="
+      },
+      "want": {
+        "r": "10000000-0000-4000-8000-000000000001",
+        "chainId": 84532,
+        "contract": "0x00000000000000000000000000000000000c0De0"
+      }
+    },
+    {
+      "name": "genesis v2 accepted",
+      "logId": "10000000-0000-4000-8000-000000000001",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "pDoAAQmoAjoAAQmpWCAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAQACAAAAAAAAAAToAAQmqVAAAAAAAAAAAAAAAAAAAAAAADA3gOgABCaxhMQ=="
+      },
+      "want": {
+        "r": "10000000-0000-4000-8000-000000000001",
+        "chainId": 1,
+        "contract": "0x00000000000000000000000000000000000c0De0"
+      }
+    },
+    {
+      "name": "cbor-x tagged map and byte strings accepted",
+      "logId": "10000000-0000-4000-8000-000000000001",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "2QEDpDoAAQmp2EBYIAAAAAAAAAAAAAAAAAAAAAAQAAAAAABAAIAAAAAAAAABOgABCarYQFQAAAAAAAAAAAAAAAAAAAAAAAwN4DoAAQmsZTg0NTMyOgABCagB"
+      },
+      "want": {
+        "r": "10000000-0000-4000-8000-000000000001",
+        "chainId": 84532,
+        "contract": "0x00000000000000000000000000000000000c0De0"
+      }
+    },
+    {
+      "name": "unknown log is not resolved",
+      "logId": "20000000-0000-4000-8000-000000000002",
+      "objects": {},
+      "notResolved": true
+    },
+    {
+      "name": "dangling index (missing genesis) is not resolved",
+      "logId": "20000000-0000-4000-8000-000000000002",
+      "objects": {
+        "forests/index/forest/20000000-0000-4000-8000-000000000002": "MTAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAx"
+      },
+      "notResolved": true
+    },
+    {
+      "name": "genesis bootstrap-logid must match its object key",
+      "logId": "10000000-0000-4000-8000-000000000001",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "pDoAAQmoAToAAQmpWCAAAAAAAAAAAAAAAAAAAAAAMAAAAAAAQACAAAAAAAAAAzoAAQmqVAAAAAAAAAAAAAAAAAAAAAAADA3gOgABCaxlODQ1MzI="
+      },
+      "wantError": "bootstrap-logid"
+    },
+    {
+      "name": "legacy univocity-chainids rejected",
+      "logId": "10000000-0000-4000-8000-000000000001",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "pToAAQmsZTg0NTMyOgABCauBAToAAQmoAToAAQmpWCAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAQACAAAAAAAAAAToAAQmqVAAAAAAAAAAAAAAAAAAAAAAADA3g"
+      },
+      "wantError": "legacy"
+    },
+    {
+      "name": "non-string chain-id rejected",
+      "logId": "10000000-0000-4000-8000-000000000001",
+      "objects": {
+        "forests/forest/10000000-0000-4000-8000-000000000001/genesis.cbor": "pDoAAQmsGgABSjQ6AAEJqAE6AAEJqVggAAAAAAAAAAAAAAAAAAAAABAAAAAAAEAAgAAAAAAAAAE6AAEJqlQAAAAAAAAAAAAAAAAAAAAAAAwN4A=="
+      },
+      "wantError": "chain-id"
+    }
+  ]
+}
