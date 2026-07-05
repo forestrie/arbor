@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	github.com/ethereum/go-ethereum v1.17.1
+	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0-00010101000000-000000000000
 	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
 	github.com/forestrie/go-merklelog/mmr v0.0.2
@@ -51,6 +52,7 @@ require (
 )
 
 replace (
+	github.com/forestrie/arbor/services/pkgs/delegationcert => ../delegationcert
 	github.com/forestrie/arbor/services/pkgs/s3storage => ../s3storage
 	github.com/forestrie/go-merklelog/bloom => ../../_deps/go-merklelog/bloom
 	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs

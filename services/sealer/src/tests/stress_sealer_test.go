@@ -377,13 +377,10 @@ func assertCheckpointSize(
 	store, err := factory.NewStore(logID)
 	require.NoError(t, err)
 
-	codec, err := massifs.NewCBORCodec()
+	cp, err := massifs.GetCheckpoint(t.Context(), store, massifIndex)
 	require.NoError(t, err)
 
-	cp, err := massifs.GetCheckpoint(t.Context(), store, codec, massifIndex)
-	require.NoError(t, err)
-
-	require.Equal(t, expectedMMRSize, cp.MMRState.MMRSize)
+	require.Equal(t, expectedMMRSize, cp.MMRSize)
 }
 
 // fakeCustodianState holds ephemeral key pair for the fake custodian to use.

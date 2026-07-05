@@ -11,16 +11,13 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/fxamacker/cbor/v2"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/go-merklelog/massifs"
-	commoncbor "github.com/forestrie/go-merklelog/massifs/cbor"
-	commoncose "github.com/forestrie/go-merklelog/massifs/cose"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/forestrie/go-merklelog/mmr"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/google/uuid"
-	"github.com/veraison/go-cose"
 )
 
 const (
@@ -62,12 +59,10 @@ func CheckpointLog(
 		return fmt.Errorf("delegation lease manager is required")
 	}
 
-	// Derive a stable string representation when needed.
-	logUUID, err := uuid.FromBytes(logID)
-	if err != nil {
+	// Validate the logID is a well-formed UUID.
+	if _, err := uuid.FromBytes(logID); err != nil {
 		return fmt.Errorf("invalid logID bytes: %w", err)
 	}
-	logIDString := logUUID.String()
 	// 32-char lowercase hex for Custodian log-id resolution
 	logIdHex := hex.EncodeToString(logID)
 
@@ -114,29 +109,19 @@ func CheckpointLog(
 	case err != nil:
 		return fmt.Errorf("head checkpoint index: %w", err)
 	default:
-		codec, err := massifs.NewCBORCodec()
-		if err != nil {
-			return fmt.Errorf("init cbor codec: %w", err)
-		}
-		cp, err := massifs.GetCheckpoint(ctx, store, codec, lastCheckpointIndex)
+		data, err := store.CheckpointRead(ctx, lastCheckpointIndex)
 		if err != nil {
 			return fmt.Errorf("read checkpoint %d: %w", lastCheckpointIndex, err)
 		}
-
-		// Reject legacy checkpoint states.
-		if cp.MMRState.LegacySealRoot != nil || cp.MMRState.Version == int(massifs.MMRStateVersion0) {
-			return fmt.Errorf("legacy checkpoint state detected (no backward compatibility)")
+		receipt, err := massifs.DecodeCheckpointReceipt(data)
+		if err != nil {
+			return fmt.Errorf("decode checkpoint %d: %w", lastCheckpointIndex, err)
 		}
 		startMassifIndex = lastCheckpointIndex
-		baseState = cp.MMRState
+		// v3 checkpoint: the sealed size is the proof's tree-size-2; base peaks
+		// are rehydrated from the massif on first use below.
+		baseState = massifs.MMRState{MMRSize: receipt.Proof.TreeSize2}
 	}
-
-	codec, err := massifs.NewCBORCodec()
-	if err != nil {
-		return fmt.Errorf("init cbor codec: %w", err)
-	}
-	// Use log ID as issuer for checkpoint signing
-	rootSigner := massifs.NewRootSigner(logIDString, codec)
 
 	// Process each massif from the last checkpoint to head.
 	for mi := startMassifIndex; mi <= headMassifIndex; mi++ {
@@ -204,11 +189,10 @@ func CheckpointLog(
 		if err != nil {
 			return fmt.Errorf("failed to obtain delegation lease for log %s: %w", logIdHex, err)
 		}
-		coseSigner, kid, pubKey, err := lease.COSESigner()
+		coseSigner, kid, _, err := lease.COSESigner()
 		if err != nil {
 			return fmt.Errorf("delegation signer setup failed: %w", err)
 		}
-		keyIdentifier := hex.EncodeToString(kid)
 
 		// If the lease is expired or likely to expire during this run, abort so
 		// the message can be retried and a fresh lease acquired.
@@ -216,59 +200,44 @@ func CheckpointLog(
 			return ErrDelegationExpired
 		}
 
-		state := massifs.MMRState{
-			Version:         int(massifs.MMRStateVersionCurrent),
-			MMRSize:         curSize,
-			Peaks:           newPeaks,
-			Timestamp:       time.Now().UnixMilli(),
-			IDTimestamp:     mc.Start.LastID,
-			CommitmentEpoch: mc.Start.CommitmentEpoch,
-		}
-
-		signed, err := rootSigner.Sign1(
-			coseSigner,
-			keyIdentifier,
-			pubKey,
-			logIDString,
-			state,
-			nil,
-		)
+		// Checkpoint format v3 (ADR-0046): emit a draft-bryce consistency
+		// receipt from the previous checkpoint (baseState.MMRSize) to this seal
+		// (curSize); the sealer signs the detached raw-concat payload with the
+		// delegated key. Peak receipts are pre-signed with the same key so any
+		// holder of the checkpoint and replicated log data can mint inclusion
+		// receipts without the signing key. When the lease carries the
+		// univocity on-chain delegation proof it rides the unprotected header
+		// so the publisher can wire it into the publishCheckpoint calldata.
+		proof, err := massifs.BuildConsistencyProof(&mc, baseState.MMRSize, curSize)
 		if err != nil {
-			return fmt.Errorf("sign checkpoint (massif=%d): %w", mi, err)
+			return fmt.Errorf("build consistency proof (massif=%d): %w", mi, err)
 		}
-
-		// Inject delegation certificate bytes in unprotected header label 1000.
-		msg, err := commoncose.NewCoseSign1MessageFromCBOR(signed, massifs.NewCheckpointDecOptions()...)
+		signOpts := []massifs.CheckpointSignOption{massifs.WithPeakReceipts(kid)}
+		extras := map[int64]cbor.RawMessage{}
+		if len(lease.CertBytes) > 0 {
+			rawCert, err := cbor.Marshal(lease.CertBytes)
+			if err != nil {
+				return fmt.Errorf("encode delegation certificate (massif=%d): %w", mi, err)
+			}
+			extras[delegationCertUnprotectedLabel] = rawCert
+		}
+		if lease.OnchainProof != nil {
+			rawProof, err := cbor.Marshal(lease.OnchainProof)
+			if err != nil {
+				return fmt.Errorf("encode onchain delegation proof (massif=%d): %w", mi, err)
+			}
+			extras[massifs.SealDelegationProofLabel] = rawProof
+		}
+		if len(extras) > 0 {
+			signOpts = append(signOpts, massifs.WithUnprotectedExtras(extras))
+		}
+		receiptBytes, err := massifs.SignCheckpointReceipt(coseSigner, proof, newPeaks, signOpts...)
 		if err != nil {
-			return fmt.Errorf("decode signed checkpoint: %w", err)
+			return fmt.Errorf("sign checkpoint receipt (massif=%d): %w", mi, err)
 		}
-		if msg.Headers.Unprotected == nil {
-			msg.Headers.Unprotected = cose.UnprotectedHeader{}
-		}
-		msg.Headers.Unprotected[delegationCertUnprotectedLabel] = lease.CertBytes
-
-		logger.Info("injecting delegation cert",
-			"log_id", logIDString,
-			"label", delegationCertUnprotectedLabel,
-			"cert_len", len(lease.CertBytes),
-			"unprotected_keys_before", len(msg.Headers.Unprotected)-1,
-			"unprotected_keys_after", len(msg.Headers.Unprotected),
-		)
-
-		// Marshal using direct CBOR to preserve all unprotected header keys.
-		// go-cose's MarshalCBOR() doesn't preserve arbitrary keys like 1000.
-		signedWithDeleg, err := marshalSign1WithAllHeaders(msg.Sign1Message)
-		if err != nil {
-			return fmt.Errorf("encode checkpoint: %w", err)
-		}
-
-		logger.Info("marshaled checkpoint with delegation cert",
-			"log_id", logIDString,
-			"bytes_len", len(signedWithDeleg),
-		)
 
 		// Write checkpoint with optimistic concurrency.
-		if err := putCheckpoint(ctx, store, codec, mi, curSize, signedWithDeleg); err != nil {
+		if err := putCheckpoint(ctx, store, mi, curSize, receiptBytes); err != nil {
 			return fmt.Errorf("write checkpoint (massif=%d): %w", mi, err)
 		}
 
@@ -280,7 +249,7 @@ func CheckpointLog(
 	return nil
 }
 
-func putCheckpoint(ctx context.Context, store *merklelog.Store, codec commoncbor.CBORCodec, massifIndex uint32, mmrSize uint64, data []byte) error {
+func putCheckpoint(ctx context.Context, store *merklelog.Store, massifIndex uint32, mmrSize uint64, data []byte) error {
 	const maxAttempts = 5
 
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -306,9 +275,11 @@ func putCheckpoint(ctx context.Context, store *merklelog.Store, codec commoncbor
 		}
 
 		// If someone else already wrote a checkpoint at an equal-or-newer size, we can stop.
-		cp, err := massifs.GetCheckpoint(ctx, store, codec, massifIndex)
-		if err == nil && cp.MMRState.MMRSize >= mmrSize {
-			return nil
+		if existingData, rerr := store.CheckpointRead(ctx, massifIndex); rerr == nil {
+			if receipt, derr := massifs.DecodeCheckpointReceipt(existingData); derr == nil &&
+				receipt.Proof.TreeSize2 >= mmrSize {
+				return nil
+			}
 		}
 
 		etag, ok, err := store.CheckpointETag(massifIndex)
@@ -333,69 +304,6 @@ func putCheckpoint(ctx context.Context, store *merklelog.Store, codec commoncbor
 	}
 
 	return fmt.Errorf("checkpoint write retries exceeded for massif %d", massifIndex)
-}
-
-// marshalSign1WithAllHeaders marshals a COSE_Sign1 message preserving all
-// unprotected header keys, including application-private labels like 1000.
-// go-cose's MarshalCBOR() only serializes known/registered header labels,
-// so we manually construct the CBOR structure.
-func marshalSign1WithAllHeaders(msg *cose.Sign1Message) ([]byte, error) {
-	// Encode protected headers to bytes (go-cose does this internally too).
-	// MarshalProtected returns CBOR-encoded bstr (already wrapped).
-	protectedBytes, err := msg.Headers.MarshalProtected()
-	if err != nil {
-		return nil, fmt.Errorf("marshal protected headers: %w", err)
-	}
-
-	// Convert unprotected header map to use int64 keys explicitly.
-	// UnprotectedHeader is map[any]any, so we need type assertion for each key.
-	unprotectedMap := make(map[int64]any)
-	for k, v := range msg.Headers.Unprotected {
-		switch key := k.(type) {
-		case int64:
-			unprotectedMap[key] = v
-		case int:
-			unprotectedMap[int64(key)] = v
-		default:
-			return nil, fmt.Errorf("unsupported unprotected header key type: %T", k)
-		}
-	}
-
-	// Use deterministic encoding
-	encMode, err := cbor.EncOptions{
-		Sort: cbor.SortCoreDeterministic,
-	}.EncMode()
-	if err != nil {
-		return nil, fmt.Errorf("create cbor enc mode: %w", err)
-	}
-
-	// Encode unprotected header separately so we can use it as RawMessage.
-	unprotectedBytes, err := encMode.Marshal(unprotectedMap)
-	if err != nil {
-		return nil, fmt.Errorf("marshal unprotected headers: %w", err)
-	}
-
-	// COSE_Sign1 = [
-	//   protected : bstr,
-	//   unprotected : map,
-	//   payload : bstr / nil,
-	//   signature : bstr
-	// ]
-	// Use cbor.RawMessage for already-encoded CBOR to prevent double-encoding.
-	structure := []any{
-		cbor.RawMessage(protectedBytes),
-		cbor.RawMessage(unprotectedBytes),
-		msg.Payload,
-		msg.Signature,
-	}
-
-	// Wrap in CBOR tag 18 (COSE_Sign1)
-	tagged := cbor.Tag{
-		Number:  18,
-		Content: structure,
-	}
-
-	return encMode.Marshal(tagged)
 }
 
 func kidFromECDSAPublicKey(pub *ecdsa.PublicKey) ([]byte, error) {

@@ -22,6 +22,12 @@ type DelegationLease struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 
+	// OnchainProof is the univocity publishCheckpoint delegation material
+	// issued with the lease (plan-0003); the sealer embeds it in the
+	// checkpoint unprotected header for the publisher. Nil when the issuer
+	// does not produce it.
+	OnchainProof *delegationcert.OnchainDelegationProof
+
 	// Authority binding from the univocity authorize decision (empty when the
 	// legacy trust-root path is used). Binds the lease to a specific chain /
 	// contract, closing the cross-deployment replay gap (plan-0003).
@@ -32,7 +38,7 @@ type DelegationLease struct {
 }
 
 // COSESigner returns a veraison/go-cose Signer + kid + public key to use with
-// go-merklelog RootSigner.
+// go-merklelog SignCheckpointReceipt.
 func (d *DelegationLease) COSESigner() (cose.Signer, []byte, *ecdsa.PublicKey, error) {
 	if d == nil || d.PrivateKey == nil || d.PublicKey == nil {
 		return nil, nil, nil, fmt.Errorf("delegation lease missing key material")

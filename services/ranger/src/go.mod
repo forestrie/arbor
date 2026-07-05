@@ -13,8 +13,9 @@ require (
 	github.com/forestrie/go-merklelog/massifs v0.0.3
 	github.com/forestrie/go-merklelog/mmr v0.4.0
 	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000
-	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/google/uuid v1.6.0
+	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -25,12 +26,12 @@ require (
 	github.com/datatrails/go-datatrails-simplehash v0.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.2.1 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/forestrie/go-merklelog/bloom v0.0.0-00010101000000-000000000000 // indirect
+	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.23.0 // indirect
 	github.com/ldclabs/cose/go v0.0.0-20221214142927-d22c1cfc2154 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
@@ -51,15 +52,16 @@ require (
 )
 
 replace (
-	github.com/forestrie/arbor/services/pkgs/logredact => ../../pkgs/logredact
 	github.com/datatrails/go-datatrails-common => ../../_deps/go-datatrails-common
 	github.com/datatrails/go-datatrails-serialization/eventsv1 => ../../_deps/go-datatrails-serialization/eventsv1
 	github.com/datatrails/go-datatrails-simplehash => ../../_deps/go-datatrails-simplehash
+	github.com/forestrie/arbor/services/pkgs/logredact => ../../pkgs/logredact
 	github.com/forestrie/arbor/services/pkgs/s3storage => ../../pkgs/s3storage
 	github.com/forestrie/go-merklelog-azure => ../../_deps/go-merklelog-azure
 	github.com/forestrie/go-merklelog-datatrails => ../../_deps/go-merklelog-datatrails
 	github.com/forestrie/go-merklelog-fs => ../../_deps/go-merklelog-fs
 	github.com/forestrie/go-merklelog-provider-testing => ../../_deps/go-merklelog-provider-testing
+	github.com/forestrie/go-merklelog/bloom => ../../_deps/go-merklelog/bloom
 	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs
 	github.com/forestrie/go-merklelog/mmr => ../../_deps/go-merklelog/mmr
 	github.com/forestrie/go-merklelog/urkle => ../../_deps/go-merklelog/urkle
