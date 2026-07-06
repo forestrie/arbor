@@ -23,6 +23,9 @@ includes:
   sealer:
     taskfile: taskfiles/service-sealer.yml
     dir: .
+  publisher:
+    taskfile: taskfiles/service-publisher.yml
+    dir: .
   custodian:
     taskfile: taskfiles/service-custodian.yml
     dir: .
