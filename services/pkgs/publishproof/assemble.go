@@ -70,16 +70,25 @@ func AssemblePublish(
 			ErrAlreadyAnchored, targetOnchain.Size, sealed.MMRSize)
 	}
 
-	// Catch-up: rebuild the proof from the massif when the on-chain state
-	// does not align with the seal's own proof.
-	if len(receipt.ConsistencyProofs) != 1 ||
-		receipt.ConsistencyProofs[0].TreeSize1 != targetOnchain.Size {
-		proof, _, err := BuildCheckpointProof(ctx, target, targetOnchain.Size, massifIndex)
-		if err != nil {
-			return nil, SealedState{}, fmt.Errorf("rebuild catch-up proof: %w", err)
-		}
-		receipt.ConsistencyProofs = []ConsistencyProof{proof}
+	// Catch-up: chain the pending checkpoints' own embedded per-seal proofs from
+	// the on-chain size up to this seal. Each checkpoint object carries exactly
+	// its (sealed(K-1) -> sealed(K)) link; the contract's
+	// verifyConsistencyProofChain links them from the on-chain accumulator. This
+	// relays the sealer's already-computed proofs — no massif node data is read
+	// for the earlier massifs, and multi-massif catch-up needs no spanning reader.
+	//
+	// Invariant: on-chain size is always a sealed boundary (publishCheckpoint sets
+	// log.size = the final proof's treeSize2, a checkpoint's sealed size), so the
+	// chain always starts at some embedded proof's treeSize1.
+	chain, err := BuildEmbeddedProofChain(ctx, target, targetOnchain.Size, massifIndex, receipt.ConsistencyProofs)
+	if err != nil {
+		return nil, SealedState{}, fmt.Errorf("build catch-up proof chain: %w", err)
 	}
+	if last := chain[len(chain)-1]; last.TreeSize2 != sealed.MMRSize {
+		return nil, SealedState{}, fmt.Errorf(
+			"head proof treeSize2 %d != sealed size %d", last.TreeSize2, sealed.MMRSize)
+	}
+	receipt.ConsistencyProofs = chain
 
 	inclusion := InclusionProof{Index: 0, Path: [][32]byte{}}
 	bootstrap := logID == r && targetOnchain.Size == 0 && ownerOnchain.Size == 0
@@ -126,4 +135,66 @@ func AssemblePublish(
 		return nil, SealedState{}, fmt.Errorf("encode publishCheckpoint: %w", err)
 	}
 	return calldata, sealed, nil
+}
+
+// maxProofChainSteps bounds the catch-up walk (defensive against a corrupt or
+// far-behind on-chain size). A publisher this far behind should reconcile.
+const maxProofChainSteps = 4096
+
+// BuildEmbeddedProofChain assembles the consistency-proof chain from the on-chain
+// size up to the head checkpoint by RELAYING each pending checkpoint's own
+// embedded per-seal proof — no massif node data is read. Each checkpoint object
+// carries exactly its (sealed(K-1) -> sealed(K)) link, so the publisher walks
+// from the head massif downward, reading one checkpoint object per step, until a
+// link starts at the on-chain size; the contract's verifyConsistencyProofChain
+// links them from the on-chain accumulator up to the head seal.
+//
+// headProofs is the head checkpoint's already-decoded embedded proof. The
+// returned chain is ascending (oldest link first). A one-massif catch-up returns
+// immediately with the single head link and reads nothing extra.
+func BuildEmbeddedProofChain(
+	ctx context.Context, reader massifs.ObjectReader,
+	onchainSize uint64, headMassifIndex uint32, headProofs []ConsistencyProof,
+) ([]ConsistencyProof, error) {
+	chain := make([]ConsistencyProof, 0, 8)
+	cur := headProofs
+	k := headMassifIndex
+	for steps := 0; ; steps++ {
+		if steps > maxProofChainSteps {
+			return nil, fmt.Errorf(
+				"proof chain exceeds %d steps catching up from on-chain size %d", maxProofChainSteps, onchainSize)
+		}
+		if len(cur) != 1 {
+			return nil, fmt.Errorf("checkpoint %d carries %d embedded proofs, want exactly 1", k, len(cur))
+		}
+		p := cur[0]
+		// Links must be contiguous: this step's TreeSize2 feeds the next's TreeSize1.
+		if len(chain) > 0 && p.TreeSize2 != chain[0].TreeSize1 {
+			return nil, fmt.Errorf(
+				"checkpoint %d proof treeSize2 %d != next treeSize1 %d (non-contiguous)",
+				k, p.TreeSize2, chain[0].TreeSize1)
+		}
+		chain = append([]ConsistencyProof{p}, chain...) // prepend -> ascending
+
+		switch {
+		case p.TreeSize1 == onchainSize:
+			return chain, nil // reached the on-chain accumulator
+		case p.TreeSize1 < onchainSize:
+			return nil, fmt.Errorf(
+				"checkpoint %d proof treeSize1 %d below on-chain size %d (non-contiguous)", k, p.TreeSize1, onchainSize)
+		case k == 0:
+			return nil, fmt.Errorf("reached genesis without reaching on-chain size %d", onchainSize)
+		}
+
+		k--
+		cp, err := massifs.GetCheckpoint(ctx, reader, k)
+		if err != nil {
+			return nil, fmt.Errorf("read checkpoint %d: %w", k, err)
+		}
+		rec, err := DecodeCheckpointReceipt(cp.Raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode checkpoint %d: %w", k, err)
+		}
+		cur = rec.ConsistencyProofs
+	}
 }
