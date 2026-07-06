@@ -20,8 +20,12 @@ import (
 type AssembledPublish struct {
 	ChainID  uint64
 	Contract common.Address
-	Calldata []byte
-	Ack      func(SubmitResult)
+	// LogID + SealedSize let the collector make the ack decision authoritative on
+	// on-chain size (re-read logState on revert; ack iff onchain ≥ sealed).
+	LogID      [32]byte
+	SealedSize uint64
+	Calldata   []byte
+	Ack        func(SubmitResult)
 }
 
 // SubmitBatch groups requests by chain and submits each group with sequential
@@ -162,19 +166,19 @@ func (w *ChainWriter) submitChainGroup(ctx context.Context, chainID uint64, grou
 			return
 		}
 		if err := s.SendTransaction(ctx, signed); err != nil {
-			// Admission failure. Classify this one (a node may reject with revert
-			// data at send), then STOP: the suffix is never sent, keeping the
-			// nonce sequence gap-free. The reserved nonces base+i.. roll back.
-			if reason, ok := w.classifyRevert(err); ok {
-				r.Ack(SubmitResult{Outcome: OutcomeReverted, ChainID: chainID,
-					Reason: reason, Retryable: revertRetryable(reason)})
-			} else {
-				r.Ack(SubmitResult{Outcome: OutcomeUnsubmitted, ChainID: chainID, Reason: err.Error()})
+			// Admission failure — the tx never mined, so retry via redelivery (a
+			// would-revert or already-anchored tx is caught at re-assemble). STOP:
+			// the suffix is never sent, keeping the nonce sequence gap-free; the
+			// reserved nonces base+i.. roll back via the deferred reconcile.
+			reason := err.Error()
+			if name, ok := w.classifyRevert(err); ok {
+				reason = name
 			}
+			r.Ack(SubmitResult{Outcome: OutcomeUnsubmitted, ChainID: chainID, Reason: reason})
 			nackFrom(group, i+1, chainID, nil)
 			return
 		}
-		tracker.watch(signed, r.Ack)
+		tracker.watch(signed, r.LogID, r.SealedSize, r.Ack)
 		admitted++
 	}
 }
@@ -192,9 +196,11 @@ func nackFrom(group []AssembledPublish, from int, chainID uint64, reason error) 
 
 // watchItem tracks one admitted tx awaiting its receipt.
 type watchItem struct {
-	tx    *types.Transaction
-	ack   func(SubmitResult)
-	start time.Time
+	tx         *types.Transaction
+	logID      [32]byte
+	sealedSize uint64
+	ack        func(SubmitResult)
+	start      time.Time
 }
 
 // receiptTracker is the persistent per-chain receipt collector. One goroutine
@@ -222,9 +228,9 @@ func (w *ChainWriter) tracker(ctx context.Context, chainID uint64, s txSender) *
 	return t
 }
 
-func (t *receiptTracker) watch(tx *types.Transaction, ack func(SubmitResult)) {
+func (t *receiptTracker) watch(tx *types.Transaction, logID [32]byte, sealedSize uint64, ack func(SubmitResult)) {
 	t.mu.Lock()
-	t.items[tx.Hash()] = &watchItem{tx: tx, ack: ack, start: time.Now()}
+	t.items[tx.Hash()] = &watchItem{tx: tx, logID: logID, sealedSize: sealedSize, ack: ack, start: time.Now()}
 	t.mu.Unlock()
 }
 
@@ -268,7 +274,11 @@ func (t *receiptTracker) run(ctx context.Context) {
 			rcpt, err := t.s.TransactionReceipt(ctx, hash)
 			switch {
 			case err == nil:
-				t.resolve(hash, t.w.classifyReceipt(ctx, t.s, t.chainID, it.tx, rcpt))
+				var to common.Address
+				if it.tx.To() != nil {
+					to = *it.tx.To()
+				}
+				t.resolve(hash, t.w.classifyReceipt(ctx, t.s, t.chainID, to, it.logID, it.sealedSize, it.tx, rcpt))
 			case errors.Is(err, ethereum.NotFound):
 				if time.Since(it.start) > t.w.receiptTimeout {
 					t.resolve(hash, SubmitResult{Outcome: OutcomeUnsubmitted,
@@ -276,7 +286,14 @@ func (t *receiptTracker) run(ctx context.Context) {
 				}
 				// else: still pending, keep polling.
 			default:
-				// transient RPC error; keep the item and retry next tick.
+				// A transient RPC error: retry next tick, but do not retry
+				// forever — a persistent fault would pin the item and disable the
+				// nonce reseed (R2-3). Abandon on total elapsed so the message
+				// redelivers and inflight is released.
+				if time.Since(it.start) > t.w.receiptTimeout {
+					t.resolve(hash, SubmitResult{Outcome: OutcomeUnsubmitted,
+						ChainID: t.chainID, TxHash: hash, Reason: "receipt poll error: " + err.Error()})
+				}
 			}
 		}
 	}

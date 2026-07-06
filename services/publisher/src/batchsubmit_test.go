@@ -2,7 +2,6 @@ package publisher
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"math/big"
 	"strings"
@@ -11,9 +10,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 )
 
 // fakeSender is a programmable txSender for offline batch-submit tests.
@@ -24,6 +24,7 @@ type fakeSender struct {
 	sent       []*types.Transaction
 	sendErr    map[uint64]error // nonce -> admission failure
 	timeout    map[uint64]bool  // nonce -> admitted but never mined
+	revert     map[uint64]bool  // nonce -> mines with a failed (reverted) receipt
 	receipts   map[common.Hash]*types.Receipt
 	callErr    error // returned by CallContract (revert-reason replay)
 }
@@ -33,6 +34,7 @@ func newFakeSender(nonce uint64) *fakeSender {
 		nonce:    nonce,
 		sendErr:  map[uint64]error{},
 		timeout:  map[uint64]bool{},
+		revert:   map[uint64]bool{},
 		receipts: map[common.Hash]*types.Receipt{},
 	}
 }
@@ -59,7 +61,12 @@ func (f *fakeSender) SendTransaction(_ context.Context, tx *types.Transaction) e
 		return err
 	}
 	f.sent = append(f.sent, tx)
-	if !f.timeout[tx.Nonce()] {
+	switch {
+	case f.timeout[tx.Nonce()]:
+		// no receipt — never mines
+	case f.revert[tx.Nonce()]:
+		f.receipts[tx.Hash()] = &types.Receipt{Status: types.ReceiptStatusFailed, BlockNumber: big.NewInt(1)}
+	default:
 		f.receipts[tx.Hash()] = &types.Receipt{Status: types.ReceiptStatusSuccessful, BlockNumber: big.NewInt(1)}
 	}
 	return nil
@@ -211,30 +218,64 @@ func TestSubmitBatchReceiptTimeout(t *testing.T) {
 	}
 }
 
-func TestClassifyReceiptTransientVsTerminal(t *testing.T) {
-	w := newTestWriter(t)
+// TestClassifyReceiptReReadAuthority: on a revert the ack decision is made by
+// re-reading logState, not by the revert name. onchain >= sealed -> Superseded
+// (ack); onchain < sealed -> Reverted (nack); read error -> Unsubmitted (nack).
+func TestClassifyReceiptReReadAuthority(t *testing.T) {
 	ctx := context.Background()
-	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(1), Nonce: 0, Gas: 21000})
+	addr := common.HexToAddress("0x01")
+	var logID [32]byte
+	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(1), Nonce: 0, Gas: 21000, To: &addr})
+	failed := &types.Receipt{Status: types.ReceiptStatusFailed, BlockNumber: big.NewInt(1)}
 
-	// Success.
-	if r := w.classifyReceipt(ctx, newFakeSender(0), 1, tx, &types.Receipt{Status: types.ReceiptStatusSuccessful}); r.Outcome != OutcomePublished {
+	// Success — no re-read needed.
+	w := newTestWriter(t)
+	if r := w.classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, &types.Receipt{Status: types.ReceiptStatusSuccessful}); r.Outcome != OutcomePublished {
 		t.Errorf("success outcome = %v, want Published", r.Outcome)
 	}
 
-	// Reverted, transient (SizeMustIncrease) -> Retryable.
-	transient := newFakeSender(0)
-	transient.callErr = &fakeDataError{data: revertData(t, "SizeMustIncrease", uint64(3), uint64(5))}
-	r := w.classifyReceipt(ctx, transient, 1, tx, &types.Receipt{Status: types.ReceiptStatusFailed, BlockNumber: big.NewInt(1)})
-	if r.Outcome != OutcomeReverted || !r.Retryable {
-		t.Errorf("transient revert = {%v retryable=%v}, want {Reverted retryable=true}", r.Outcome, r.Retryable)
+	withLogState := func(size uint64, err error) *ChainWriter {
+		cw := newTestWriter(t)
+		cw.readLogState = func(context.Context, publishproof.ContractCaller, common.Address, [32]byte) (publishproof.LogState, error) {
+			return publishproof.LogState{Size: size}, err
+		}
+		return cw
 	}
 
-	// Reverted, terminal (GrantRequirement) -> not retryable.
-	terminal := newFakeSender(0)
-	terminal.callErr = &fakeDataError{data: revertData(t, "GrantRequirement", big.NewInt(1), big.NewInt(2))}
-	r = w.classifyReceipt(ctx, terminal, 1, tx, &types.Receipt{Status: types.ReceiptStatusFailed, BlockNumber: big.NewInt(1)})
-	if r.Outcome != OutcomeReverted || r.Retryable {
-		t.Errorf("terminal revert = {%v retryable=%v}, want {Reverted retryable=false}", r.Outcome, r.Retryable)
+	// Revert but on-chain already covers our sealed size -> Superseded (ack).
+	if r := withLogState(10, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeSuperseded || !r.ShouldAck() {
+		t.Errorf("onchain>=sealed = %v (ack=%v), want Superseded/ack", r.Outcome, r.ShouldAck())
+	}
+	// Revert and on-chain still below sealed -> Reverted (nack).
+	if r := withLogState(5, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeReverted || r.ShouldAck() {
+		t.Errorf("onchain<sealed = %v (ack=%v), want Reverted/nack", r.Outcome, r.ShouldAck())
+	}
+	// Re-read error -> Unsubmitted (nack, never ack on uncertainty).
+	if r := withLogState(0, errors.New("rpc down")).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeUnsubmitted || r.ShouldAck() {
+		t.Errorf("reread error = %v (ack=%v), want Unsubmitted/nack", r.Outcome, r.ShouldAck())
+	}
+}
+
+// TestSubmitBatchSupersededAcks drives a reverting tx through the collector and
+// asserts the re-read (onchain >= sealed) yields an ack via the batch path.
+func TestSubmitBatchSupersededAcks(t *testing.T) {
+	s := newFakeSender(0)
+	s.revert[0] = true // the tx mines but reverts
+	w := writerWithSender(t, 1, s)
+	w.readLogState = func(context.Context, publishproof.ContractCaller, common.Address, [32]byte) (publishproof.LogState, error) {
+		return publishproof.LogState{Size: 100}, nil // already anchored past our seal
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sink := newAckSink()
+	req := sink.req("r0", 1)
+	req.SealedSize = 42
+	w.SubmitBatch(ctx, []AssembledPublish{req})
+	sink.waitAll(t)
+
+	if r := sink.result("r0"); r.Outcome != OutcomeSuperseded || !r.ShouldAck() {
+		t.Errorf("reverted-but-anchored = %v (ack=%v), want Superseded/ack", r.Outcome, r.ShouldAck())
 	}
 }
 
@@ -295,19 +336,4 @@ func TestChainNonceReconcileRollsBack(t *testing.T) {
 	if cn.next != 1 || cn.inflight != 1 {
 		t.Errorf("after reconcile: next=%d inflight=%d, want 1/1 (rolled back to the failed nonce)", cn.next, cn.inflight)
 	}
-}
-
-// revertData builds "0x"+selector+abi-encoded-args for a named IUnivocity error.
-func revertData(t *testing.T, name string, args ...interface{}) string {
-	t.Helper()
-	errABI, err := abi.JSON(strings.NewReader(univocityErrorsABI))
-	if err != nil {
-		t.Fatalf("parse errors abi: %v", err)
-	}
-	e := errABI.Errors[name]
-	packed, err := e.Inputs.Pack(args...)
-	if err != nil {
-		t.Fatalf("pack %s args: %v", name, err)
-	}
-	return "0x" + hex.EncodeToString(append(append([]byte{}, e.ID.Bytes()[:4]...), packed...))
 }

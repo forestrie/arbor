@@ -16,6 +16,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 )
 
 // ErrChainNotConfigured is returned when a resolved forest is bound to a chain
@@ -30,8 +32,13 @@ const (
 	// OutcomePublished — the transaction mined successfully; the checkpoint is
 	// anchored.
 	OutcomePublished SubmitOutcome = iota
-	// OutcomeReverted — the contract rejected the submission. Reason carries the
-	// decoded IUnivocity error name when recognised.
+	// OutcomeSuperseded — the tx reverted, but a fresh logState read shows the
+	// on-chain size already covers our sealed size (anchored by us or another
+	// publisher, or subsumed by a later seal). Terminal success — ack.
+	OutcomeSuperseded
+	// OutcomeReverted — the tx reverted and on-chain size is still below our
+	// sealed size, so the seal is NOT anchored. Always retry: redelivery rebuilds
+	// a fresh proof from the advanced size.
 	OutcomeReverted
 	// OutcomeUnsubmitted — the tx never entered the mempool (admission failure or
 	// a stopped suffix after a sequential-admission gap) or was not mined before
@@ -59,6 +66,8 @@ func (r SubmitResult) String() string {
 	switch r.Outcome {
 	case OutcomePublished:
 		return fmt.Sprintf("published chain=%d tx=%s gas=%d", r.ChainID, r.TxHash.Hex(), r.GasUsed)
+	case OutcomeSuperseded:
+		return fmt.Sprintf("superseded chain=%d reason=%s", r.ChainID, r.Reason)
 	case OutcomeReverted:
 		return fmt.Sprintf("reverted chain=%d reason=%s", r.ChainID, r.Reason)
 	case OutcomeUnsubmitted:
@@ -68,18 +77,15 @@ func (r SubmitResult) String() string {
 	}
 }
 
-// ShouldAck reports whether the queue message may be acked given this submission
-// outcome. Published and terminal (deterministic) reverts ack; transient reverts
-// and unsubmitted/timed-out txs are retried via redelivery.
+// ShouldAck reports whether the queue message may be acked. The decision is
+// authoritative on on-chain size: only Published (we anchored it) and Superseded
+// (a fresh logState read shows it is already anchored/subsumed) ack. Every other
+// outcome — including any revert where on-chain size is still below our sealed
+// size, and unknown reverts — is retried via redelivery. Safety over liveness: a
+// deterministically-bad checkpoint loops until the give-up guard / DLQ, but a
+// valid one is never dropped.
 func (r SubmitResult) ShouldAck() bool {
-	switch r.Outcome {
-	case OutcomePublished:
-		return true
-	case OutcomeReverted:
-		return !r.Retryable
-	default: // OutcomeUnsubmitted
-		return false
-	}
+	return r.Outcome == OutcomePublished || r.Outcome == OutcomeSuperseded
 }
 
 // parsePublisherKey decodes the gas-only EOA private key from hex (0x optional).
@@ -132,6 +138,10 @@ type ChainWriter struct {
 	// trackers holds one persistent receipt collector per chain (lazy start).
 	trackers map[uint64]*receiptTracker
 
+	// readLogState reads a log's on-chain state; defaults to
+	// publishproof.ReadLogState, overridable in tests.
+	readLogState func(ctx context.Context, caller publishproof.ContractCaller, contract common.Address, logID [32]byte) (publishproof.LogState, error)
+
 	// testSenders, when set for a chain, replaces the dialed client (tests only).
 	testSenders map[uint64]txSender
 }
@@ -174,6 +184,7 @@ func NewChainWriter(rpcURLs map[uint64]string, keyHex string, wc WriteConfig) (*
 		maxPriorityWei:      wc.MaxPriorityFeePerGasWei,
 		receiptTimeout:      wc.ReceiptTimeout,
 		receiptPollInterval: wc.ReceiptPollInterval,
+		readLogState:        publishproof.ReadLogState,
 		clients:             make(map[uint64]*ethclient.Client),
 		sendLocks:           make(map[uint64]*sync.Mutex),
 		nonces:              make(map[uint64]*chainNonce),
@@ -275,17 +286,39 @@ func (w *ChainWriter) buildAndSign(
 
 // classifyReceipt turns a mined receipt into a SubmitResult, decoding the revert
 // reason (and transient/terminal split) when the tx failed.
+// classifyReceipt turns a mined receipt into a SubmitResult. On a revert the ack
+// decision is authoritative on on-chain size: re-read logState and mark
+// Superseded (ack) iff it already covers our sealed size, else Reverted (nack).
+// contract/logID/sealedSize identify the log for the re-read.
 func (w *ChainWriter) classifyReceipt(
-	ctx context.Context, s txSender, chainID uint64, tx *types.Transaction, rcpt *types.Receipt,
+	ctx context.Context, s txSender, chainID uint64, contract common.Address,
+	logID [32]byte, sealedSize uint64, tx *types.Transaction, rcpt *types.Receipt,
 ) SubmitResult {
 	if rcpt.Status == types.ReceiptStatusSuccessful {
 		return SubmitResult{Outcome: OutcomePublished, ChainID: chainID, TxHash: tx.Hash(), GasUsed: rcpt.GasUsed}
 	}
 	reason := w.revertReasonAt(ctx, s, tx, rcpt.BlockNumber)
-	return SubmitResult{
-		Outcome: OutcomeReverted, ChainID: chainID, TxHash: tx.Hash(),
-		GasUsed: rcpt.GasUsed, Reason: reason, Retryable: revertRetryable(reason),
+	return w.revertOutcome(ctx, s, chainID, contract, logID, sealedSize, tx.Hash(), rcpt.GasUsed, reason)
+}
+
+// revertOutcome decides a revert's terminal disposition by re-reading logState:
+// on-chain size ≥ sealed → Superseded (ack); a read error or size still below →
+// retry (nack). The decoded revert name is kept only for observability.
+func (w *ChainWriter) revertOutcome(
+	ctx context.Context, s txSender, chainID uint64, contract common.Address,
+	logID [32]byte, sealedSize uint64, txHash common.Hash, gasUsed uint64, reason string,
+) SubmitResult {
+	onchain, err := w.readLogState(ctx, s, contract, logID)
+	if err != nil {
+		return SubmitResult{Outcome: OutcomeUnsubmitted, ChainID: chainID, TxHash: txHash,
+			GasUsed: gasUsed, Reason: "revert; logState re-read failed: " + reason}
 	}
+	if onchain.Size >= sealedSize {
+		return SubmitResult{Outcome: OutcomeSuperseded, ChainID: chainID, TxHash: txHash,
+			GasUsed: gasUsed, Reason: reason}
+	}
+	return SubmitResult{Outcome: OutcomeReverted, ChainID: chainID, TxHash: txHash,
+		GasUsed: gasUsed, Reason: reason}
 }
 
 // Close closes all dialed clients.
@@ -304,7 +337,7 @@ func (w *ChainWriter) Close() {
 // configured gas limit rather than EstimateGas (P13); a would-revert therefore
 // mines as a revert and is classified from the receipt.
 func (w *ChainWriter) Submit(
-	ctx context.Context, chainID uint64, contract common.Address, calldata []byte,
+	ctx context.Context, chainID uint64, contract common.Address, logID [32]byte, sealedSize uint64, calldata []byte,
 ) (SubmitResult, error) {
 	s, err := w.sender(chainID)
 	if err != nil {
@@ -332,47 +365,31 @@ func (w *ChainWriter) Submit(
 	sendErr := s.SendTransaction(ctx, signed)
 	lock.Unlock() // release before the (slow) receipt wait
 	if sendErr != nil {
-		if reason, ok := w.classifyRevert(sendErr); ok {
-			return SubmitResult{
-				Outcome: OutcomeReverted, ChainID: chainID, Reason: reason,
-				Retryable: revertRetryable(reason),
-			}, nil
+		// An admission failure never mined; retry via redelivery (a would-revert
+		// or already-anchored tx is caught at re-assemble). Keep a decoded name
+		// for observability when the node returned revert data.
+		reason := sendErr.Error()
+		if name, ok := w.classifyRevert(sendErr); ok {
+			reason = name
 		}
-		return SubmitResult{}, fmt.Errorf("send tx chain %d: %w", chainID, sendErr)
+		return SubmitResult{Outcome: OutcomeUnsubmitted, ChainID: chainID, Reason: reason}, nil
 	}
 
 	receipt, err := w.waitReceipt(ctx, s, signed.Hash())
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("await receipt chain %d: %w", chainID, err)
 	}
-	return w.classifyReceipt(ctx, s, chainID, signed, receipt), nil
+	return w.classifyReceipt(ctx, s, chainID, contract, logID, sealedSize, signed, receipt), nil
 }
 
-// transientRevertNames are the contract errors that reflect the on-chain state
-// advancing under us (a competing publisher anchored an intermediate size).
-// Redelivery rebuilds a fresh catch-up proof from the new size and succeeds, so
-// these must be retried, never acked-and-dropped (P1). Every other revert is
-// deterministic — retrying the identical calldata cannot help — and is terminal.
-var transientRevertNames = map[string]struct{}{
-	"SizeMustIncrease":        {},
-	"InvalidConsistencyProof": {},
-	"MinGrowthNotMet":         {},
-}
-
-// revertRetryable reports whether a decoded revert reason is transient. reason
-// is the error name optionally followed by formatted args ("Name", "Name(…)",
-// or "Name[…]"), so match on the leading identifier.
-func revertRetryable(reason string) bool {
-	name := reason
-	for i, c := range reason {
-		isIdent := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-		if !isIdent {
-			name = reason[:i]
-			break
-		}
+// RevertLabel maps a revert reason to a bounded Prometheus label: the decoded
+// IUnivocity error name when recognised, else "unrecognized" (raw revert strings
+// are unbounded — they stay in logs, not metrics). R2-5.
+func RevertLabel(reason string) string {
+	if _, ok := knownRevertNames[reason]; ok {
+		return reason
 	}
-	_, ok := transientRevertNames[name]
-	return ok
+	return "unrecognized"
 }
 
 func (w *ChainWriter) waitReceipt(
@@ -439,12 +456,24 @@ func (w *ChainWriter) classifyRevert(err error) (string, bool) {
 	if matchErr != nil {
 		return "", false
 	}
-	// Best-effort decode of args for context; the name alone is the metric key.
-	if args, unpackErr := abiErr.Unpack(data); unpackErr == nil && len(args.([]interface{})) > 0 {
-		return fmt.Sprintf("%s%v", abiErr.Name, args), true
-	}
+	// The bare error name is the classification/metric key; args would inflate
+	// label cardinality (R2-5) and are recoverable from the raw receipt.
 	return abiErr.Name, true
 }
+
+// knownRevertNames is the set of decodable IUnivocity error names, used to bound
+// the revert metric label (RevertLabel).
+var knownRevertNames = func() map[string]struct{} {
+	parsed, err := abi.JSON(strings.NewReader(univocityErrorsABI))
+	if err != nil {
+		return map[string]struct{}{}
+	}
+	m := make(map[string]struct{}, len(parsed.Errors))
+	for name := range parsed.Errors {
+		m[name] = struct{}{}
+	}
+	return m
+}()
 
 // univocityErrorsABI is the error subset a publisher can hit at publishCheckpoint,
 // used only to decode revert selectors into names for classification/metrics.

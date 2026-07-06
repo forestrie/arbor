@@ -33,6 +33,7 @@ func baseValidCLIConfig() Config {
 		GasLimit:            3_000_000,
 		ReceiptTimeout:      60 * time.Second,
 		ReceiptPollInterval: 200 * time.Millisecond,
+		VisibilityTimeout:   90 * time.Second,
 	}
 }
 

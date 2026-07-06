@@ -234,22 +234,15 @@ func (p *Publisher) Assemble(ctx context.Context, key string) (calldata []byte, 
 // Shared by the CLI (synchronous) and the daemon collector callback.
 func FinalizeResult(res PublishResult, sub SubmitResult) PublishResult {
 	res.TxHash = sub.TxHash
+	res.Reason = sub.Reason
 	switch sub.Outcome {
 	case OutcomePublished:
 		res.Status = StatusPublished
-	case OutcomeReverted:
-		res.Reason = sub.Reason
-		if sub.Retryable {
-			// State advanced under us; redelivery rebuilds a fresh catch-up proof.
-			res.Status = StatusRetry
-		} else {
-			res.Status = StatusReverted
-		}
-	default: // OutcomeUnsubmitted — not sent / not mined in time; retry.
+	case OutcomeSuperseded:
+		// Reverted, but a fresh logState read shows it is already anchored/subsumed.
+		res.Status = StatusAlreadyAnchored
+	default: // OutcomeReverted / OutcomeUnsubmitted — not anchored; retry.
 		res.Status = StatusRetry
-		if sub.Reason != "" {
-			res.Reason = sub.Reason
-		}
 	}
 	return res
 }
@@ -263,7 +256,7 @@ func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, err
 	if err != nil || !ready {
 		return res, err
 	}
-	sub, err := p.writer.Submit(ctx, res.ChainID, res.Contract, calldata)
+	sub, err := p.writer.Submit(ctx, res.ChainID, res.Contract, res.LogID.ToContractBytes32(), res.SealedSize, calldata)
 	if err != nil {
 		return res, fmt.Errorf("submit %s chain %d: %w", res.LogID, res.ChainID, err)
 	}

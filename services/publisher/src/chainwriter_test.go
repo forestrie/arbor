@@ -22,29 +22,16 @@ func newTestWriter(t *testing.T) *ChainWriter {
 	return w
 }
 
-func TestRevertRetryable(t *testing.T) {
-	transient := []string{
-		"SizeMustIncrease",
-		"SizeMustIncrease(3, 5)",
-		"InvalidConsistencyProof",
-		"MinGrowthNotMet(1, 1, 2)",
-	}
-	for _, r := range transient {
-		if !revertRetryable(r) {
-			t.Errorf("%q should be retryable", r)
+func TestRevertLabel(t *testing.T) {
+	// Known IUnivocity error names pass through; everything else is bucketed.
+	for _, name := range []string{"GrantRequirement", "SizeMustIncrease", "ConsistencyReceiptSignatureInvalid"} {
+		if got := RevertLabel(name); got != name {
+			t.Errorf("RevertLabel(%q) = %q, want passthrough", name, got)
 		}
 	}
-	terminal := []string{
-		"GrantRequirement(1, 2)",
-		"ConsistencyReceiptSignatureInvalid",
-		"InvalidCheckpointCose",
-		"LogNotFound(0x00)",
-		"", // unknown/empty -> terminal
-		"SomeUnknownError",
-	}
-	for _, r := range terminal {
-		if revertRetryable(r) {
-			t.Errorf("%q should be terminal (not retryable)", r)
+	for _, raw := range []string{"", "execution reverted: 0xdeadbeef", "Peak count mismatch", "SomeFutureError"} {
+		if got := RevertLabel(raw); got != "unrecognized" {
+			t.Errorf("RevertLabel(%q) = %q, want unrecognized", raw, got)
 		}
 	}
 }

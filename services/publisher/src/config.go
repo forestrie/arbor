@@ -302,6 +302,12 @@ func (c Config) Validate() error {
 	if c.QueueBatchSize > 32 {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
 	}
+	// A slow-to-mine tx must resolve before the queue redelivers it, else it is
+	// reprocessed as a duplicate while still in flight (R2-4).
+	if c.VisibilityTimeout <= c.ReceiptTimeout {
+		return fmt.Errorf("VISIBILITY_TIMEOUT (%s) must exceed PUBLISHER_RECEIPT_TIMEOUT (%s)",
+			c.VisibilityTimeout, c.ReceiptTimeout)
+	}
 	return nil
 }
 

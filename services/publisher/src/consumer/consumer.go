@@ -236,9 +236,11 @@ func (q *QueueConsumer) assemble(ctx context.Context, msg QueueMessage) (publish
 		return publisher.AssembledPublish{}, false
 	}
 	return publisher.AssembledPublish{
-		ChainID:  res.ChainID,
-		Contract: res.Contract,
-		Calldata: calldata,
+		ChainID:    res.ChainID,
+		Contract:   res.Contract,
+		LogID:      res.LogID.ToContractBytes32(),
+		SealedSize: res.SealedSize,
+		Calldata:   calldata,
 		Ack: func(sub publisher.SubmitResult) {
 			q.metrics.ObservePublishDuration(time.Since(start).Seconds())
 			q.finish(ctx, msg, key, publisher.FinalizeResult(res, sub))
@@ -250,10 +252,10 @@ func (q *QueueConsumer) assemble(ctx context.Context, msg QueueMessage) (publish
 // outcome permits (published / already-anchored / terminal revert); transient
 // and unsubmitted outcomes are left for redelivery.
 func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string, res publisher.PublishResult) {
-	// Count the decoded reason for both terminal and transient (retryable) reverts.
+	// Label reverts by the bounded error name only (raw strings stay in logs).
 	reason := ""
 	if res.Status == publisher.StatusReverted || res.Status == publisher.StatusRetry {
-		reason = res.Reason
+		reason = publisher.RevertLabel(res.Reason)
 	}
 	q.metrics.RecordPublish(res.Status.String(), reason)
 	// Anchor lag is only meaningful for terminal-success outcomes (P11).
