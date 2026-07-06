@@ -177,28 +177,39 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 	return n, nil
 }
 
-// processBatch assembles every message's checkpoint concurrently (reads only),
-// handles early-exit outcomes immediately, then hands the ready ones to the
-// publisher's batched submitter. The submitter admits a contiguous nonce block
-// per chain and confirms receipts asynchronously; each request's ack fires the
-// instant its receipt resolves — no batch barrier (P5).
+// logGroup coalesces a batch's messages for one log: the highest massifIndex is
+// the primary (published), the lower massifs are subsumed siblings (acked when
+// the primary anchors — the latest seal covers them via the consistency chain).
+type logGroup struct {
+	primary  QueueMessage
+	key      string
+	massif   uint32
+	siblings []QueueMessage
+}
+
+// processBatch coalesces messages by log (highest massif per log), assembles the
+// primaries concurrently (reads only), handles early-exit outcomes, then hands
+// the ready ones to the batched submitter. Receipts confirm asynchronously; each
+// primary's ack (and its subsumed siblings') fires when its receipt resolves.
 func (q *QueueConsumer) processBatch(ctx context.Context, msgs []QueueMessage) {
 	if len(msgs) == 0 {
 		return
 	}
 	q.metrics.AddMessagesProcessed(len(msgs))
 
+	groups := q.coalesce(ctx, msgs)
+
 	var (
 		wg    sync.WaitGroup
 		mu    sync.Mutex
 		ready []publisher.AssembledPublish
 	)
-	for _, msg := range msgs {
-		msg := msg
+	for _, g := range groups {
+		g := g
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if req, ok := q.assemble(ctx, msg); ok {
+			if req, ok := q.assembleGroup(ctx, g); ok {
 				mu.Lock()
 				ready = append(ready, req)
 				mu.Unlock()
@@ -213,26 +224,56 @@ func (q *QueueConsumer) processBatch(ctx context.Context, msgs []QueueMessage) {
 	}
 }
 
-// assemble runs the read phase for one message. It returns a ready-to-send
-// AssembledPublish (ok=true) whose Ack finalises + acks when the receipt
-// resolves; otherwise it settles the message here (ack/nack) and returns false.
-func (q *QueueConsumer) assemble(ctx context.Context, msg QueueMessage) (publisher.AssembledPublish, bool) {
-	key, ok := q.checkpointKeyFromMessage(msg)
-	if !ok {
-		q.ackMsg(ctx, msg) // not a checkpoint PutObject — ack to avoid poisoning
-		return publisher.AssembledPublish{}, false
+// coalesce groups the batch by logId, keeping the highest massifIndex per log as
+// the primary and the rest as subsumed siblings. Non-checkpoint messages are
+// acked immediately (poison avoidance).
+func (q *QueueConsumer) coalesce(ctx context.Context, msgs []QueueMessage) []logGroup {
+	byLog := make(map[string]*logGroup)
+	for _, msg := range msgs {
+		key, ok := q.checkpointKeyFromMessage(msg)
+		if !ok {
+			q.ackMsg(ctx, msg)
+			continue
+		}
+		ck, err := publisher.ParseCheckpointKey(key) // already validated by checkpointKeyFromMessage
+		if err != nil {
+			q.ackMsg(ctx, msg)
+			continue
+		}
+		id := ck.LogID.String()
+		g, exists := byLog[id]
+		if !exists {
+			byLog[id] = &logGroup{primary: msg, key: key, massif: ck.MassifIndex}
+			continue
+		}
+		if ck.MassifIndex > g.massif {
+			g.siblings = append(g.siblings, g.primary)
+			g.primary, g.key, g.massif = msg, key, ck.MassifIndex
+		} else {
+			g.siblings = append(g.siblings, msg)
+		}
 	}
+	out := make([]logGroup, 0, len(byLog))
+	for _, g := range byLog {
+		out = append(out, *g)
+	}
+	return out
+}
 
+// assembleGroup runs the read phase for a log's primary. It returns a
+// ready-to-send AssembledPublish (ok=true) whose Ack finalises the primary and
+// its subsumed siblings when the receipt resolves; otherwise it settles here.
+func (q *QueueConsumer) assembleGroup(ctx context.Context, g logGroup) (publisher.AssembledPublish, bool) {
 	start := time.Now()
-	calldata, res, ready, err := q.pub.Assemble(ctx, key)
+	calldata, res, ready, err := q.pub.Assemble(ctx, g.key)
 	if err != nil {
 		q.metrics.ObservePublishDuration(time.Since(start).Seconds())
-		q.logger.Warn("assemble failed", "messageID", msg.ID, "key", key, "error", err)
-		return publisher.AssembledPublish{}, false // leave unacked for redelivery
+		q.logger.Warn("assemble failed", "messageID", g.primary.ID, "key", g.key, "error", err)
+		return publisher.AssembledPublish{}, false // leave primary + siblings unacked
 	}
 	if !ready {
 		q.metrics.ObservePublishDuration(time.Since(start).Seconds())
-		q.finish(ctx, msg, key, res)
+		q.finishGroup(ctx, g, res)
 		return publisher.AssembledPublish{}, false
 	}
 	return publisher.AssembledPublish{
@@ -243,13 +284,26 @@ func (q *QueueConsumer) assemble(ctx context.Context, msg QueueMessage) (publish
 		Calldata:   calldata,
 		Ack: func(sub publisher.SubmitResult) {
 			q.metrics.ObservePublishDuration(time.Since(start).Seconds())
-			q.finish(ctx, msg, key, publisher.FinalizeResult(res, sub))
+			q.finishGroup(ctx, g, publisher.FinalizeResult(res, sub))
 		},
 	}, true
 }
 
+// finishGroup settles a log's primary and, on a terminal-success outcome, acks
+// its subsumed siblings too (the anchored highest seal covers their lower
+// massifs via the consistency chain). On retry, siblings are left unacked and
+// redeliver with the primary.
+func (q *QueueConsumer) finishGroup(ctx context.Context, g logGroup, res publisher.PublishResult) {
+	q.finish(ctx, g.primary, g.key, res)
+	if res.ShouldAck() {
+		for _, sib := range g.siblings {
+			q.ackMsg(ctx, sib)
+		}
+	}
+}
+
 // finish records metrics for a terminal result and acks the message when the
-// outcome permits (published / already-anchored / terminal revert); transient
+// outcome permits (published / already-anchored / superseded); transient
 // and unsubmitted outcomes are left for redelivery.
 func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string, res publisher.PublishResult) {
 	// Label reverts by the bounded error name only (raw strings stay in logs).
