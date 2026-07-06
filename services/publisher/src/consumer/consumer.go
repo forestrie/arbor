@@ -177,74 +177,110 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 	return n, nil
 }
 
-// processBatch publishes each message's checkpoint concurrently and acks each
-// one the instant its outcome is terminal — no batch barrier, so a slow-to-mine
-// tx does not hold its finished siblings past their visibility lease (P5). The
-// ChainWriter serialises per-chain nonces, so concurrent publishes across logs
-// are safe.
+// processBatch assembles every message's checkpoint concurrently (reads only),
+// handles early-exit outcomes immediately, then hands the ready ones to the
+// publisher's batched submitter. The submitter admits a contiguous nonce block
+// per chain and confirms receipts asynchronously; each request's ack fires the
+// instant its receipt resolves — no batch barrier (P5).
 func (q *QueueConsumer) processBatch(ctx context.Context, msgs []QueueMessage) {
 	if len(msgs) == 0 {
 		return
 	}
 	q.metrics.AddMessagesProcessed(len(msgs))
 
-	var wg sync.WaitGroup
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		ready []publisher.AssembledPublish
+	)
 	for _, msg := range msgs {
 		msg := msg
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if q.handleMessage(ctx, msg) {
-				if err := q.acknowledge(ctx, msg); err != nil {
-					q.logger.Warn("ack failed", "messageID", msg.ID, "error", err)
-					q.metrics.RecordAck(false)
-				} else {
-					q.metrics.RecordAck(true)
-				}
+			if req, ok := q.assemble(ctx, msg); ok {
+				mu.Lock()
+				ready = append(ready, req)
+				mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
+
+	if len(ready) > 0 {
+		// Returns once sends are admitted; acks fire async from the collector.
+		q.pub.SubmitBatch(ctx, ready)
+	}
 }
 
-// handleMessage returns true when the message should be acked.
-func (q *QueueConsumer) handleMessage(ctx context.Context, msg QueueMessage) bool {
+// assemble runs the read phase for one message. It returns a ready-to-send
+// AssembledPublish (ok=true) whose Ack finalises + acks when the receipt
+// resolves; otherwise it settles the message here (ack/nack) and returns false.
+func (q *QueueConsumer) assemble(ctx context.Context, msg QueueMessage) (publisher.AssembledPublish, bool) {
 	key, ok := q.checkpointKeyFromMessage(msg)
 	if !ok {
-		// Not a checkpoint PutObject we can act on — ack to avoid poisoning.
-		return true
+		q.ackMsg(ctx, msg) // not a checkpoint PutObject — ack to avoid poisoning
+		return publisher.AssembledPublish{}, false
 	}
 
 	start := time.Now()
-	res, err := q.pub.Publish(ctx, key)
-	q.metrics.ObservePublishDuration(time.Since(start).Seconds())
+	calldata, res, ready, err := q.pub.Assemble(ctx, key)
 	if err != nil {
-		// Unexpected infra failure: leave unacked for redelivery.
-		q.logger.Warn("publish failed", "messageID", msg.ID, "key", key, "error", err)
-		return false
+		q.metrics.ObservePublishDuration(time.Since(start).Seconds())
+		q.logger.Warn("assemble failed", "messageID", msg.ID, "key", key, "error", err)
+		return publisher.AssembledPublish{}, false // leave unacked for redelivery
 	}
+	if !ready {
+		q.metrics.ObservePublishDuration(time.Since(start).Seconds())
+		q.finish(ctx, msg, key, res)
+		return publisher.AssembledPublish{}, false
+	}
+	return publisher.AssembledPublish{
+		ChainID:  res.ChainID,
+		Contract: res.Contract,
+		Calldata: calldata,
+		Ack: func(sub publisher.SubmitResult) {
+			q.metrics.ObservePublishDuration(time.Since(start).Seconds())
+			q.finish(ctx, msg, key, publisher.FinalizeResult(res, sub))
+		},
+	}, true
+}
 
+// finish records metrics for a terminal result and acks the message when the
+// outcome permits (published / already-anchored / terminal revert); transient
+// and unsubmitted outcomes are left for redelivery.
+func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string, res publisher.PublishResult) {
 	// Count the decoded reason for both terminal and transient (retryable) reverts.
 	reason := ""
 	if res.Status == publisher.StatusReverted || res.Status == publisher.StatusRetry {
 		reason = res.Reason
 	}
 	q.metrics.RecordPublish(res.Status.String(), reason)
-	// Anchor lag is only meaningful for terminal-success outcomes; other statuses
-	// leave OnchainSize/SealedSize unresolved (P11).
+	// Anchor lag is only meaningful for terminal-success outcomes (P11).
 	if (res.Status == publisher.StatusPublished || res.Status == publisher.StatusAlreadyAnchored) &&
 		res.SealedSize >= res.OnchainSize {
 		q.metrics.SetAnchorLag(
 			strconv.FormatUint(res.ChainID, 10), res.Contract.Hex(),
 			float64(res.SealedSize-res.OnchainSize))
 	}
-
 	q.logger.Info("publish result",
 		"messageID", msg.ID, "key", key, "status", res.Status.String(),
 		"chain", res.ChainID, "contract", res.Contract.Hex(),
 		"tx", res.TxHash.Hex(), "sealedSize", res.SealedSize,
 		"onchainSize", res.OnchainSize, "reason", res.Reason)
-	return res.ShouldAck()
+	if res.ShouldAck() {
+		q.ackMsg(ctx, msg)
+	}
+}
+
+// ackMsg acknowledges a queue message and records the ack metric.
+func (q *QueueConsumer) ackMsg(ctx context.Context, msg QueueMessage) {
+	if err := q.acknowledge(ctx, msg); err != nil {
+		q.logger.Warn("ack failed", "messageID", msg.ID, "error", err)
+		q.metrics.RecordAck(false)
+	} else {
+		q.metrics.RecordAck(true)
+	}
 }
 
 // checkpointKeyFromMessage unwraps the R2 notification and returns the checkpoint

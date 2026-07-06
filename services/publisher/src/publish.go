@@ -106,10 +106,11 @@ type Publisher struct {
 // client; httpClient is its underlying *http.Client for the public grant store.
 func NewPublisher(cfg Config, httpClient *HTTPClient, logger *slog.Logger) (*Publisher, error) {
 	writer, err := NewChainWriter(cfg.RPCURLs, cfg.PublisherKeyHex, WriteConfig{
-		GasLimit:            cfg.GasLimit,
-		GasPriceWei:         cfg.GasPriceWei,
-		ReceiptTimeout:      cfg.ReceiptTimeout,
-		ReceiptPollInterval: cfg.ReceiptPollInterval,
+		GasLimit:                cfg.GasLimit,
+		MaxFeePerGasWei:         cfg.MaxFeePerGasWei,
+		MaxPriorityFeePerGasWei: cfg.MaxPriorityFeePerGasWei,
+		ReceiptTimeout:          cfg.ReceiptTimeout,
+		ReceiptPollInterval:     cfg.ReceiptPollInterval,
 	})
 	if err != nil {
 		return nil, err
@@ -128,27 +129,35 @@ func (p *Publisher) Close() { p.writer.Close() }
 // From is the publisher's gas-only EOA address.
 func (p *Publisher) From() common.Address { return p.writer.From() }
 
-// Publish anchors a single checkpoint identified by its R2 object key. It never
-// returns an error for the expected "not yet / not here" outcomes — those are
-// carried in PublishResult.Status so the daemon can ack/nack correctly. A
-// non-nil error is an unexpected infrastructure failure worth retrying.
-func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, error) {
+// SubmitBatch submits a group of assembled checkpoints (daemon path). Receipts
+// are confirmed asynchronously; each request's Ack fires when terminal.
+func (p *Publisher) SubmitBatch(ctx context.Context, reqs []AssembledPublish) {
+	p.writer.SubmitBatch(ctx, reqs)
+}
+
+// Assemble runs the read phase for a checkpoint key: resolve the forest, read
+// on-chain state, and build the publishCheckpoint calldata — all from public R2
+// + RPC, no nonce. When ready is true, calldata is set and res carries the
+// forest/contract/size context (Status unset; the caller submits and finalises
+// with FinalizeResult). When ready is false, res carries a terminal early-exit
+// Status (already-anchored → ack; owner-not-anchored / chain-not-configured →
+// retry). A non-nil error is an unexpected infrastructure failure worth retrying.
+func (p *Publisher) Assemble(ctx context.Context, key string) (calldata []byte, res PublishResult, ready bool, err error) {
 	ck, err := ParseCheckpointKey(key)
 	if err != nil {
-		return PublishResult{}, err
+		return nil, PublishResult{}, false, err
 	}
-	res := PublishResult{Key: key, LogID: ck.LogID}
+	res = PublishResult{Key: key, LogID: ck.LogID}
 
 	// 1. Resolve the forest's (R, chainId, contract) from public R2 genesis.
 	fc, err := publishproof.ResolveForestContract(ctx, p.grants, ck.LogID)
 	if err != nil {
 		if errors.Is(err, publishproof.ErrForestNotResolved) {
-			// No forest binding yet visible; retry later.
-			res.Status = StatusOwnerNotAnchored
+			res.Status = StatusOwnerNotAnchored // no forest binding yet visible; retry
 			res.Reason = "forest not resolved: " + err.Error()
-			return res, nil
+			return nil, res, false, nil
 		}
-		return res, fmt.Errorf("resolve forest for %s: %w", ck.LogID, err)
+		return nil, res, false, fmt.Errorf("resolve forest for %s: %w", ck.LogID, err)
 	}
 	res.R, res.ChainID, res.Contract = fc.R, fc.ChainID, fc.Contract
 
@@ -158,42 +167,42 @@ func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, err
 		if errors.Is(err, ErrChainNotConfigured) {
 			res.Status = StatusChainNotConfigured
 			res.Reason = fmt.Sprintf("chainId %d not in UNIVOCITY_RPC_URLS", fc.ChainID)
-			return res, nil
+			return nil, res, false, nil
 		}
-		return res, fmt.Errorf("chain client %d: %w", fc.ChainID, err)
+		return nil, res, false, fmt.Errorf("chain client %d: %w", fc.ChainID, err)
 	}
 
 	// 3. Determine the grant's owner log so we can read its on-chain state and
 	//    build its reader (grant inclusion lives in the owner/authority log).
 	sg, err := publishproof.ReadStoredGrant(ctx, p.grants, fc.R, ck.LogID)
 	if err != nil {
-		return res, fmt.Errorf("read stored grant %s: %w", ck.LogID, err)
+		return nil, res, false, fmt.Errorf("read stored grant %s: %w", ck.LogID, err)
 	}
 
 	// 4. Build target + owner readers (forest-uniform massif height).
 	targetReader, err := p.readers.Massif(ck.LogID, ck.MassifHeight)
 	if err != nil {
-		return res, fmt.Errorf("target reader %s: %w", ck.LogID, err)
+		return nil, res, false, fmt.Errorf("target reader %s: %w", ck.LogID, err)
 	}
 	ownerReader := targetReader
 	if sg.OwnerLogID != ck.LogID {
 		ownerReader, err = p.readers.Massif(sg.OwnerLogID, ck.MassifHeight)
 		if err != nil {
-			return res, fmt.Errorf("owner reader %s: %w", sg.OwnerLogID, err)
+			return nil, res, false, fmt.Errorf("owner reader %s: %w", sg.OwnerLogID, err)
 		}
 	}
 
 	// 5. Read on-chain state for both logs on the resolved contract.
 	targetState, err := publishproof.ReadLogState(ctx, client, fc.Contract, ck.LogID.ToContractBytes32())
 	if err != nil {
-		return res, fmt.Errorf("read logState(target) %s: %w", ck.LogID, err)
+		return nil, res, false, fmt.Errorf("read logState(target) %s: %w", ck.LogID, err)
 	}
 	res.OnchainSize = targetState.Size
 	ownerState := targetState
 	if sg.OwnerLogID != ck.LogID {
 		ownerState, err = publishproof.ReadLogState(ctx, client, fc.Contract, sg.OwnerLogID.ToContractBytes32())
 		if err != nil {
-			return res, fmt.Errorf("read logState(owner) %s: %w", sg.OwnerLogID, err)
+			return nil, res, false, fmt.Errorf("read logState(owner) %s: %w", sg.OwnerLogID, err)
 		}
 	}
 
@@ -208,22 +217,22 @@ func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, err
 		case errors.Is(err, publishproof.ErrAlreadyAnchored):
 			res.Status = StatusAlreadyAnchored
 			res.SealedSize = targetState.Size
-			return res, nil
+			return nil, res, false, nil
 		case errors.Is(err, publishproof.ErrOwnerNotAnchored):
 			res.Status = StatusOwnerNotAnchored
 			res.Reason = err.Error()
-			return res, nil
+			return nil, res, false, nil
 		default:
-			return res, fmt.Errorf("assemble publish %s: %w", ck.LogID, err)
+			return nil, res, false, fmt.Errorf("assemble publish %s: %w", ck.LogID, err)
 		}
 	}
 	res.SealedSize = sealed.MMRSize
+	return calldata, res, true, nil
+}
 
-	// 7. Submit and classify.
-	sub, err := p.writer.Submit(ctx, fc.ChainID, fc.Contract, calldata)
-	if err != nil {
-		return res, fmt.Errorf("submit %s chain %d: %w", ck.LogID, fc.ChainID, err)
-	}
+// FinalizeResult maps a submission outcome onto the assembled PublishResult.
+// Shared by the CLI (synchronous) and the daemon collector callback.
+func FinalizeResult(res PublishResult, sub SubmitResult) PublishResult {
 	res.TxHash = sub.TxHash
 	switch sub.Outcome {
 	case OutcomePublished:
@@ -236,6 +245,27 @@ func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, err
 		} else {
 			res.Status = StatusReverted
 		}
+	default: // OutcomeUnsubmitted — not sent / not mined in time; retry.
+		res.Status = StatusRetry
+		if sub.Reason != "" {
+			res.Reason = sub.Reason
+		}
 	}
-	return res, nil
+	return res
+}
+
+// Publish anchors a single checkpoint and waits for the outcome (CLI one-shot).
+// The daemon uses Assemble + SubmitBatch instead. It never returns an error for
+// the expected "not yet / not here" outcomes — those are carried in
+// PublishResult.Status; a non-nil error is unexpected infrastructure failure.
+func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, error) {
+	calldata, res, ready, err := p.Assemble(ctx, key)
+	if err != nil || !ready {
+		return res, err
+	}
+	sub, err := p.writer.Submit(ctx, res.ChainID, res.Contract, calldata)
+	if err != nil {
+		return res, fmt.Errorf("submit %s chain %d: %w", res.LogID, res.ChainID, err)
+	}
+	return FinalizeResult(res, sub), nil
 }

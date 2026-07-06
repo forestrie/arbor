@@ -33,6 +33,10 @@ const (
 	// OutcomeReverted — the contract rejected the submission. Reason carries the
 	// decoded IUnivocity error name when recognised.
 	OutcomeReverted
+	// OutcomeUnsubmitted — the tx never entered the mempool (admission failure or
+	// a stopped suffix after a sequential-admission gap) or was not mined before
+	// the receipt timeout. Always retry (redelivery re-anchors idempotently).
+	OutcomeUnsubmitted
 )
 
 // SubmitResult is the classified outcome of a submission attempt.
@@ -57,8 +61,24 @@ func (r SubmitResult) String() string {
 		return fmt.Sprintf("published chain=%d tx=%s gas=%d", r.ChainID, r.TxHash.Hex(), r.GasUsed)
 	case OutcomeReverted:
 		return fmt.Sprintf("reverted chain=%d reason=%s", r.ChainID, r.Reason)
+	case OutcomeUnsubmitted:
+		return fmt.Sprintf("unsubmitted chain=%d reason=%s", r.ChainID, r.Reason)
 	default:
 		return "unknown"
+	}
+}
+
+// ShouldAck reports whether the queue message may be acked given this submission
+// outcome. Published and terminal (deterministic) reverts ack; transient reverts
+// and unsubmitted/timed-out txs are retried via redelivery.
+func (r SubmitResult) ShouldAck() bool {
+	switch r.Outcome {
+	case OutcomePublished:
+		return true
+	case OutcomeReverted:
+		return !r.Retryable
+	default: // OutcomeUnsubmitted
+		return false
 	}
 }
 
@@ -67,15 +87,26 @@ func parsePublisherKey(hexKey string) (*ecdsa.PrivateKey, error) {
 	return crypto.HexToECDSA(strings.TrimPrefix(strings.TrimSpace(hexKey), "0x"))
 }
 
+// txSender is the RPC surface the writer needs from a chain backend. *ethclient.Client
+// satisfies it; tests inject a fake to exercise nonce/send/receipt logic offline.
+type txSender interface {
+	PendingNonceAt(ctx context.Context, account common.Address) (uint64, error)
+	SuggestGasTipCap(ctx context.Context) (*big.Int, error)
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+	SendTransaction(ctx context.Context, tx *types.Transaction) error
+	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
+}
+
 // ChainWriter submits publishCheckpoint transactions to any configured chain,
 // keyed by chainId, from a single gas-only EOA (same address on every EVM
-// chain, funded per chain). It lazily dials one ethclient per chainId and
-// serialises submissions per chain so nonces stay monotonic.
+// chain, funded per chain). It lazily dials one ethclient per chainId.
 //
-// It promotes the anvil test harness (publishproof integration_test chainHarness)
-// to a production submitter: EstimateGas gate (a revert is caught before gas is
-// spent), legacy tx with SuggestGasPrice, wait for receipt, classify reverts
-// against the IUnivocity error table.
+// The daemon uses SubmitBatch (batchsubmit.go): one PendingNonceAt per chain,
+// sequential admission of a contiguous nonce block (gap-free by construction),
+// and a persistent per-chain receipt collector. The CLI uses the synchronous
+// Submit. Both build EIP-1559 (DynamicFeeTx) transactions and classify reverts
+// against the IUnivocity error table (observability, not trust).
 type ChainWriter struct {
 	rpcURLs map[uint64]string
 	key     *ecdsa.PrivateKey
@@ -84,22 +115,31 @@ type ChainWriter struct {
 
 	// Submission tuning (config-driven, P13).
 	gasLimit            uint64
-	gasPriceWei         *big.Int // nil -> SuggestGasPrice
+	maxFeeWei           *big.Int // nil -> derive from base fee
+	maxPriorityWei      *big.Int // nil -> SuggestGasTipCap
 	receiptTimeout      time.Duration
 	receiptPollInterval time.Duration
 
 	mu      sync.Mutex
 	clients map[uint64]*ethclient.Client
-	// chainLocks serialises submissions per chain (nonce safety).
-	chainLocks map[uint64]*sync.Mutex
+	// sendLocks serialise the send phase per chain so one PendingNonceAt read
+	// reflects the previous batch's admissions. Held only across sends, never
+	// across the receipt wait.
+	sendLocks map[uint64]*sync.Mutex
+	// trackers holds one persistent receipt collector per chain (lazy start).
+	trackers map[uint64]*receiptTracker
+
+	// testSenders, when set for a chain, replaces the dialed client (tests only).
+	testSenders map[uint64]txSender
 }
 
 // WriteConfig carries the configurable submission knobs (P13).
 type WriteConfig struct {
-	GasLimit            uint64
-	GasPriceWei         *big.Int
-	ReceiptTimeout      time.Duration
-	ReceiptPollInterval time.Duration
+	GasLimit                uint64
+	MaxFeePerGasWei         *big.Int
+	MaxPriorityFeePerGasWei *big.Int
+	ReceiptTimeout          time.Duration
+	ReceiptPollInterval     time.Duration
 }
 
 // NewChainWriter builds a writer over the chainId->rpc map with the gas-only EOA.
@@ -127,12 +167,25 @@ func NewChainWriter(rpcURLs map[uint64]string, keyHex string, wc WriteConfig) (*
 		from:                crypto.PubkeyToAddress(key.PublicKey),
 		errABI:              errABI,
 		gasLimit:            wc.GasLimit,
-		gasPriceWei:         wc.GasPriceWei,
+		maxFeeWei:           wc.MaxFeePerGasWei,
+		maxPriorityWei:      wc.MaxPriorityFeePerGasWei,
 		receiptTimeout:      wc.ReceiptTimeout,
 		receiptPollInterval: wc.ReceiptPollInterval,
 		clients:             make(map[uint64]*ethclient.Client),
-		chainLocks:          make(map[uint64]*sync.Mutex),
+		sendLocks:           make(map[uint64]*sync.Mutex),
+		trackers:            make(map[uint64]*receiptTracker),
 	}, nil
+}
+
+// sender returns the tx backend for a chain: the injected test sender when set,
+// otherwise the lazily-dialed ethclient.
+func (w *ChainWriter) sender(chainID uint64) (txSender, error) {
+	if w.testSenders != nil {
+		if s, ok := w.testSenders[chainID]; ok {
+			return s, nil
+		}
+	}
+	return w.Client(chainID)
 }
 
 // From is the publisher EOA address (same on every chain).
@@ -158,15 +211,77 @@ func (w *ChainWriter) Client(chainID uint64) (*ethclient.Client, error) {
 	return c, nil
 }
 
-func (w *ChainWriter) chainLock(chainID uint64) *sync.Mutex {
+func (w *ChainWriter) sendLock(chainID uint64) *sync.Mutex {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	l, ok := w.chainLocks[chainID]
+	l, ok := w.sendLocks[chainID]
 	if !ok {
 		l = &sync.Mutex{}
-		w.chainLocks[chainID] = l
+		w.sendLocks[chainID] = l
 	}
 	return l
+}
+
+// feeParams returns the EIP-1559 (tip, feeCap) for a chain: the configured caps
+// when both are set (no RPC), otherwise a suggested tip and a fee cap derived as
+// 2*baseFee + tip, clamped to MaxFeePerGasWei when configured.
+func (w *ChainWriter) feeParams(ctx context.Context, s txSender) (tip, feeCap *big.Int, err error) {
+	if w.maxFeeWei != nil && w.maxPriorityWei != nil {
+		return new(big.Int).Set(w.maxPriorityWei), new(big.Int).Set(w.maxFeeWei), nil
+	}
+	tip = w.maxPriorityWei
+	if tip == nil {
+		tip, err = s.SuggestGasTipCap(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("suggest tip: %w", err)
+		}
+	}
+	head, err := s.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("latest header: %w", err)
+	}
+	base := head.BaseFee
+	if base == nil {
+		base = big.NewInt(0)
+	}
+	feeCap = new(big.Int).Add(new(big.Int).Mul(base, big.NewInt(2)), tip)
+	if w.maxFeeWei != nil && feeCap.Cmp(w.maxFeeWei) > 0 {
+		feeCap = new(big.Int).Set(w.maxFeeWei)
+	}
+	return tip, feeCap, nil
+}
+
+// buildAndSign builds an EIP-1559 publishCheckpoint tx and signs it.
+func (w *ChainWriter) buildAndSign(
+	chainID *big.Int, nonce uint64, to common.Address, data []byte, tip, feeCap *big.Int,
+) (*types.Transaction, error) {
+	toAddr := to
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   chainID,
+		Nonce:     nonce,
+		To:        &toAddr,
+		Value:     big.NewInt(0),
+		Gas:       w.gasLimit,
+		GasTipCap: tip,
+		GasFeeCap: feeCap,
+		Data:      data,
+	})
+	return types.SignTx(tx, types.LatestSignerForChainID(chainID), w.key)
+}
+
+// classifyReceipt turns a mined receipt into a SubmitResult, decoding the revert
+// reason (and transient/terminal split) when the tx failed.
+func (w *ChainWriter) classifyReceipt(
+	ctx context.Context, s txSender, chainID uint64, tx *types.Transaction, rcpt *types.Receipt,
+) SubmitResult {
+	if rcpt.Status == types.ReceiptStatusSuccessful {
+		return SubmitResult{Outcome: OutcomePublished, ChainID: chainID, TxHash: tx.Hash(), GasUsed: rcpt.GasUsed}
+	}
+	reason := w.revertReasonAt(ctx, s, tx, rcpt.BlockNumber)
+	return SubmitResult{
+		Outcome: OutcomeReverted, ChainID: chainID, TxHash: tx.Hash(),
+		GasUsed: rcpt.GasUsed, Reason: reason, Retryable: revertRetryable(reason),
+	}
 }
 
 // Close closes all dialed clients.
@@ -179,65 +294,54 @@ func (w *ChainWriter) Close() {
 	w.clients = make(map[uint64]*ethclient.Client)
 }
 
-// Submit sends publishCheckpoint calldata to (chainID, contract) and returns the
-// classified outcome. Gas for publishCheckpoint is predictable, so it uses a
+// Submit synchronously sends publishCheckpoint calldata to (chainID, contract)
+// and waits for the classified outcome. It is the CLI one-shot path; the daemon
+// uses SubmitBatch. Gas for publishCheckpoint is predictable, so it uses a
 // configured gas limit rather than EstimateGas (P13); a would-revert therefore
-// mines as a revert and is classified from the receipt. A reverting tx still
-// consumes its nonce, which keeps the nonce sequence gap-free.
+// mines as a revert and is classified from the receipt.
 func (w *ChainWriter) Submit(
 	ctx context.Context, chainID uint64, contract common.Address, calldata []byte,
 ) (SubmitResult, error) {
-	client, err := w.Client(chainID)
+	s, err := w.sender(chainID)
 	if err != nil {
 		return SubmitResult{}, err
 	}
 
-	// Serialise per-chain so the nonce we read is the one we send.
-	lock := w.chainLock(chainID)
+	// Serialise the send so the nonce we read is the one we send.
+	lock := w.sendLock(chainID)
 	lock.Lock()
-	defer lock.Unlock()
-
-	nonce, err := client.PendingNonceAt(ctx, w.from)
+	nonce, err := s.PendingNonceAt(ctx, w.from)
 	if err != nil {
+		lock.Unlock()
 		return SubmitResult{}, fmt.Errorf("nonce chain %d: %w", chainID, err)
 	}
-	gasPrice := w.gasPriceWei
-	if gasPrice == nil {
-		gasPrice, err = client.SuggestGasPrice(ctx)
-		if err != nil {
-			return SubmitResult{}, fmt.Errorf("gas price chain %d: %w", chainID, err)
-		}
-	}
-
-	tx := types.NewTransaction(nonce, contract, big.NewInt(0), w.gasLimit, gasPrice, calldata)
-	signed, err := types.SignTx(tx, types.LatestSignerForChainID(new(big.Int).SetUint64(chainID)), w.key)
+	tip, feeCap, err := w.feeParams(ctx, s)
 	if err != nil {
+		lock.Unlock()
+		return SubmitResult{}, fmt.Errorf("fee params chain %d: %w", chainID, err)
+	}
+	signed, err := w.buildAndSign(new(big.Int).SetUint64(chainID), nonce, contract, calldata, tip, feeCap)
+	if err != nil {
+		lock.Unlock()
 		return SubmitResult{}, fmt.Errorf("sign tx chain %d: %w", chainID, err)
 	}
-	if err := client.SendTransaction(ctx, signed); err != nil {
-		if reason, ok := w.classifyRevert(err); ok {
+	sendErr := s.SendTransaction(ctx, signed)
+	lock.Unlock() // release before the (slow) receipt wait
+	if sendErr != nil {
+		if reason, ok := w.classifyRevert(sendErr); ok {
 			return SubmitResult{
 				Outcome: OutcomeReverted, ChainID: chainID, Reason: reason,
 				Retryable: revertRetryable(reason),
 			}, nil
 		}
-		return SubmitResult{}, fmt.Errorf("send tx chain %d: %w", chainID, err)
+		return SubmitResult{}, fmt.Errorf("send tx chain %d: %w", chainID, sendErr)
 	}
 
-	receipt, err := w.waitReceipt(ctx, client, signed.Hash())
+	receipt, err := w.waitReceipt(ctx, s, signed.Hash())
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("await receipt chain %d: %w", chainID, err)
 	}
-	if receipt.Status != types.ReceiptStatusSuccessful {
-		reason := w.revertReasonAt(ctx, client, signed, receipt.BlockNumber)
-		return SubmitResult{
-			Outcome: OutcomeReverted, ChainID: chainID, TxHash: signed.Hash(),
-			GasUsed: receipt.GasUsed, Reason: reason, Retryable: revertRetryable(reason),
-		}, nil
-	}
-	return SubmitResult{
-		Outcome: OutcomePublished, ChainID: chainID, TxHash: signed.Hash(), GasUsed: receipt.GasUsed,
-	}, nil
+	return w.classifyReceipt(ctx, s, chainID, signed, receipt), nil
 }
 
 // transientRevertNames are the contract errors that reflect the on-chain state
@@ -252,22 +356,27 @@ var transientRevertNames = map[string]struct{}{
 }
 
 // revertRetryable reports whether a decoded revert reason is transient. reason
-// is "Name" or "Name(args...)" (classifyRevert), so match on the leading name.
+// is the error name optionally followed by formatted args ("Name", "Name(…)",
+// or "Name[…]"), so match on the leading identifier.
 func revertRetryable(reason string) bool {
 	name := reason
-	if i := strings.IndexByte(reason, '('); i >= 0 {
-		name = reason[:i]
+	for i, c := range reason {
+		isIdent := (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		if !isIdent {
+			name = reason[:i]
+			break
+		}
 	}
 	_, ok := transientRevertNames[name]
 	return ok
 }
 
 func (w *ChainWriter) waitReceipt(
-	ctx context.Context, client *ethclient.Client, hash common.Hash,
+	ctx context.Context, s txSender, hash common.Hash,
 ) (*types.Receipt, error) {
 	deadline := time.Now().Add(w.receiptTimeout)
 	for {
-		receipt, err := client.TransactionReceipt(ctx, hash)
+		receipt, err := s.TransactionReceipt(ctx, hash)
 		if err == nil {
 			return receipt, nil
 		}
@@ -288,10 +397,10 @@ func (w *ChainWriter) waitReceipt(
 // revertReasonAt re-runs the mined tx as an eth_call at its block to recover the
 // revert reason (mirrors chainHarness.revertReason).
 func (w *ChainWriter) revertReasonAt(
-	ctx context.Context, client *ethclient.Client, tx *types.Transaction, block *big.Int,
+	ctx context.Context, s txSender, tx *types.Transaction, block *big.Int,
 ) string {
-	msg := ethereum.CallMsg{From: w.from, To: tx.To(), Gas: tx.Gas(), GasPrice: tx.GasPrice(), Data: tx.Data()}
-	_, err := client.CallContract(ctx, msg, block)
+	msg := ethereum.CallMsg{From: w.from, To: tx.To(), Gas: tx.Gas(), Data: tx.Data()}
+	_, err := s.CallContract(ctx, msg, block)
 	if err == nil {
 		return "reverted without reason"
 	}

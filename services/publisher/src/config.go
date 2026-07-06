@@ -58,12 +58,14 @@ type Config struct {
 
 	// On-chain submission tuning (P13 — operational constants, not baked in).
 	// publishCheckpoint gas is predictable, so we use a fixed limit rather than
-	// EstimateGas; GasPriceWei, when set, caps/pins the price and skips the
-	// SuggestGasPrice read.
-	GasLimit            uint64
-	GasPriceWei         *big.Int
-	ReceiptTimeout      time.Duration
-	ReceiptPollInterval time.Duration
+	// EstimateGas. Transactions are EIP-1559 (DynamicFeeTx). When both fee caps
+	// are set they pin the fee and skip the SuggestGasTipCap/base-fee reads;
+	// otherwise the tip is suggested and the fee cap derived from the base fee.
+	GasLimit                uint64
+	MaxFeePerGasWei         *big.Int
+	MaxPriorityFeePerGasWei *big.Int
+	ReceiptTimeout          time.Duration
+	ReceiptPollInterval     time.Duration
 
 	// Queue poll backoff tuning.
 	BackoffBase time.Duration
@@ -161,13 +163,17 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
-	// PUBLISHER_GAS_PRICE is a decimal wei string; empty -> SuggestGasPrice.
-	var gasPriceWei *big.Int
-	if v := strings.TrimSpace(os.Getenv("PUBLISHER_GAS_PRICE")); v != "" {
-		if p, ok := new(big.Int).SetString(v, 10); ok {
-			gasPriceWei = p
+	// EIP-1559 fee caps are decimal wei strings; empty -> derive from the chain.
+	parseWei := func(key string) *big.Int {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			if p, ok := new(big.Int).SetString(v, 10); ok {
+				return p
+			}
 		}
+		return nil
 	}
+	maxFeeWei := parseWei("PUBLISHER_MAX_FEE_PER_GAS")
+	maxPriorityWei := parseWei("PUBLISHER_MAX_PRIORITY_FEE")
 
 	r2Token := getEnvOrDefault("R2_TOKEN", "")
 	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
@@ -190,21 +196,22 @@ func LoadConfig() Config {
 		PollIntervalMax: getDuration("POLL_INTERVAL_MAX", 5*time.Second),
 		// Default visibility must exceed ReceiptTimeout so a slow-to-mine tx is
 		// resolved before the queue redelivers it (P5).
-		VisibilityTimeout:   getDuration("VISIBILITY_TIMEOUT", 90*time.Second),
-		GasLimit:            getUint64("PUBLISHER_GAS_LIMIT", 3_000_000),
-		GasPriceWei:         gasPriceWei,
-		ReceiptTimeout:      getDuration("PUBLISHER_RECEIPT_TIMEOUT", 60*time.Second),
-		ReceiptPollInterval: getDuration("PUBLISHER_RECEIPT_POLL_INTERVAL", 200*time.Millisecond),
-		BackoffBase:         getDuration("PUBLISHER_BACKOFF_BASE", 10*time.Millisecond),
-		PollJitter:          getFloat("PUBLISHER_POLL_JITTER", 0.1),
-		RPCURLs:             rpcURLs,
-		PublisherKeyHex:     os.Getenv("PUBLISHER_EOA_KEY"),
-		GrantStoreURL:       os.Getenv("GRANT_STORE_URL"),
-		R2URL:               os.Getenv("R2_URL"),
-		R2Token:             r2Token,
-		AWSAccessKeyID:      os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey:  awsSecretAccessKey,
-		AWSRegion:           getEnvOrDefault("AWS_REGION", "auto"),
+		VisibilityTimeout:       getDuration("VISIBILITY_TIMEOUT", 90*time.Second),
+		GasLimit:                getUint64("PUBLISHER_GAS_LIMIT", 3_000_000),
+		MaxFeePerGasWei:         maxFeeWei,
+		MaxPriorityFeePerGasWei: maxPriorityWei,
+		ReceiptTimeout:          getDuration("PUBLISHER_RECEIPT_TIMEOUT", 60*time.Second),
+		ReceiptPollInterval:     getDuration("PUBLISHER_RECEIPT_POLL_INTERVAL", 200*time.Millisecond),
+		BackoffBase:             getDuration("PUBLISHER_BACKOFF_BASE", 10*time.Millisecond),
+		PollJitter:              getFloat("PUBLISHER_POLL_JITTER", 0.1),
+		RPCURLs:                 rpcURLs,
+		PublisherKeyHex:         os.Getenv("PUBLISHER_EOA_KEY"),
+		GrantStoreURL:           os.Getenv("GRANT_STORE_URL"),
+		R2URL:                   os.Getenv("R2_URL"),
+		R2Token:                 r2Token,
+		AWSAccessKeyID:          os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:      awsSecretAccessKey,
+		AWSRegion:               getEnvOrDefault("AWS_REGION", "auto"),
 	}
 	return cfg
 }
@@ -256,11 +263,14 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	}
 	logSecretDigest(logger, "PUBLISHER_EOA_KEY", c.PublisherKeyHex)
 	logConfigValue(logger, "PUBLISHER_GAS_LIMIT", int(c.GasLimit))
-	gasPrice := ""
-	if c.GasPriceWei != nil {
-		gasPrice = c.GasPriceWei.String()
+	weiOrEmpty := func(v *big.Int) string {
+		if v == nil {
+			return ""
+		}
+		return v.String()
 	}
-	logConfigValue(logger, "PUBLISHER_GAS_PRICE", gasPrice)
+	logConfigValue(logger, "PUBLISHER_MAX_FEE_PER_GAS", weiOrEmpty(c.MaxFeePerGasWei))
+	logConfigValue(logger, "PUBLISHER_MAX_PRIORITY_FEE", weiOrEmpty(c.MaxPriorityFeePerGasWei))
 	logConfigValue(logger, "PUBLISHER_RECEIPT_TIMEOUT", c.ReceiptTimeout)
 	logConfigValue(logger, "PUBLISHER_RECEIPT_POLL_INTERVAL", c.ReceiptPollInterval)
 	logConfigValue(logger, "PUBLISHER_BACKOFF_BASE", c.BackoffBase)
