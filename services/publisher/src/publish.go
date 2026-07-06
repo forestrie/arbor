@@ -79,16 +79,13 @@ type PublishResult struct {
 	Reason      string // decoded revert name, or skip explanation
 }
 
-// ShouldAck reports whether the queue message may be acked. Terminal outcomes
-// (published, already-anchored, deterministic revert) ack; transient outcomes
-// (owner not yet anchored, unconfigured chain) leave the message for redelivery.
+// ShouldAck reports whether the queue message may be acked. Only the two
+// on-chain-confirmed outcomes ack — Published (we anchored it) and
+// AlreadyAnchored (a fresh logState read shows it is anchored/subsumed). Every
+// other status, including any revert, leaves the message for redelivery. This is
+// the single ack authority: no status acks a seal without on-chain confirmation.
 func (r PublishResult) ShouldAck() bool {
-	switch r.Status {
-	case StatusPublished, StatusAlreadyAnchored, StatusReverted:
-		return true
-	default:
-		return false
-	}
+	return r.Status == StatusPublished || r.Status == StatusAlreadyAnchored
 }
 
 // Publisher is the one-shot publish core: it turns a checkpoint object key into

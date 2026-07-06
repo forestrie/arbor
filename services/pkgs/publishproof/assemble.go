@@ -76,9 +76,17 @@ func AssemblePublish(
 	// verifyConsistencyProofChain links them from the on-chain accumulator. This
 	// relays the sealer's already-computed proofs — no massif node data is read
 	// for the earlier massifs, and multi-massif catch-up needs no spanning reader.
+	//
+	// Invariant: on-chain size is always a sealed boundary (publishCheckpoint sets
+	// log.size = the final proof's treeSize2, a checkpoint's sealed size), so the
+	// chain always starts at some embedded proof's treeSize1.
 	chain, err := BuildEmbeddedProofChain(ctx, target, targetOnchain.Size, massifIndex, receipt.ConsistencyProofs)
 	if err != nil {
 		return nil, SealedState{}, fmt.Errorf("build catch-up proof chain: %w", err)
+	}
+	if last := chain[len(chain)-1]; last.TreeSize2 != sealed.MMRSize {
+		return nil, SealedState{}, fmt.Errorf(
+			"head proof treeSize2 %d != sealed size %d", last.TreeSize2, sealed.MMRSize)
 	}
 	receipt.ConsistencyProofs = chain
 

@@ -55,11 +55,6 @@ type SubmitResult struct {
 	// Reason is the decoded revert name (e.g. "GrantRequirement") or the raw
 	// revert string when the selector is unrecognised. Empty on success.
 	Reason string
-	// Retryable is set for OutcomeReverted when the revert reflects the on-chain
-	// state having moved under us (a competing publisher anchored an intermediate
-	// size). Redelivery rebuilds a fresh catch-up proof and succeeds, so the
-	// caller must NOT ack. Deterministic reverts are terminal (Retryable=false).
-	Retryable bool
 }
 
 func (r SubmitResult) String() string {
