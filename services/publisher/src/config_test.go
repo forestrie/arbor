@@ -42,15 +42,16 @@ func TestValidateCLI(t *testing.T) {
 	}
 
 	cases := map[string]func(*Config){
-		"no chains":    func(c *Config) { c.RPCURLs = nil },
-		"no key":       func(c *Config) { c.PublisherKeyHex = "" },
-		"bad key":      func(c *Config) { c.PublisherKeyHex = "xyz" },
-		"no grant url": func(c *Config) { c.GrantStoreURL = "" },
-		"no r2":        func(c *Config) { c.R2URL = "" },
-		"no akid":      func(c *Config) { c.AWSAccessKeyID = "" },
-		"no secret":    func(c *Config) { c.AWSSecretAccessKey = "" },
-		"zero gas":     func(c *Config) { c.GasLimit = 0 },
-		"no receipt":   func(c *Config) { c.ReceiptTimeout = 0 },
+		"no chains":       func(c *Config) { c.RPCURLs = nil },
+		"no key":          func(c *Config) { c.PublisherKeyHex = "" },
+		"bad key":         func(c *Config) { c.PublisherKeyHex = "xyz" },
+		"no grant url":    func(c *Config) { c.GrantStoreURL = "" },
+		"grant url == r2": func(c *Config) { c.GrantStoreURL = c.R2URL },
+		"no r2":           func(c *Config) { c.R2URL = "" },
+		"no akid":         func(c *Config) { c.AWSAccessKeyID = "" },
+		"no secret":       func(c *Config) { c.AWSSecretAccessKey = "" },
+		"zero gas":        func(c *Config) { c.GasLimit = 0 },
+		"no receipt":      func(c *Config) { c.ReceiptTimeout = 0 },
 	}
 	for name, mutate := range cases {
 		cfg := baseValidCLIConfig()

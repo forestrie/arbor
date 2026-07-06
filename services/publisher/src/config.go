@@ -48,9 +48,12 @@ type Config struct {
 	// stays with the grant/signature chain — "postmark, not gatekeeper".
 	PublisherKeyHex string
 
-	// GrantStoreURL is the anonymous public base URL for the univocity-owned
-	// grant store and forest genesis objects (ResolveForestContract +
-	// ReadStoredGrant). Falls back to R2URL when unset.
+	// GrantStoreURL is the anonymous public-read base URL for the
+	// univocity-owned grant store and forest genesis objects
+	// (ResolveForestContract + ReadStoredGrant, via PublicBucketGetter — no
+	// SigV4). It must be the public bucket domain, NOT R2URL (the SigV4 S3-API
+	// endpoint): anonymous GETs against the S3 endpoint of a credentialed bucket
+	// return 403. No fallback to R2URL (P3).
 	GrantStoreURL string
 
 	// On-chain submission tuning (P13 — operational constants, not baked in).
@@ -203,10 +206,13 @@ func LoadConfig() Config {
 		AWSSecretAccessKey:  awsSecretAccessKey,
 		AWSRegion:           getEnvOrDefault("AWS_REGION", "auto"),
 	}
-	if cfg.GrantStoreURL == "" {
-		cfg.GrantStoreURL = cfg.R2URL
-	}
 	return cfg
+}
+
+// sameEndpoint reports whether two URLs address the same host+path (ignoring a
+// trailing slash) — used to reject GRANT_STORE_URL == R2_URL (P3).
+func sameEndpoint(a, b string) bool {
+	return strings.TrimRight(strings.TrimSpace(a), "/") == strings.TrimRight(strings.TrimSpace(b), "/")
 }
 
 // parseRPCURLs decodes the UNIVOCITY_RPC_URLS JSON object {"<chainId>": "<url>"}
@@ -308,13 +314,17 @@ func (c Config) ValidateCLI() error {
 		return fmt.Errorf("PUBLISHER_RECEIPT_TIMEOUT and PUBLISHER_RECEIPT_POLL_INTERVAL must be positive")
 	}
 	if c.GrantStoreURL == "" {
-		return fmt.Errorf("GRANT_STORE_URL (or R2_URL) is required for grant/genesis resolution")
+		return fmt.Errorf("GRANT_STORE_URL is required (anonymous public-read grant/genesis bucket domain)")
 	}
 	if err := validateHTTPSURL(c.GrantStoreURL); err != nil {
 		return fmt.Errorf("GRANT_STORE_URL is invalid: %w", err)
 	}
 	if c.R2URL == "" {
 		return fmt.Errorf("R2_URL is required")
+	}
+	if sameEndpoint(c.GrantStoreURL, c.R2URL) {
+		return fmt.Errorf(
+			"GRANT_STORE_URL must be the anonymous public bucket domain, distinct from R2_URL (the SigV4 S3-API endpoint); anonymous grant reads against the S3 endpoint return 403")
 	}
 	if c.AWSAccessKeyID == "" {
 		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for SigV4 signing")
