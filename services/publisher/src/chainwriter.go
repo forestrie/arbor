@@ -122,10 +122,13 @@ type ChainWriter struct {
 
 	mu      sync.Mutex
 	clients map[uint64]*ethclient.Client
-	// sendLocks serialise the send phase per chain so one PendingNonceAt read
-	// reflects the previous batch's admissions. Held only across sends, never
+	// sendLocks serialise the send phase per chain so admissions stay ordered
+	// (gap-free) and nonce allocation is atomic. Held only across sends, never
 	// across the receipt wait.
 	sendLocks map[uint64]*sync.Mutex
+	// nonces holds the per-chain in-process nonce counter. Correct because the
+	// publisher EOA is single-writer (see chainNonce).
+	nonces map[uint64]*chainNonce
 	// trackers holds one persistent receipt collector per chain (lazy start).
 	trackers map[uint64]*receiptTracker
 
@@ -173,6 +176,7 @@ func NewChainWriter(rpcURLs map[uint64]string, keyHex string, wc WriteConfig) (*
 		receiptPollInterval: wc.ReceiptPollInterval,
 		clients:             make(map[uint64]*ethclient.Client),
 		sendLocks:           make(map[uint64]*sync.Mutex),
+		nonces:              make(map[uint64]*chainNonce),
 		trackers:            make(map[uint64]*receiptTracker),
 	}, nil
 }

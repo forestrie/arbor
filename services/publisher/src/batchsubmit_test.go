@@ -238,6 +238,65 @@ func TestClassifyReceiptTransientVsTerminal(t *testing.T) {
 	}
 }
 
+func TestChainNonceReseedsOnlyWhenDrained(t *testing.T) {
+	s := newFakeSender(100)
+	w := writerWithSender(t, 1, s)
+	cn := w.nonce(1)
+	ctx := context.Background()
+
+	// First allocation seeds from the chain (drained: inflight == 0).
+	base, err := cn.allocate(ctx, s, w.from, 3)
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if base != 100 || s.nonceCalls != 1 {
+		t.Fatalf("base=%d nonceCalls=%d, want 100/1", base, s.nonceCalls)
+	}
+
+	// Second allocation while in flight must NOT re-read the chain, and must
+	// continue contiguously from the counter.
+	base2, err := cn.allocate(ctx, s, w.from, 2)
+	if err != nil {
+		t.Fatalf("allocate 2: %v", err)
+	}
+	if base2 != 103 || s.nonceCalls != 1 {
+		t.Errorf("base2=%d nonceCalls=%d, want 103/1 (no reseed while in flight)", base2, s.nonceCalls)
+	}
+
+	// Drain all five, then the chain nonce moves (e.g. mined elsewhere in the
+	// fake, or an eviction correction). Next allocation re-seeds.
+	for i := 0; i < 5; i++ {
+		cn.settle()
+	}
+	s.nonce = 200
+	base3, err := cn.allocate(ctx, s, w.from, 1)
+	if err != nil {
+		t.Fatalf("allocate 3: %v", err)
+	}
+	if base3 != 200 || s.nonceCalls != 2 {
+		t.Errorf("base3=%d nonceCalls=%d, want 200/2 (reseed when drained)", base3, s.nonceCalls)
+	}
+}
+
+func TestChainNonceReconcileRollsBack(t *testing.T) {
+	s := newFakeSender(0)
+	w := writerWithSender(t, 1, s)
+	cn := w.nonce(1)
+
+	base, err := cn.allocate(context.Background(), s, w.from, 3)
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if base != 0 || cn.next != 3 || cn.inflight != 3 {
+		t.Fatalf("after allocate: next=%d inflight=%d, want 3/3", cn.next, cn.inflight)
+	}
+	// Admitted only 1 of 3 (admission failed at nonce 1): give back the tail.
+	cn.reconcile(2)
+	if cn.next != 1 || cn.inflight != 1 {
+		t.Errorf("after reconcile: next=%d inflight=%d, want 1/1 (rolled back to the failed nonce)", cn.next, cn.inflight)
+	}
+}
+
 // revertData builds "0x"+selector+abi-encoded-args for a named IUnivocity error.
 func revertData(t *testing.T, name string, args ...interface{}) string {
 	t.Helper()

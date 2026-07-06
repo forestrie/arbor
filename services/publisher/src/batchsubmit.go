@@ -48,10 +48,82 @@ func (w *ChainWriter) SubmitBatch(ctx context.Context, reqs []AssembledPublish) 
 	wg.Wait()
 }
 
-// submitChainGroup sends a contiguous nonce block for one chain under the send
+// chainNonce is the per-chain in-process nonce counter. It is authoritative
+// because of a load-bearing invariant: **the publisher EOA is single-writer** —
+// only this process (and, under horizontal scaling, only one process per wallet)
+// ever sends from it, so nothing but our own admissions advances the account
+// nonce. While we have transactions in flight we trust the counter and never hit
+// the RPC; when we are fully drained (inflight == 0) we re-seed from
+// PendingNonceAt, which is then guaranteed to equal the counter (all our sends
+// mined) or, after a rare mempool eviction, the corrected lower value. If two
+// processes ever shared one wallet this counter would silently corrupt.
+type chainNonce struct {
+	mu       sync.Mutex
+	next     uint64 // next nonce to hand out
+	inflight int    // admitted txs not yet resolved (mined/reverted/abandoned)
+}
+
+func (w *ChainWriter) nonce(chainID uint64) *chainNonce {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cn, ok := w.nonces[chainID]
+	if !ok {
+		cn = &chainNonce{}
+		w.nonces[chainID] = cn
+	}
+	return cn
+}
+
+// allocate reserves a contiguous block of n nonces and returns the base. It
+// re-seeds from the chain only when drained (inflight == 0); otherwise it hands
+// out from memory. Callers must hold the chain send lock so allocations do not
+// interleave across batches.
+func (cn *chainNonce) allocate(ctx context.Context, s txSender, from common.Address, n int) (uint64, error) {
+	cn.mu.Lock()
+	defer cn.mu.Unlock()
+	if cn.inflight == 0 {
+		onchain, err := s.PendingNonceAt(ctx, from)
+		if err != nil {
+			return 0, err
+		}
+		cn.next = onchain
+	}
+	base := cn.next
+	cn.next += uint64(n)
+	cn.inflight += n
+	return base, nil
+}
+
+// reconcile gives back the tail of a reserved block that was never admitted
+// (admission failure / sign error): those nonces were not consumed, so roll the
+// counter back and drop them from the in-flight count.
+func (cn *chainNonce) reconcile(unused int) {
+	if unused <= 0 {
+		return
+	}
+	cn.mu.Lock()
+	defer cn.mu.Unlock()
+	cn.next -= uint64(unused)
+	cn.inflight -= unused
+}
+
+// settle marks one admitted tx resolved (mined, reverted, or abandoned on
+// timeout). next is not touched: a mined/reverted tx consumed its nonce (already
+// counted at allocate), and a timed-out tx may still mine — an eviction that
+// leaves next ahead of the chain is corrected by the next drained re-seed.
+func (cn *chainNonce) settle() {
+	cn.mu.Lock()
+	defer cn.mu.Unlock()
+	if cn.inflight > 0 {
+		cn.inflight--
+	}
+}
+
+// submitChainGroup admits a contiguous nonce block for one chain under the send
 // lock, stopping on the first admission failure. Nothing above a failed nonce is
 // ever sent, so the nonce sequence is gap-free by construction. Admitted txs are
-// handed to the collector; unsent requests are nacked for redelivery.
+// handed to the collector; unsent requests are nacked for redelivery and their
+// reserved nonces rolled back.
 func (w *ChainWriter) submitChainGroup(ctx context.Context, chainID uint64, group []AssembledPublish) {
 	s, err := w.sender(chainID)
 	if err != nil {
@@ -59,25 +131,31 @@ func (w *ChainWriter) submitChainGroup(ctx context.Context, chainID uint64, grou
 		return
 	}
 	tracker := w.tracker(ctx, chainID, s)
+	cn := w.nonce(chainID)
 	chainIDBig := new(big.Int).SetUint64(chainID)
 
 	lock := w.sendLock(chainID)
 	lock.Lock()
 	defer lock.Unlock()
 
-	nonce, err := s.PendingNonceAt(ctx, w.from)
+	base, err := cn.allocate(ctx, s, w.from, len(group))
 	if err != nil {
 		nackFrom(group, 0, chainID, fmt.Errorf("nonce chain %d: %w", chainID, err))
 		return
 	}
 	tip, feeCap, err := w.feeParams(ctx, s)
 	if err != nil {
+		cn.reconcile(len(group)) // nothing admitted
 		nackFrom(group, 0, chainID, fmt.Errorf("fee params chain %d: %w", chainID, err))
 		return
 	}
 
+	admitted := 0
+	// Give back the unsent tail of the reserved block in every return path.
+	defer func() { cn.reconcile(len(group) - admitted) }()
+
 	for i, r := range group {
-		signed, err := w.buildAndSign(chainIDBig, nonce+uint64(i), r.Contract, r.Calldata, tip, feeCap)
+		signed, err := w.buildAndSign(chainIDBig, base+uint64(i), r.Contract, r.Calldata, tip, feeCap)
 		if err != nil {
 			// Nothing at i or above was sent — nack the whole remainder.
 			nackFrom(group, i, chainID, fmt.Errorf("sign chain %d: %w", chainID, err))
@@ -86,7 +164,7 @@ func (w *ChainWriter) submitChainGroup(ctx context.Context, chainID uint64, grou
 		if err := s.SendTransaction(ctx, signed); err != nil {
 			// Admission failure. Classify this one (a node may reject with revert
 			// data at send), then STOP: the suffix is never sent, keeping the
-			// nonce sequence gap-free.
+			// nonce sequence gap-free. The reserved nonces base+i.. roll back.
 			if reason, ok := w.classifyRevert(err); ok {
 				r.Ack(SubmitResult{Outcome: OutcomeReverted, ChainID: chainID,
 					Reason: reason, Retryable: revertRetryable(reason)})
@@ -97,6 +175,7 @@ func (w *ChainWriter) submitChainGroup(ctx context.Context, chainID uint64, grou
 			return
 		}
 		tracker.watch(signed, r.Ack)
+		admitted++
 	}
 }
 
@@ -159,7 +238,8 @@ func (t *receiptTracker) snapshot() []*watchItem {
 	return out
 }
 
-// resolve removes the item and fires its Ack once, in a goroutine so a slow ack
+// resolve removes the item, settles the nonce counter (this admitted tx is now
+// mined/reverted/abandoned), and fires its Ack once in a goroutine so a slow ack
 // (HTTP) never stalls the poll loop.
 func (t *receiptTracker) resolve(hash common.Hash, res SubmitResult) {
 	t.mu.Lock()
@@ -169,6 +249,7 @@ func (t *receiptTracker) resolve(hash common.Hash, res SubmitResult) {
 	}
 	t.mu.Unlock()
 	if ok {
+		t.w.nonce(t.chainID).settle()
 		go it.ack(res)
 	}
 }
