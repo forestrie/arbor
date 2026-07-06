@@ -35,9 +35,13 @@ const (
 	// StatusChainNotConfigured — the forest is bound to a chain absent from
 	// UNIVOCITY_RPC_URLS (D3); skip + alert, leave queued for later.
 	StatusChainNotConfigured
-	// StatusReverted — the contract rejected the submission (deterministic);
-	// alert with the decoded reason.
+	// StatusReverted — the contract rejected the submission deterministically
+	// (retrying identical calldata cannot help); ack + alert with the reason.
 	StatusReverted
+	// StatusRetry — a transient revert: the on-chain state advanced under us
+	// between read and submit, so a fresh catch-up proof would succeed. Retry
+	// (do not ack) — redelivery rebuilds against the new size.
+	StatusRetry
 )
 
 func (s PublishStatus) String() string {
@@ -52,6 +56,8 @@ func (s PublishStatus) String() string {
 		return "chain_not_configured"
 	case StatusReverted:
 		return "reverted"
+	case StatusRetry:
+		return "retry"
 	default:
 		return "unknown"
 	}
@@ -99,7 +105,12 @@ type Publisher struct {
 // NewPublisher wires the core from config. doer is the shared pooled HTTP
 // client; httpClient is its underlying *http.Client for the public grant store.
 func NewPublisher(cfg Config, httpClient *HTTPClient, logger *slog.Logger) (*Publisher, error) {
-	writer, err := NewChainWriter(cfg.RPCURLs, cfg.PublisherKeyHex)
+	writer, err := NewChainWriter(cfg.RPCURLs, cfg.PublisherKeyHex, WriteConfig{
+		GasLimit:            cfg.GasLimit,
+		GasPriceWei:         cfg.GasPriceWei,
+		ReceiptTimeout:      cfg.ReceiptTimeout,
+		ReceiptPollInterval: cfg.ReceiptPollInterval,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -218,8 +229,13 @@ func (p *Publisher) Publish(ctx context.Context, key string) (PublishResult, err
 	case OutcomePublished:
 		res.Status = StatusPublished
 	case OutcomeReverted:
-		res.Status = StatusReverted
 		res.Reason = sub.Reason
+		if sub.Retryable {
+			// State advanced under us; redelivery rebuilds a fresh catch-up proof.
+			res.Status = StatusRetry
+		} else {
+			res.Status = StatusReverted
+		}
 	}
 	return res, nil
 }

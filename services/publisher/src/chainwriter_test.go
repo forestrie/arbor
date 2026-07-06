@@ -15,11 +15,38 @@ const anvilKey0 = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2f
 
 func newTestWriter(t *testing.T) *ChainWriter {
 	t.Helper()
-	w, err := NewChainWriter(map[uint64]string{31337: "http://127.0.0.1:8545"}, anvilKey0)
+	w, err := NewChainWriter(map[uint64]string{31337: "http://127.0.0.1:8545"}, anvilKey0, WriteConfig{})
 	if err != nil {
 		t.Fatalf("NewChainWriter: %v", err)
 	}
 	return w
+}
+
+func TestRevertRetryable(t *testing.T) {
+	transient := []string{
+		"SizeMustIncrease",
+		"SizeMustIncrease(3, 5)",
+		"InvalidConsistencyProof",
+		"MinGrowthNotMet(1, 1, 2)",
+	}
+	for _, r := range transient {
+		if !revertRetryable(r) {
+			t.Errorf("%q should be retryable", r)
+		}
+	}
+	terminal := []string{
+		"GrantRequirement(1, 2)",
+		"ConsistencyReceiptSignatureInvalid",
+		"InvalidCheckpointCose",
+		"LogNotFound(0x00)",
+		"", // unknown/empty -> terminal
+		"SomeUnknownError",
+	}
+	for _, r := range terminal {
+		if revertRetryable(r) {
+			t.Errorf("%q should be terminal (not retryable)", r)
+		}
+	}
 }
 
 // fakeDataError implements the go-ethereum rpc.DataError shape so classifyRevert

@@ -49,10 +49,17 @@ const defaultBackoffBase = 10 * time.Millisecond
 func (q *QueueConsumer) ConsumeQueue(ctx context.Context) {
 	backoffBase := q.cfg.PollIntervalMin
 	if backoffBase == 0 {
+		backoffBase = q.cfg.BackoffBase
+	}
+	if backoffBase == 0 {
 		backoffBase = q.cfg.PollIntervalMax / 8
 	}
 	if backoffBase == 0 {
 		backoffBase = defaultBackoffBase
+	}
+	jitterFrac := q.cfg.PollJitter
+	if jitterFrac <= 0 {
+		jitterFrac = 0.1
 	}
 
 	q.logger.Info("starting publisher queue consumer",
@@ -108,9 +115,13 @@ func (q *QueueConsumer) ConsumeQueue(ctx context.Context) {
 			}
 			sleep = currentBackoff
 		}
-		if sleep > 0 {
-			jitter := time.Duration(rand.Int63n(int64(sleep)/5)) - sleep/10
-			sleep += jitter
+		if sleep > 0 && jitterFrac > 0 {
+			// ± jitterFrac of the sleep, centred on zero.
+			span := int64(float64(sleep) * jitterFrac * 2)
+			if span > 0 {
+				jitter := time.Duration(rand.Int63n(span)) - time.Duration(float64(sleep)*jitterFrac)
+				sleep += jitter
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -166,34 +177,34 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 	return n, nil
 }
 
-// processBatch publishes each message's checkpoint concurrently and acks the
-// terminal ones. The ChainWriter serialises per-chain nonces, so concurrent
-// publishes across logs are safe.
+// processBatch publishes each message's checkpoint concurrently and acks each
+// one the instant its outcome is terminal — no batch barrier, so a slow-to-mine
+// tx does not hold its finished siblings past their visibility lease (P5). The
+// ChainWriter serialises per-chain nonces, so concurrent publishes across logs
+// are safe.
 func (q *QueueConsumer) processBatch(ctx context.Context, msgs []QueueMessage) {
 	if len(msgs) == 0 {
 		return
 	}
 	q.metrics.AddMessagesProcessed(len(msgs))
 
-	var (
-		wg    sync.WaitGroup
-		mu    sync.Mutex
-		toAck []QueueMessage
-	)
+	var wg sync.WaitGroup
 	for _, msg := range msgs {
 		msg := msg
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if q.handleMessage(ctx, msg) {
-				mu.Lock()
-				toAck = append(toAck, msg)
-				mu.Unlock()
+				if err := q.acknowledge(ctx, msg); err != nil {
+					q.logger.Warn("ack failed", "messageID", msg.ID, "error", err)
+					q.metrics.RecordAck(false)
+				} else {
+					q.metrics.RecordAck(true)
+				}
 			}
 		}()
 	}
 	wg.Wait()
-	q.ackAll(ctx, toAck)
 }
 
 // handleMessage returns true when the message should be acked.
@@ -213,12 +224,16 @@ func (q *QueueConsumer) handleMessage(ctx context.Context, msg QueueMessage) boo
 		return false
 	}
 
+	// Count the decoded reason for both terminal and transient (retryable) reverts.
 	reason := ""
-	if res.Status == publisher.StatusReverted {
+	if res.Status == publisher.StatusReverted || res.Status == publisher.StatusRetry {
 		reason = res.Reason
 	}
 	q.metrics.RecordPublish(res.Status.String(), reason)
-	if res.SealedSize >= res.OnchainSize {
+	// Anchor lag is only meaningful for terminal-success outcomes; other statuses
+	// leave OnchainSize/SealedSize unresolved (P11).
+	if (res.Status == publisher.StatusPublished || res.Status == publisher.StatusAlreadyAnchored) &&
+		res.SealedSize >= res.OnchainSize {
 		q.metrics.SetAnchorLag(
 			strconv.FormatUint(res.ChainID, 10), res.Contract.Hex(),
 			float64(res.SealedSize-res.OnchainSize))
@@ -263,24 +278,6 @@ func cloudflareQueueAPIBase(raw string) (string, error) {
 	s = strings.TrimSuffix(s, "/")
 	s = strings.TrimSuffix(s, "/messages")
 	return s, nil
-}
-
-func (q *QueueConsumer) ackAll(ctx context.Context, msgs []QueueMessage) {
-	var wg sync.WaitGroup
-	for _, msg := range msgs {
-		msg := msg
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := q.acknowledge(ctx, msg); err != nil {
-				q.logger.Warn("ack failed", "messageID", msg.ID, "error", err)
-				q.metrics.RecordAck(false)
-			} else {
-				q.metrics.RecordAck(true)
-			}
-		}()
-	}
-	wg.Wait()
 }
 
 func (q *QueueConsumer) acknowledge(ctx context.Context, msg QueueMessage) error {

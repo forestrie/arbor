@@ -44,6 +44,11 @@ type SubmitResult struct {
 	// Reason is the decoded revert name (e.g. "GrantRequirement") or the raw
 	// revert string when the selector is unrecognised. Empty on success.
 	Reason string
+	// Retryable is set for OutcomeReverted when the revert reflects the on-chain
+	// state having moved under us (a competing publisher anchored an intermediate
+	// size). Redelivery rebuilds a fresh catch-up proof and succeeds, so the
+	// caller must NOT ack. Deterministic reverts are terminal (Retryable=false).
+	Retryable bool
 }
 
 func (r SubmitResult) String() string {
@@ -77,17 +82,28 @@ type ChainWriter struct {
 	from    common.Address
 	errABI  abi.ABI
 
+	// Submission tuning (config-driven, P13).
+	gasLimit            uint64
+	gasPriceWei         *big.Int // nil -> SuggestGasPrice
+	receiptTimeout      time.Duration
+	receiptPollInterval time.Duration
+
 	mu      sync.Mutex
 	clients map[uint64]*ethclient.Client
 	// chainLocks serialises submissions per chain (nonce safety).
 	chainLocks map[uint64]*sync.Mutex
+}
 
-	// receiptTimeout bounds the wait for a mined receipt.
-	receiptTimeout time.Duration
+// WriteConfig carries the configurable submission knobs (P13).
+type WriteConfig struct {
+	GasLimit            uint64
+	GasPriceWei         *big.Int
+	ReceiptTimeout      time.Duration
+	ReceiptPollInterval time.Duration
 }
 
 // NewChainWriter builds a writer over the chainId->rpc map with the gas-only EOA.
-func NewChainWriter(rpcURLs map[uint64]string, keyHex string) (*ChainWriter, error) {
+func NewChainWriter(rpcURLs map[uint64]string, keyHex string, wc WriteConfig) (*ChainWriter, error) {
 	key, err := parsePublisherKey(keyHex)
 	if err != nil {
 		return nil, fmt.Errorf("publisher key: %w", err)
@@ -96,14 +112,26 @@ func NewChainWriter(rpcURLs map[uint64]string, keyHex string) (*ChainWriter, err
 	if err != nil {
 		return nil, fmt.Errorf("parse univocity errors abi: %w", err)
 	}
+	if wc.ReceiptTimeout <= 0 {
+		wc.ReceiptTimeout = 60 * time.Second
+	}
+	if wc.ReceiptPollInterval <= 0 {
+		wc.ReceiptPollInterval = 200 * time.Millisecond
+	}
+	if wc.GasLimit == 0 {
+		wc.GasLimit = 3_000_000
+	}
 	return &ChainWriter{
-		rpcURLs:        rpcURLs,
-		key:            key,
-		from:           crypto.PubkeyToAddress(key.PublicKey),
-		errABI:         errABI,
-		clients:        make(map[uint64]*ethclient.Client),
-		chainLocks:     make(map[uint64]*sync.Mutex),
-		receiptTimeout: 60 * time.Second,
+		rpcURLs:             rpcURLs,
+		key:                 key,
+		from:                crypto.PubkeyToAddress(key.PublicKey),
+		errABI:              errABI,
+		gasLimit:            wc.GasLimit,
+		gasPriceWei:         wc.GasPriceWei,
+		receiptTimeout:      wc.ReceiptTimeout,
+		receiptPollInterval: wc.ReceiptPollInterval,
+		clients:             make(map[uint64]*ethclient.Client),
+		chainLocks:          make(map[uint64]*sync.Mutex),
 	}, nil
 }
 
@@ -152,25 +180,16 @@ func (w *ChainWriter) Close() {
 }
 
 // Submit sends publishCheckpoint calldata to (chainID, contract) and returns the
-// classified outcome. It gates on EstimateGas so a would-revert is classified
-// without spending gas, then submits a legacy tx and waits for the receipt.
+// classified outcome. Gas for publishCheckpoint is predictable, so it uses a
+// configured gas limit rather than EstimateGas (P13); a would-revert therefore
+// mines as a revert and is classified from the receipt. A reverting tx still
+// consumes its nonce, which keeps the nonce sequence gap-free.
 func (w *ChainWriter) Submit(
 	ctx context.Context, chainID uint64, contract common.Address, calldata []byte,
 ) (SubmitResult, error) {
 	client, err := w.Client(chainID)
 	if err != nil {
 		return SubmitResult{}, err
-	}
-
-	// Gas-hygiene gate: EstimateGas executes the call and reverts early with the
-	// contract error, before we spend a nonce or gas.
-	call := ethereum.CallMsg{From: w.from, To: &contract, Data: calldata}
-	gas, err := client.EstimateGas(ctx, call)
-	if err != nil {
-		if reason, ok := w.classifyRevert(err); ok {
-			return SubmitResult{Outcome: OutcomeReverted, ChainID: chainID, Reason: reason}, nil
-		}
-		return SubmitResult{}, fmt.Errorf("estimate gas chain %d: %w", chainID, err)
 	}
 
 	// Serialise per-chain so the nonce we read is the one we send.
@@ -182,21 +201,25 @@ func (w *ChainWriter) Submit(
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("nonce chain %d: %w", chainID, err)
 	}
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	if err != nil {
-		return SubmitResult{}, fmt.Errorf("gas price chain %d: %w", chainID, err)
+	gasPrice := w.gasPriceWei
+	if gasPrice == nil {
+		gasPrice, err = client.SuggestGasPrice(ctx)
+		if err != nil {
+			return SubmitResult{}, fmt.Errorf("gas price chain %d: %w", chainID, err)
+		}
 	}
-	// 20% headroom over the estimate.
-	gasLimit := gas + gas/5
 
-	tx := types.NewTransaction(nonce, contract, big.NewInt(0), gasLimit, gasPrice, calldata)
+	tx := types.NewTransaction(nonce, contract, big.NewInt(0), w.gasLimit, gasPrice, calldata)
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(new(big.Int).SetUint64(chainID)), w.key)
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("sign tx chain %d: %w", chainID, err)
 	}
 	if err := client.SendTransaction(ctx, signed); err != nil {
 		if reason, ok := w.classifyRevert(err); ok {
-			return SubmitResult{Outcome: OutcomeReverted, ChainID: chainID, Reason: reason}, nil
+			return SubmitResult{
+				Outcome: OutcomeReverted, ChainID: chainID, Reason: reason,
+				Retryable: revertRetryable(reason),
+			}, nil
 		}
 		return SubmitResult{}, fmt.Errorf("send tx chain %d: %w", chainID, err)
 	}
@@ -209,12 +232,34 @@ func (w *ChainWriter) Submit(
 		reason := w.revertReasonAt(ctx, client, signed, receipt.BlockNumber)
 		return SubmitResult{
 			Outcome: OutcomeReverted, ChainID: chainID, TxHash: signed.Hash(),
-			GasUsed: receipt.GasUsed, Reason: reason,
+			GasUsed: receipt.GasUsed, Reason: reason, Retryable: revertRetryable(reason),
 		}, nil
 	}
 	return SubmitResult{
 		Outcome: OutcomePublished, ChainID: chainID, TxHash: signed.Hash(), GasUsed: receipt.GasUsed,
 	}, nil
+}
+
+// transientRevertNames are the contract errors that reflect the on-chain state
+// advancing under us (a competing publisher anchored an intermediate size).
+// Redelivery rebuilds a fresh catch-up proof from the new size and succeeds, so
+// these must be retried, never acked-and-dropped (P1). Every other revert is
+// deterministic — retrying the identical calldata cannot help — and is terminal.
+var transientRevertNames = map[string]struct{}{
+	"SizeMustIncrease":        {},
+	"InvalidConsistencyProof": {},
+	"MinGrowthNotMet":         {},
+}
+
+// revertRetryable reports whether a decoded revert reason is transient. reason
+// is "Name" or "Name(args...)" (classifyRevert), so match on the leading name.
+func revertRetryable(reason string) bool {
+	name := reason
+	if i := strings.IndexByte(reason, '('); i >= 0 {
+		name = reason[:i]
+	}
+	_, ok := transientRevertNames[name]
+	return ok
 }
 
 func (w *ChainWriter) waitReceipt(
@@ -235,7 +280,7 @@ func (w *ChainWriter) waitReceipt(
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(w.receiptPollInterval):
 		}
 	}
 }

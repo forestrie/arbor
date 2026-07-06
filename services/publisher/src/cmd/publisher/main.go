@@ -113,6 +113,11 @@ func runDaemon() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	if cfg.VisibilityTimeout <= cfg.ReceiptTimeout {
+		slog.Warn("VISIBILITY_TIMEOUT should exceed PUBLISHER_RECEIPT_TIMEOUT so a slow tx resolves before redelivery",
+			"visibility_timeout", cfg.VisibilityTimeout.String(),
+			"receipt_timeout", cfg.ReceiptTimeout.String())
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

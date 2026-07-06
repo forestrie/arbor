@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net/url"
 	"os"
 	"strconv"
@@ -51,6 +52,19 @@ type Config struct {
 	// grant store and forest genesis objects (ResolveForestContract +
 	// ReadStoredGrant). Falls back to R2URL when unset.
 	GrantStoreURL string
+
+	// On-chain submission tuning (P13 — operational constants, not baked in).
+	// publishCheckpoint gas is predictable, so we use a fixed limit rather than
+	// EstimateGas; GasPriceWei, when set, caps/pins the price and skips the
+	// SuggestGasPrice read.
+	GasLimit            uint64
+	GasPriceWei         *big.Int
+	ReceiptTimeout      time.Duration
+	ReceiptPollInterval time.Duration
+
+	// Queue poll backoff tuning.
+	BackoffBase time.Duration
+	PollJitter  float64 // fraction of the sleep applied as ± jitter (e.g. 0.1)
 
 	// R2 access configuration (S3-compatible endpoint) for massif + checkpoint
 	// object reads.
@@ -126,6 +140,32 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
+	getUint64 := func(key string, defaultVal uint64) uint64 {
+		if val := os.Getenv(key); val != "" {
+			if parsed, err := strconv.ParseUint(val, 10, 64); err == nil {
+				return parsed
+			}
+		}
+		return defaultVal
+	}
+
+	getFloat := func(key string, defaultVal float64) float64 {
+		if val := os.Getenv(key); val != "" {
+			if parsed, err := strconv.ParseFloat(val, 64); err == nil {
+				return parsed
+			}
+		}
+		return defaultVal
+	}
+
+	// PUBLISHER_GAS_PRICE is a decimal wei string; empty -> SuggestGasPrice.
+	var gasPriceWei *big.Int
+	if v := strings.TrimSpace(os.Getenv("PUBLISHER_GAS_PRICE")); v != "" {
+		if p, ok := new(big.Int).SetString(v, 10); ok {
+			gasPriceWei = p
+		}
+	}
+
 	r2Token := getEnvOrDefault("R2_TOKEN", "")
 	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
 	if awsSecretAccessKey == "" && r2Token != "" {
@@ -137,23 +177,31 @@ func LoadConfig() Config {
 	rpcURLs, _ := parseRPCURLs(os.Getenv("UNIVOCITY_RPC_URLS"))
 
 	cfg := Config{
-		Port:               getEnvOrDefault("PORT", "9090"),
-		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
-		ShutdownTimeout:    getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		QueueURL:           os.Getenv("QUEUE_URL"),
-		QueueToken:         os.Getenv("QUEUE_TOKEN"),
-		QueueBatchSize:     getInt("QUEUE_BATCH_SIZE", 31),
-		PollIntervalMin:    getDuration("POLL_INTERVAL_MIN", 0),
-		PollIntervalMax:    getDuration("POLL_INTERVAL_MAX", 5*time.Second),
-		VisibilityTimeout:  getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
-		RPCURLs:            rpcURLs,
-		PublisherKeyHex:    os.Getenv("PUBLISHER_EOA_KEY"),
-		GrantStoreURL:      os.Getenv("GRANT_STORE_URL"),
-		R2URL:              os.Getenv("R2_URL"),
-		R2Token:            r2Token,
-		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey: awsSecretAccessKey,
-		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
+		Port:            getEnvOrDefault("PORT", "9090"),
+		LogLevel:        getEnvOrDefault("LOG_LEVEL", "info"),
+		ShutdownTimeout: getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		QueueURL:        os.Getenv("QUEUE_URL"),
+		QueueToken:      os.Getenv("QUEUE_TOKEN"),
+		QueueBatchSize:  getInt("QUEUE_BATCH_SIZE", 31),
+		PollIntervalMin: getDuration("POLL_INTERVAL_MIN", 0),
+		PollIntervalMax: getDuration("POLL_INTERVAL_MAX", 5*time.Second),
+		// Default visibility must exceed ReceiptTimeout so a slow-to-mine tx is
+		// resolved before the queue redelivers it (P5).
+		VisibilityTimeout:   getDuration("VISIBILITY_TIMEOUT", 90*time.Second),
+		GasLimit:            getUint64("PUBLISHER_GAS_LIMIT", 3_000_000),
+		GasPriceWei:         gasPriceWei,
+		ReceiptTimeout:      getDuration("PUBLISHER_RECEIPT_TIMEOUT", 60*time.Second),
+		ReceiptPollInterval: getDuration("PUBLISHER_RECEIPT_POLL_INTERVAL", 200*time.Millisecond),
+		BackoffBase:         getDuration("PUBLISHER_BACKOFF_BASE", 10*time.Millisecond),
+		PollJitter:          getFloat("PUBLISHER_POLL_JITTER", 0.1),
+		RPCURLs:             rpcURLs,
+		PublisherKeyHex:     os.Getenv("PUBLISHER_EOA_KEY"),
+		GrantStoreURL:       os.Getenv("GRANT_STORE_URL"),
+		R2URL:               os.Getenv("R2_URL"),
+		R2Token:             r2Token,
+		AWSAccessKeyID:      os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:  awsSecretAccessKey,
+		AWSRegion:           getEnvOrDefault("AWS_REGION", "auto"),
 	}
 	if cfg.GrantStoreURL == "" {
 		cfg.GrantStoreURL = cfg.R2URL
@@ -201,6 +249,16 @@ func (c Config) LogConfig(logger *slog.Logger) {
 		logConfigValue(logger, fmt.Sprintf("UNIVOCITY_RPC_URL[%d]", id), u)
 	}
 	logSecretDigest(logger, "PUBLISHER_EOA_KEY", c.PublisherKeyHex)
+	logConfigValue(logger, "PUBLISHER_GAS_LIMIT", int(c.GasLimit))
+	gasPrice := ""
+	if c.GasPriceWei != nil {
+		gasPrice = c.GasPriceWei.String()
+	}
+	logConfigValue(logger, "PUBLISHER_GAS_PRICE", gasPrice)
+	logConfigValue(logger, "PUBLISHER_RECEIPT_TIMEOUT", c.ReceiptTimeout)
+	logConfigValue(logger, "PUBLISHER_RECEIPT_POLL_INTERVAL", c.ReceiptPollInterval)
+	logConfigValue(logger, "PUBLISHER_BACKOFF_BASE", c.BackoffBase)
+	logConfigValue(logger, "PUBLISHER_POLL_JITTER", fmt.Sprintf("%g", c.PollJitter))
 	logConfigValue(logger, "GRANT_STORE_URL", c.GrantStoreURL)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
@@ -242,6 +300,12 @@ func (c Config) ValidateCLI() error {
 	}
 	if _, err := parsePublisherKey(c.PublisherKeyHex); err != nil {
 		return fmt.Errorf("PUBLISHER_EOA_KEY is invalid: %w", err)
+	}
+	if c.GasLimit == 0 {
+		return fmt.Errorf("PUBLISHER_GAS_LIMIT must be greater than zero")
+	}
+	if c.ReceiptTimeout <= 0 || c.ReceiptPollInterval <= 0 {
+		return fmt.Errorf("PUBLISHER_RECEIPT_TIMEOUT and PUBLISHER_RECEIPT_POLL_INTERVAL must be positive")
 	}
 	if c.GrantStoreURL == "" {
 		return fmt.Errorf("GRANT_STORE_URL (or R2_URL) is required for grant/genesis resolution")

@@ -1,6 +1,9 @@
 package publisher
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseRPCURLs(t *testing.T) {
 	m, err := parseRPCURLs(`{"84532":"https://sepolia.base.org","31337":"http://127.0.0.1:8545"}`)
@@ -20,13 +23,16 @@ func TestParseRPCURLs(t *testing.T) {
 
 func baseValidCLIConfig() Config {
 	return Config{
-		RPCURLs:            map[uint64]string{84532: "https://sepolia.base.org"},
-		PublisherKeyHex:    anvilKey0,
-		GrantStoreURL:      "https://pub.example.com",
-		R2URL:              "https://r2.example.com",
-		AWSAccessKeyID:     "akid",
-		AWSSecretAccessKey: "secret",
-		AWSRegion:          "auto",
+		RPCURLs:             map[uint64]string{84532: "https://sepolia.base.org"},
+		PublisherKeyHex:     anvilKey0,
+		GrantStoreURL:       "https://pub.example.com",
+		R2URL:               "https://r2.example.com",
+		AWSAccessKeyID:      "akid",
+		AWSSecretAccessKey:  "secret",
+		AWSRegion:           "auto",
+		GasLimit:            3_000_000,
+		ReceiptTimeout:      60 * time.Second,
+		ReceiptPollInterval: 200 * time.Millisecond,
 	}
 }
 
@@ -43,6 +49,8 @@ func TestValidateCLI(t *testing.T) {
 		"no r2":        func(c *Config) { c.R2URL = "" },
 		"no akid":      func(c *Config) { c.AWSAccessKeyID = "" },
 		"no secret":    func(c *Config) { c.AWSSecretAccessKey = "" },
+		"zero gas":     func(c *Config) { c.GasLimit = 0 },
+		"no receipt":   func(c *Config) { c.ReceiptTimeout = 0 },
 	}
 	for name, mutate := range cases {
 		cfg := baseValidCLIConfig()
