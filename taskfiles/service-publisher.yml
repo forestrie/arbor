@@ -1,0 +1,70 @@
+---
+version: "3"
+
+tasks:
+  build:
+    desc: Build publisher Docker image
+    dir: "{{.ROOT_DIR}}"
+    vars:
+      IMAGE_TAG:
+        sh: |
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            echo "${IMAGE_TAG}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TS=$(date -u +%s)
+            echo "main-${SHORT_SHA}-${TS}"
+          fi
+      VERSION:
+        sh: echo "${VERSION:-$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --abbrev-ref HEAD)}"
+      COMMIT:
+        sh: echo "${COMMIT:-$(git rev-parse HEAD)}"
+      BUILD_DATE:
+        sh: echo "${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+    cmds:
+      - |
+        echo "Building publisher:{{.IMAGE_TAG}}"
+        echo "  VERSION={{.VERSION}}"
+        echo "  COMMIT={{.COMMIT}}"
+        echo "  BUILD_DATE={{.BUILD_DATE}}"
+        docker build \
+          --build-arg VERSION={{.VERSION}} \
+          --build-arg COMMIT={{.COMMIT}} \
+          --build-arg BUILD_DATE={{.BUILD_DATE}} \
+          -t {{.IMAGE_URL}}/publisher:{{.IMAGE_TAG}} \
+          -f ./services/publisher/Dockerfile \
+          ./services
+        echo "Build complete: {{.IMAGE_URL}}/publisher:{{.IMAGE_TAG}}"
+
+  push:
+    desc: Push publisher Docker image
+    dir: "{{.ROOT_DIR}}"
+    vars:
+      IMAGE_TAG:
+        sh: |
+          if [ -n "${IMAGE_TAG:-}" ]; then
+            echo "${IMAGE_TAG}"
+          else
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            TS=$(date -u +%s)
+            echo "main-${SHORT_SHA}-${TS}"
+          fi
+    cmds:
+      - |
+        echo "Pushing publisher:{{.IMAGE_TAG}}"
+        docker push {{.IMAGE_URL}}/publisher:{{.IMAGE_TAG}}
+        echo "Push complete: {{.IMAGE_URL}}/publisher:{{.IMAGE_TAG}}"
+
+  pause:
+    desc: "pause the publisher deployment"
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - flux suspend kustomization publisher --namespace flux-system
+      - kubectl scale deployment/publisher -n forestrie-arbor --replicas=0
+
+  resume:
+    desc: "resume the publisher deployment"
+    dir: "{{.ROOT_DIR}}"
+    cmds:
+      - kubectl scale deployment/publisher -n forestrie-arbor --replicas=1
+      - flux resume kustomization publisher --namespace flux-system

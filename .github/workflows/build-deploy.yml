@@ -111,6 +111,13 @@ jobs:
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
 
+      - name: Build Publisher Image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
+        run: task publisher:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+
       - name: Build Custodian Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
@@ -142,6 +149,12 @@ jobs:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task sealer:push IMAGE_TAG=${IMAGE_TAG}
+
+      - name: Push Publisher image
+        env:
+          IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
+        run: task publisher:push IMAGE_TAG=${IMAGE_TAG}
 
       - name: Push Custodian image
         env:
