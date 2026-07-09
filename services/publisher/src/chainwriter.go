@@ -410,20 +410,44 @@ func (w *ChainWriter) waitReceipt(
 	}
 }
 
+// tipLagBlockNotFound reports whether an eth_call error is the public-RPC tip
+// lag where the receipt's block is not yet queryable (Base Sepolia often
+// surfaces this as "block not found: 0x…"). Retriable; not a contract revert.
+func tipLagBlockNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "block not found")
+}
+
 // revertReasonAt re-runs the mined tx as an eth_call at its block to recover the
-// revert reason (mirrors chainHarness.revertReason).
+// revert reason (mirrors chainHarness.revertReason). Retries briefly when the
+// RPC tip lags the receipt block so the decoded IUnivocity name is not masked
+// by "block not found".
 func (w *ChainWriter) revertReasonAt(
 	ctx context.Context, s txSender, tx *types.Transaction, block *big.Int,
 ) string {
 	msg := ethereum.CallMsg{From: w.from, To: tx.To(), Gas: tx.Gas(), Data: tx.Data()}
-	_, err := s.CallContract(ctx, msg, block)
-	if err == nil {
-		return "reverted without reason"
+	deadline := time.Now().Add(w.receiptTimeout)
+	var err error
+	for {
+		_, err = s.CallContract(ctx, msg, block)
+		if err == nil {
+			return "reverted without reason"
+		}
+		if reason, ok := w.classifyRevert(err); ok {
+			return reason
+		}
+		if !tipLagBlockNotFound(err) || time.Now().After(deadline) {
+			return err.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return err.Error()
+		case <-time.After(w.receiptPollInterval):
+		}
 	}
-	if reason, ok := w.classifyRevert(err); ok {
-		return reason
-	}
-	return err.Error()
 }
 
 // dataError is the go-ethereum interface exposing raw revert data on RPC errors.
