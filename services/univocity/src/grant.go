@@ -177,11 +177,11 @@ func decodeCoseSign1(raw []byte) (coseSign1, genesisIntMap, error) {
 	return coseSign1{protected: protected, payload: payload, signature: signature}, unprotected, nil
 }
 
-// setTransparentStatementIdtimestamp rewrites unprotected -65537 on a stored
+// SetTransparentStatementIdtimestamp rewrites unprotected -65537 on a stored
 // COSE Sign1 without touching the protected header, payload, or signature
 // (unprotected labels are not covered by the Sign1). Used after sequencing so
 // the publisher leaf commitment matches the massif idtimestamp.
-func setTransparentStatementIdtimestamp(raw, idtimestamp []byte) ([]byte, error) {
+func SetTransparentStatementIdtimestamp(raw, idtimestamp []byte) ([]byte, error) {
 	if len(idtimestamp) != idtimestampBytes {
 		return nil, fmt.Errorf("idtimestamp must be %d bytes", idtimestampBytes)
 	}

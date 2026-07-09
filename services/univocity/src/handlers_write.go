@@ -308,7 +308,7 @@ func (a API) handlePatchGrantIdtimestamp(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	updated, err := setTransparentStatementIdtimestamp(stored, req.Idtimestamp)
+	updated, err := SetTransparentStatementIdtimestamp(stored, req.Idtimestamp)
 	if err != nil {
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "rewrite grant failed", err.Error())
 		return
