@@ -174,18 +174,30 @@ func BuildEmbeddedProofChain(
 				"checkpoint %d proof treeSize2 %d != next treeSize1 %d (non-contiguous)",
 				k, p.TreeSize2, chain[0].TreeSize1)
 		}
-		chain = append([]ConsistencyProof{p}, chain...) // prepend -> ascending
-
+		// The embedded proof's base (TreeSize1) is the massif boundary. Relay it
+		// as-is when the on-chain size is exactly that boundary; rebuild just the
+		// (onchainSize -> TreeSize2) segment from the massif's nodes when the
+		// on-chain size lags *inside* this massif — a partial-size anchor, or a
+		// legacy checkpoint whose base predates the boundary invariant. The
+		// checkpoint signature covers only the TreeSize2 accumulator (ADR-0046),
+		// which the rebuilt proof preserves, so it rides the original signature.
 		switch {
 		case p.TreeSize1 == onchainSize:
-			return chain, nil // reached the on-chain accumulator
-		case p.TreeSize1 < onchainSize:
+			return append([]ConsistencyProof{p}, chain...), nil // relay
+		case onchainSize < p.TreeSize2 && (onchainSize > p.TreeSize1 || k == 0):
+			rebased, err := rebaseSegment(ctx, reader, k, onchainSize, p.TreeSize2)
+			if err != nil {
+				return nil, err
+			}
+			return append([]ConsistencyProof{rebased}, chain...), nil
+		case onchainSize >= p.TreeSize2:
 			return nil, fmt.Errorf(
-				"checkpoint %d proof treeSize1 %d below on-chain size %d (non-contiguous)", k, p.TreeSize1, onchainSize)
-		case k == 0:
-			return nil, fmt.Errorf("reached genesis without reaching on-chain size %d", onchainSize)
+				"checkpoint %d treeSize2 %d not above on-chain size %d", k, p.TreeSize2, onchainSize)
 		}
 
+		// onchainSize < p.TreeSize1 and k > 0: the on-chain size is in an earlier
+		// massif; relay this boundary-to-boundary link and descend.
+		chain = append([]ConsistencyProof{p}, chain...)
 		k--
 		cp, err := massifs.GetCheckpoint(ctx, reader, k)
 		if err != nil {
@@ -197,4 +209,26 @@ func BuildEmbeddedProofChain(
 		}
 		cur = rec.ConsistencyProofs
 	}
+}
+
+// rebaseSegment rebuilds the (fromSize -> toSize) consistency proof for massif
+// massifIndex directly from its nodes. It is used when the on-chain size lags
+// inside a massif, so the embedded boundary proof cannot be relayed to it. The
+// proof is unsigned material — the checkpoint signature covers only the toSize
+// accumulator — so re-basing the proof to a higher fromSize is sound as long as
+// toSize (and its accumulator) is preserved.
+func rebaseSegment(
+	ctx context.Context, reader massifs.ObjectReader,
+	massifIndex uint32, fromSize, toSize uint64,
+) (ConsistencyProof, error) {
+	mc, err := massifs.GetMassifContext(ctx, reader, massifIndex)
+	if err != nil {
+		return ConsistencyProof{}, fmt.Errorf("read massif %d for re-base: %w", massifIndex, err)
+	}
+	proof, err := BuildConsistencyProof(&mc, fromSize, toSize)
+	if err != nil {
+		return ConsistencyProof{}, fmt.Errorf(
+			"re-base massif %d to on-chain size %d: %w", massifIndex, fromSize, err)
+	}
+	return proof, nil
 }
