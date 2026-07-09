@@ -54,6 +54,11 @@ func (a API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/forest/{logId}/genesis", a.handlePostGenesis)
 	mux.HandleFunc("GET /api/forest/{logId}/genesis", a.handleGetGenesis)
 	mux.HandleFunc("POST /api/grants", a.handlePostGrant)
+	// After sequencing: set unprotected -65537 to the massif idtimestamp.
+	mux.HandleFunc(
+		"PATCH /api/forest/{logId}/grants/{subject}/idtimestamp",
+		a.handlePatchGrantIdtimestamp,
+	)
 
 	// Admin (admin-token): explicit, no automatic GC.
 	mux.HandleFunc("DELETE /api/forest/{logId}/grants/{subject}", a.handleDeleteGrant)

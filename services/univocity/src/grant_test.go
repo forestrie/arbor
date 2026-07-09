@@ -663,6 +663,96 @@ func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
 	}
 }
 
+// After sequencing, canopy patches the stored grant's unprotected -65537 with
+// the massif idtimestamp so the publisher leaf commitment matches leaf 0.
+func TestHandlePatchGrantIdtimestamp_HTTP(t *testing.T) {
+	logger, _ := NewLogger(0)
+	boot := mustKey(t)
+
+	R := testLogID(21)
+	addr := common.HexToAddress("0xabc")
+
+	chain := newChainColdAnchored(boot)
+	store := newFakeStore()
+	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
+
+	api := API{
+		Logger:    logger,
+		Pool:      &mockPool{chain: chain},
+		Store:     store,
+		APIToken:  "secret",
+		Bootstrap: NewBootstrapCache(),
+	}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(boot)}
+	stmt := buildGrantStatement(t, boot, rootGrant)
+	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt})
+
+	postReq := httptest.NewRequest(http.MethodPost, "/api/grants", bytes.NewReader(reqBody))
+	postReq.Header.Set("Authorization", "Bearer secret")
+	postRec := httptest.NewRecorder()
+	mux.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusCreated {
+		t.Fatalf("post grant want 201 got %d: %s", postRec.Code, postRec.Body.String())
+	}
+
+	idts := []byte{0x9f, 0x49, 0x34, 0xab, 0xca, 0x03, 0x05, 0x00}
+	patchBody, _ := cbor.Marshal(patchGrantIdtimestampRequest{Idtimestamp: idts})
+	patchReq := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
+		bytes.NewReader(patchBody),
+	)
+	patchReq.Header.Set("Authorization", "Bearer secret")
+	patchRec := httptest.NewRecorder()
+	mux.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusNoContent {
+		t.Fatalf("patch idtimestamp want 204 got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	stored, err := store.GetGrant(context.Background(), R, R)
+	if err != nil {
+		t.Fatalf("get stored grant: %v", err)
+	}
+	ts, err := decodeTransparentStatement(stored)
+	if err != nil {
+		t.Fatalf("decode stored: %v", err)
+	}
+	if !bytes.Equal(ts.Idtimestamp, idts) {
+		t.Fatalf("stored idtimestamp = %x, want %x", ts.Idtimestamp, idts)
+	}
+
+	// Idempotent re-patch with the same value succeeds.
+	patchRec2 := httptest.NewRecorder()
+	patchReq2 := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
+		bytes.NewReader(patchBody),
+	)
+	patchReq2.Header.Set("Authorization", "Bearer secret")
+	mux.ServeHTTP(patchRec2, patchReq2)
+	if patchRec2.Code != http.StatusNoContent {
+		t.Fatalf("idempotent patch want 204 got %d", patchRec2.Code)
+	}
+
+	// Conflict when a different non-zero idtimestamp is already stored.
+	other := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	otherBody, _ := cbor.Marshal(patchGrantIdtimestampRequest{Idtimestamp: other})
+	conflictReq := httptest.NewRequest(
+		http.MethodPatch,
+		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
+		bytes.NewReader(otherBody),
+	)
+	conflictReq.Header.Set("Authorization", "Bearer secret")
+	conflictRec := httptest.NewRecorder()
+	mux.ServeHTTP(conflictRec, conflictReq)
+	if conflictRec.Code != http.StatusConflict {
+		t.Fatalf("conflicting patch want 409 got %d: %s", conflictRec.Code, conflictRec.Body.String())
+	}
+}
+
 func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)

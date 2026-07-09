@@ -23,8 +23,8 @@ import (
 //
 // A stored grant is a SCITT transparent statement: a COSE Sign1 whose payload
 // is sha256 of the embedded Forestrie-Grant v0 CBOR (unprotected -65538),
-// carrying the sequenced idtimestamp in unprotected -65537 (all zeros for the
-// root self-grant, matching the bootstrap convention). Together with the
+// carrying the sequenced idtimestamp in unprotected -65537 (patched after
+// sequencing; may still be all zeros until that PATCH lands). Together with the
 // grant's leaf position in the owner log — found by scanning the owner
 // massif for the grant leaf commitment — this is everything publishCheckpoint
 // needs: the PublishGrant tuple, grantIDTimestampBe, and the inclusion proof
