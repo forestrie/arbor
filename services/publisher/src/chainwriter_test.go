@@ -36,6 +36,57 @@ func TestRevertLabel(t *testing.T) {
 	}
 }
 
+func TestRevertLabelInconsistentReceiptSignature(t *testing.T) {
+	// Delegation and cosecbor error names must be bounded metric labels, not
+	// "unrecognized" (plan-2607-10 Track C: the live lane-A revert was opaque).
+	for _, name := range []string{
+		"InconsistentReceiptSignature",
+		"DelegationUnsupportedForAlg",
+		"MissingCheckpointSignerKey",
+		"SignatureVerificationFailed",
+		"InvalidCoseCborStructure",
+	} {
+		if got := RevertLabel(name); got != name {
+			t.Errorf("RevertLabel(%q) = %q, want passthrough", name, got)
+		}
+	}
+}
+
+func TestClassifyRevertInconsistentReceiptSignature(t *testing.T) {
+	w := newTestWriter(t)
+
+	errABI, err := abi.JSON(strings.NewReader(univocityErrorsABI))
+	if err != nil {
+		t.Fatalf("parse errors abi: %v", err)
+	}
+	irs, ok := errABI.Errors["InconsistentReceiptSignature"]
+	if !ok {
+		t.Fatal("InconsistentReceiptSignature missing from univocityErrorsABI")
+	}
+	// Selector confirmed against the live lane-A revert (0x7331c077).
+	if got := hex.EncodeToString(irs.ID.Bytes()[:4]); got != "7331c077" {
+		t.Fatalf("selector = %s, want 7331c077", got)
+	}
+	// ALG_ES256 (-7) receipt on an ALG_KS256 (-65799) root log.
+	args, err := irs.Inputs.Pack(int64(-7), int64(-65799))
+	if err != nil {
+		t.Fatalf("pack args: %v", err)
+	}
+	data := append(append([]byte{}, irs.ID.Bytes()[:4]...), args...)
+	fake := &fakeDataError{data: "0x" + hex.EncodeToString(data)}
+
+	reason, ok := w.classifyRevert(fake)
+	if !ok {
+		t.Fatal("expected classification, got none")
+	}
+	if reason != "InconsistentReceiptSignature" {
+		t.Errorf("reason = %q, want InconsistentReceiptSignature", reason)
+	}
+	if got := RevertLabel(reason); got != "InconsistentReceiptSignature" {
+		t.Errorf("RevertLabel(%q) = %q, want passthrough", reason, got)
+	}
+}
+
 // fakeDataError implements the go-ethereum rpc.DataError shape so classifyRevert
 // can be exercised without a live node.
 type fakeDataError struct{ data string }
