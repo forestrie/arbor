@@ -87,6 +87,74 @@ func TestClassifyRevertInconsistentReceiptSignature(t *testing.T) {
 	}
 }
 
+// pinnedErrorSelectors pins every fragment in univocityErrorsABI to its
+// keccak selector so a transcription typo cannot silently degrade
+// classification to "unrecognized" (plan-0050 L4).
+var pinnedErrorSelectors = map[string]string{
+	"AlreadyInitialized":                   "0dc149f0",
+	"CheckpointCountExceeded":              "10de10f5",
+	"CheckpointIndexOutOfDelegationRange":  "73ac1b39",
+	"ClaimNotFound":                        "1f01cfba",
+	"ConsistencyReceiptSignatureInvalid":   "7fdcc119",
+	"DelegationLogIdMismatch":              "60fc9497",
+	"DelegationSignatureInvalid":           "7cbfed2d",
+	"DelegationUnsupportedForAlg":          "bf325094",
+	"DuplicateRootKeyInDelegation":         "65193881",
+	"FirstCheckpointSizeTooSmall":          "dbb8b60c",
+	"GrantDataMustMatchBootstrap":          "729e6a6f",
+	"GrantRequirement":                     "3c02cf56",
+	"InconsistentReceiptSignature":         "7331c077",
+	"InvalidAccumulatorLength":             "6454496d",
+	"InvalidCheckpointCose":                "fb80f567",
+	"InvalidConsistencyProof":              "4af9512c",
+	"InvalidCoseCborStructure":             "2e5a4f93",
+	"InvalidDelegationKeyLength":           "37fcf219",
+	"InvalidDelegationSignatureLength":     "05bcc30d",
+	"InvalidReceiptInclusionProof":         "4f5bf2d4",
+	"InvalidRecoveryId":                    "6d6cb2c3",
+	"InvalidRootKeyLength":                 "2903bfbd",
+	"InvalidSignatureChain":                "7f833592",
+	"InvalidSignatureLength":               "d615d706",
+	"LogNotFound":                          "3dd8822c",
+	"LogRootKeyNotSet":                     "c4a5db65",
+	"MaxHeightExceeded":                    "188aa6ed",
+	"MinGrowthNotMet":                      "67603ff8",
+	"MissingCheckpointSignerKey":           "2603bf2f",
+	"MissingDelegationCert":                "7e968d05",
+	"MissingRootKeyForRecovery":            "fcf3d0de",
+	"NotInitialized":                       "87138d5c",
+	"ProofPayloadExceedsMaxHeight":         "d91da2f6",
+	"ReceiptLogIdMismatch":                 "8dcc5aad",
+	"RecoveredKeyMismatchIncludedKey":      "b8d58012",
+	"RecoveryIdDuplicate":                  "b7da94e2",
+	"SignatureVerificationFailed":          "729d0f6b",
+	"SizeMustIncrease":                     "426d6a07",
+	"UnexpectedMajorType":                  "cc7fe4cf",
+	"UnsupportedAlgorithm":                 "bd3b5c83",
+}
+
+func TestUnivocityErrorsABISelectorsPinned(t *testing.T) {
+	errABI, err := abi.JSON(strings.NewReader(univocityErrorsABI))
+	if err != nil {
+		t.Fatalf("parse errors abi: %v", err)
+	}
+	if len(errABI.Errors) != len(pinnedErrorSelectors) {
+		t.Fatalf("ABI has %d errors, pin table has %d — update pinnedErrorSelectors",
+			len(errABI.Errors), len(pinnedErrorSelectors))
+	}
+	for name, want := range pinnedErrorSelectors {
+		e, ok := errABI.Errors[name]
+		if !ok {
+			t.Errorf("pinned error %q missing from univocityErrorsABI", name)
+			continue
+		}
+		got := hex.EncodeToString(e.ID.Bytes()[:4])
+		if got != want {
+			t.Errorf("%s selector = %s, want %s (transcription typo?)", name, got, want)
+		}
+	}
+}
+
 // fakeDataError implements the go-ethereum rpc.DataError shape so classifyRevert
 // can be exercised without a live node.
 type fakeDataError struct{ data string }
