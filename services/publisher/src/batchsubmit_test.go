@@ -2,6 +2,7 @@ package publisher
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"math/big"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
@@ -27,6 +29,10 @@ type fakeSender struct {
 	revert     map[uint64]bool  // nonce -> mines with a failed (reverted) receipt
 	receipts   map[common.Hash]*types.Receipt
 	callErr    error // returned by CallContract (revert-reason replay)
+	// callFailN: first N CallContract invocations return a tip-lag
+	// "block not found" error before falling through to callErr.
+	callFailN int
+	callCalls int
 }
 
 func newFakeSender(nonce uint64) *fakeSender {
@@ -82,6 +88,13 @@ func (f *fakeSender) TransactionReceipt(_ context.Context, hash common.Hash) (*t
 }
 
 func (f *fakeSender) CallContract(context.Context, ethereum.CallMsg, *big.Int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.callCalls++
+	if f.callFailN > 0 {
+		f.callFailN--
+		return nil, errors.New("block not found: 0x29e5b11")
+	}
 	return nil, f.callErr
 }
 
@@ -253,6 +266,49 @@ func TestClassifyReceiptReReadAuthority(t *testing.T) {
 	// Re-read error -> Unsubmitted (nack, never ack on uncertainty).
 	if r := withLogState(0, errors.New("rpc down")).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeUnsubmitted || r.ShouldAck() {
 		t.Errorf("reread error = %v (ack=%v), want Unsubmitted/nack", r.Outcome, r.ShouldAck())
+	}
+}
+
+// TestRevertReasonAtRetriesTipLag: eth_call at the receipt block can fail with
+// "block not found" when the public RPC tip lags; retry until the decoded
+// IUnivocity name is available instead of surfacing the tip-lag string.
+func TestRevertReasonAtRetriesTipLag(t *testing.T) {
+	errABI, err := abi.JSON(strings.NewReader(univocityErrorsABI))
+	if err != nil {
+		t.Fatalf("parse errors abi: %v", err)
+	}
+	irs := errABI.Errors["InconsistentReceiptSignature"]
+	args, err := irs.Inputs.Pack(int64(-7), int64(-65799))
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	data := append(append([]byte{}, irs.ID.Bytes()[:4]...), args...)
+
+	s := newFakeSender(0)
+	s.callFailN = 2
+	s.callErr = &fakeDataError{data: "0x" + hex.EncodeToString(data)}
+
+	w := writerWithSender(t, 1, s)
+	w.receiptPollInterval = time.Millisecond
+	w.receiptTimeout = 200 * time.Millisecond
+
+	addr := common.HexToAddress("0x01")
+	tx := types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(1), Nonce: 0, Gas: 21000, To: &addr})
+	got := w.revertReasonAt(context.Background(), s, tx, big.NewInt(1))
+	if got != "InconsistentReceiptSignature" {
+		t.Fatalf("reason = %q, want InconsistentReceiptSignature (calls=%d)", got, s.callCalls)
+	}
+	if s.callCalls < 3 {
+		t.Fatalf("callCalls = %d, want >= 3 (2 tip-lag + 1 success)", s.callCalls)
+	}
+}
+
+func TestTipLagBlockNotFound(t *testing.T) {
+	if !tipLagBlockNotFound(errors.New("block not found: 0x29e5b11")) {
+		t.Fatal("expected tip-lag match")
+	}
+	if tipLagBlockNotFound(errors.New("execution reverted")) {
+		t.Fatal("did not expect tip-lag match")
 	}
 }
 

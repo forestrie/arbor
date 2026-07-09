@@ -109,17 +109,20 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 
 	now := time.Now().UTC()
 
-	// Check for existing valid lease
+	// Check for existing valid lease that still covers the requested MMR range.
+	// The on-chain proof (and certificate) bind [mmrStart, mmrEnd] in the root
+	// signature, so a cached lease for an earlier seal (e.g. [0,1]) must not be
+	// reused for a later seal (e.g. [1,3]) — that reverts
+	// CheckpointIndexOutOfDelegationRange on publishCheckpoint.
 	if elem, ok := m.leases[logIdHex]; ok {
 		entry := elem.Value.(*leaseEntry)
 		lease := entry.lease
 		remaining := time.Until(lease.ExpiresAt)
-		if remaining >= m.renewBefore && now.Before(lease.ExpiresAt) {
-			// Move to front (most recently used)
+		if remaining >= m.renewBefore && now.Before(lease.ExpiresAt) &&
+			leaseCoversMMRRange(lease, mmrStart, mmrEnd) {
 			m.lru.MoveToFront(elem)
 			return lease, nil
 		}
-		// Expired or expiring soon - remove it
 		m.lru.Remove(elem)
 		delete(m.leases, logIdHex)
 	}
@@ -183,6 +186,40 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 
 func (m *DelegationLeaseManager) RenewBefore() time.Duration {
 	return m.renewBefore
+}
+
+// leaseCoversMMRRange reports whether lease authorizes sealing through
+// [mmrStart, mmrEnd] (inclusive). Prefers the on-chain proof bounds (what
+// univocity checks); falls back to the COSE certificate payload when the
+// issuer omitted onchainProof.
+func leaseCoversMMRRange(lease *DelegationLease, mmrStart, mmrEnd uint64) bool {
+	if lease == nil {
+		return false
+	}
+	if lease.OnchainProof != nil {
+		return lease.OnchainProof.MMRStart <= mmrStart &&
+			lease.OnchainProof.MMREnd >= mmrEnd
+	}
+	if lease.Info == nil {
+		return false
+	}
+	start, errStart := parseUint64Decimal(lease.Info.PayloadMmrStart)
+	end, errEnd := parseUint64Decimal(lease.Info.PayloadMmrEnd)
+	if errStart != nil || errEnd != nil {
+		return false
+	}
+	return start <= mmrStart && end >= mmrEnd
+}
+
+func parseUint64Decimal(s string) (uint64, error) {
+	var v uint64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("non-decimal mmr bound %q", s)
+		}
+		v = v*10 + uint64(c-'0')
+	}
+	return v, nil
 }
 
 func (m *DelegationLeaseManager) pendingKeyForLogLocked(
