@@ -177,6 +177,57 @@ func decodeCoseSign1(raw []byte) (coseSign1, genesisIntMap, error) {
 	return coseSign1{protected: protected, payload: payload, signature: signature}, unprotected, nil
 }
 
+// SetTransparentStatementIdtimestamp rewrites unprotected -65537 on a stored
+// COSE Sign1 without touching the protected header, payload, or signature
+// (unprotected labels are not covered by the Sign1). Used after sequencing so
+// the publisher leaf commitment matches the massif idtimestamp.
+func SetTransparentStatementIdtimestamp(raw, idtimestamp []byte) ([]byte, error) {
+	if len(idtimestamp) != idtimestampBytes {
+		return nil, fmt.Errorf("idtimestamp must be %d bytes", idtimestampBytes)
+	}
+	if len(raw) == 0 {
+		return nil, errors.New("empty transparent statement")
+	}
+	var top interface{}
+	if err := cbor.Unmarshal(raw, &top); err != nil {
+		return nil, fmt.Errorf("decode COSE Sign1: %w", err)
+	}
+	var tagNum uint64
+	hasTag := false
+	if tag, ok := top.(cbor.Tag); ok {
+		hasTag = true
+		tagNum = tag.Number
+		top = tag.Content
+	}
+	arr, ok := top.([]interface{})
+	if !ok || len(arr) != 4 {
+		return nil, errNotCoseSign1
+	}
+	unprotected := decodeCBORIntKeyMap(arr[1])
+	if unprotected == nil {
+		unprotected = genesisIntMap{}
+	}
+	idts := make([]byte, idtimestampBytes)
+	copy(idts, idtimestamp)
+	unprotected[headerIdtimestamp] = idts
+
+	// Rebuild the unprotected map as an int-keyed map for stable CBOR.
+	outUnprot := make(map[int]interface{}, len(unprotected))
+	for k, v := range unprotected {
+		outUnprot[k] = v
+	}
+	outArr := []interface{}{arr[0], outUnprot, arr[2], arr[3]}
+	var content interface{} = outArr
+	if hasTag {
+		content = cbor.Tag{Number: tagNum, Content: outArr}
+	}
+	out, err := cbor.Marshal(content)
+	if err != nil {
+		return nil, fmt.Errorf("encode COSE Sign1: %w", err)
+	}
+	return out, nil
+}
+
 func asByteSlice(v interface{}) ([]byte, bool) {
 	switch b := v.(type) {
 	case []byte:

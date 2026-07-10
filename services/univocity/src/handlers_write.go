@@ -1,6 +1,7 @@
 package univocity
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -16,6 +17,12 @@ const maxRequestBody = 512 * 1024
 type postGrantRequest struct {
 	RootLogID []byte `cbor:"rootLogId,omitempty"`
 	Statement []byte `cbor:"statement"`
+}
+
+// patchGrantIdtimestampRequest is the body for PATCH .../grants/{subject}/idtimestamp.
+// Canopy posts the server-read massif idtimestamp once sequencing completes.
+type patchGrantIdtimestampRequest struct {
+	Idtimestamp []byte `cbor:"idtimestamp"`
 }
 
 func readBody(r *http.Request) ([]byte, error) {
@@ -239,6 +246,92 @@ func (a API) deriveForestRoot(
 		return logid.Zero, false
 	}
 	return root, true
+}
+
+// handlePatchGrantIdtimestamp sets unprotected -65537 on a stored grant to the
+// sequenced massif idtimestamp. Idempotent when the stored value already matches;
+// rejects a conflicting non-zero value with 409.
+func (a API) handlePatchGrantIdtimestamp(w http.ResponseWriter, r *http.Request) {
+	if !a.requireToken(w, r) {
+		return
+	}
+	if a.Store == nil {
+		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
+			"store unavailable", "grant store not configured")
+		return
+	}
+	root, ok := logIDFromPathValue(r.PathValue("logId"))
+	if !ok {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid logId", "")
+		return
+	}
+	subject, ok := logIDFromPathValue(r.PathValue("subject"))
+	if !ok {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid subject", "")
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "read body failed", err.Error())
+		return
+	}
+	var req patchGrantIdtimestampRequest
+	if err := cbor.Unmarshal(body, &req); err != nil || len(req.Idtimestamp) != idtimestampBytes {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid request",
+			"expect CBOR { idtimestamp: bstr(8) }")
+		return
+	}
+	// Zero is the pre-sequencing placeholder; refuse to "set" it as sequenced.
+	if isAllZero(req.Idtimestamp) {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid idtimestamp",
+			"sequenced idtimestamp must be non-zero")
+		return
+	}
+
+	stored, err := a.Store.GetGrant(r.Context(), root, subject)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusNotFound, "about:blank", "grant not found", err.Error())
+		return
+	}
+	ts, err := decodeTransparentStatement(stored)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "stored grant corrupt", err.Error())
+		return
+	}
+	if !isAllZero(ts.Idtimestamp) {
+		if bytes.Equal(ts.Idtimestamp, req.Idtimestamp) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		a.writeProblem(w, r, http.StatusConflict, "about:blank",
+			"idtimestamp already set", "stored grant already has a different sequenced idtimestamp")
+		return
+	}
+
+	updated, err := SetTransparentStatementIdtimestamp(stored, req.Idtimestamp)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "rewrite grant failed", err.Error())
+		return
+	}
+	class, err := grantClassFromFlags(ts.Grant.Flags)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "invalid stored grant class", err.Error())
+		return
+	}
+	if err := a.Store.PutGrant(r.Context(), root, subject, class, updated); err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "store grant failed", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func isAllZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (a API) handleDeleteGrant(w http.ResponseWriter, r *http.Request) {
