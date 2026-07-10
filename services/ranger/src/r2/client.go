@@ -252,13 +252,15 @@ func (c *Client) GetObject(ctx context.Context, key string, opts GetOptions) (Ge
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("x-amz-content-sha256", emptyBodySHA256)
 
-	if opts.RangeLength >= 0 {
+	// RangeLength == 0 with RangeStart == 0 (zero value) means full object.
+	// RangeLength == 0 with RangeStart > 0 remains a 1-byte probe at that offset.
+	switch {
+	case opts.RangeLength > 0:
 		end := opts.RangeStart + opts.RangeLength - 1
-		if opts.RangeLength == 0 {
-			end = opts.RangeStart
-		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", opts.RangeStart, end))
-	} else if opts.RangeStart > 0 {
+	case opts.RangeLength == 0 && opts.RangeStart > 0:
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", opts.RangeStart, opts.RangeStart))
+	case opts.RangeLength < 0 && opts.RangeStart > 0:
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", opts.RangeStart))
 	}
 
