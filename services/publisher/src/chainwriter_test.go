@@ -110,6 +110,7 @@ var pinnedErrorSelectors = map[string]string{
 	"InvalidCoseCborStructure":             "2e5a4f93",
 	"InvalidDelegationKeyLength":           "37fcf219",
 	"InvalidDelegationSignatureLength":     "05bcc30d",
+	"InvalidPaymentReceipt":                "f2d20499",
 	"InvalidReceiptInclusionProof":         "4f5bf2d4",
 	"InvalidRecoveryId":                    "6d6cb2c3",
 	"InvalidRootKeyLength":                 "2903bfbd",
