@@ -531,6 +531,7 @@ const univocityErrorsABI = `[
   {"type":"error","name":"ClaimNotFound","inputs":[{"name":"key","type":"int64"}]},
   {"type":"error","name":"UnexpectedMajorType","inputs":[{"name":"actual","type":"uint8"},{"name":"expected","type":"uint8"}]},
   {"type":"error","name":"InvalidReceiptInclusionProof","inputs":[]},
+  {"type":"error","name":"InvalidPaymentReceipt","inputs":[]},
   {"type":"error","name":"ReceiptLogIdMismatch","inputs":[{"name":"expected","type":"bytes32"},{"name":"actual","type":"bytes32"}]},
   {"type":"error","name":"LogNotFound","inputs":[{"name":"logId","type":"bytes32"}]},
   {"type":"error","name":"NotInitialized","inputs":[]},
