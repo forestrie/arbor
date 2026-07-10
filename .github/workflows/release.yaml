@@ -113,7 +113,7 @@ jobs:
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: |
           set -euo pipefail
-          for service in ranger scout sealer custodian univocity; do
+          for service in ranger scout sealer custodian univocity publisher; do
             task release:build-push SERVICE="$service"
           done
 
@@ -212,7 +212,7 @@ jobs:
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: |
           set -euo pipefail
-          for service in ranger scout sealer custodian univocity; do
+          for service in ranger scout sealer custodian univocity publisher; do
             task release:build-push SERVICE="$service"
           done
 
