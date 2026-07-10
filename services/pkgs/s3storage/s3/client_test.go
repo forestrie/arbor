@@ -366,6 +366,37 @@ func TestClientGetObjectFullWhenNegativeRangeLength(t *testing.T) {
 	}
 }
 
+func TestClientGetObjectFullWhenZeroValueGetOptions(t *testing.T) {
+	var received struct {
+		rangeHeader string
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.rangeHeader = r.Header.Get("Range")
+		w.Header().Set("ETag", `"etag-zero"`)
+		fmt.Fprint(w, "full-via-zero")
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token", &testDoer{client: server.Client()}, newTestLogger())
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// GetOptions{} must not send bytes=0-0 (1-byte truncate).
+	result, err := client.GetObject(context.Background(), "path/object", GetOptions{})
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+
+	if received.rangeHeader != "" {
+		t.Fatalf("expected no Range header for zero-value GetOptions, got %q", received.rangeHeader)
+	}
+	if string(result.Data) != "full-via-zero" {
+		t.Fatalf("unexpected body %q", result.Data)
+	}
+}
+
 func TestClientGetObjectError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing", http.StatusNotFound)
