@@ -6,7 +6,16 @@
 > July 2026); larger multi-part plans use a `plan-YYMM-NN-<slug>/` directory.
 > Forward-only.
 
-Plans live as flat `docs/plan-NNNN-*.md` (migration to `docs/plans/` optional).
+Legacy plans live as flat `docs/plan-NNNN-*.md` (migration to `docs/plans/`
+optional); date-cohort plans live in this directory.
+
+## Date-cohort plans
+
+| Plan | Topic | Status |
+|------|-------|--------|
+| [plan-2607-01](plan-2607-01-sealer-nudge-trigger.md) | Low-latency sealer trigger: ranger seal hints → long-poll coordinator ([ADR-0007](../adr/adr-0007-low-latency-sealer-trigger.md), FOR-335) | draft |
+
+## Legacy plans (frozen ids)
 
 | Plan | Topic |
 |------|-------|
