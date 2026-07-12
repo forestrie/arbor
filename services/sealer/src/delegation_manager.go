@@ -48,6 +48,7 @@ type DelegationLeaseManager struct {
 	maxLeases   int
 	ttl         time.Duration
 	renewBefore time.Duration
+	rangePad    uint64
 }
 
 func NewDelegationLeaseManager(
@@ -132,9 +133,12 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		return nil, err
 	}
 
+	// FOR-386: pad only the ISSUANCE request. The cache check above used the
+	// caller's true seal window; the wider certificate issued here then covers
+	// subsequent windows until the log outgrows the pad or the TTL expires.
 	lease, err := requestLogDelegationLeaseWithKeyPair(
 		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
-		logIdHex, mmrStart, mmrEnd, keyPair,
+		logIdHex, mmrStart, paddedRangeEnd(mmrEnd, m.rangePad), keyPair,
 	)
 	if err != nil {
 		if !errors.Is(err, ErrDelegationPending) {
@@ -186,6 +190,22 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 
 func (m *DelegationLeaseManager) RenewBefore() time.Duration {
 	return m.renewBefore
+}
+
+// SetRangePad configures how far beyond the seal window delegation ISSUANCE
+// requests extend (DELEGATION_RANGE_PAD; FOR-386). Cache-coverage checks are
+// unaffected — they always use the caller's true window.
+func (m *DelegationLeaseManager) SetRangePad(pad uint64) {
+	m.rangePad = pad
+}
+
+// paddedRangeEnd widens a delegation range end by pad MMR nodes, clamping on
+// uint64 overflow (FOR-386).
+func paddedRangeEnd(mmrEnd, pad uint64) uint64 {
+	if pad > ^uint64(0)-mmrEnd {
+		return ^uint64(0)
+	}
+	return mmrEnd + pad
 }
 
 // leaseCoversMMRRange reports whether lease authorizes sealing through
