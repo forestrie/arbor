@@ -161,6 +161,9 @@ tasks:
       GO_MOD_DIRS:
         sh: find services -type f -name 'go.mod' ! -path 'services/_deps/*/*'
     cmds:
+      # NOTE: a trailing `exit 0` here previously swallowed every test
+      # failure (the task — and therefore CI — passed regardless of results;
+      # FOR-383 / plan-2607-03 R4). go test's own exit status must propagate.
       - for: { var: GO_MOD_DIRS, as: MODULE }
         cmd: |
           MOD_DIR=$(dirname {{.MODULE}})
@@ -176,7 +179,6 @@ tasks:
             -race \
             -v \
             ./...
-          exit 0
 
   test:integration:
     desc: run the integration tests

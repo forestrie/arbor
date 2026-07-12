@@ -1,0 +1,99 @@
+# PR gate: gofmt + go vet + go test across every service module (FOR-383,
+# plan-2607-03 R4). Before this, arbor had no PR-triggered test workflow —
+# build-deploy.yml runs on push to main only, and its test:unit step silently
+# swallowed failures (see the Taskfile fix landed with this workflow).
+#
+# Fork PRs are skipped: the bootstrap clones private forestrie repos with a
+# GitHub App token (vars.GITAPP_ID / secrets.GITAPP_PRIVATE_KEY) that fork
+# workflows cannot mint.
+name: Go tests
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "taskfiles/**"
+      - "Taskfile.dist.yml"
+      - ".github/workflows/go-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.4"
+          # setup-go's built-in cache keys on go.sum files it can see; the
+          # bootstrap adds _deps clones later, so key explicitly like
+          # build-deploy.yml does.
+          cache: false
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.45.5
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The bootstrap clones private forestrie repos (go-univocity); the job's
+      # GITHUB_TOKEN only covers this repo, so mint a forestrie-cd app token
+      # and route https github clones through it (mirrors build-deploy.yml).
+      - name: Mint GitHub App token for private dep clones
+        id: gitapp
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GITAPP_ID }}
+          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
+
+      - name: Git Bootstrap
+        run: |
+          git config --global url."https://x-access-token:${{ steps.gitapp.outputs.token }}@github.com/".insteadOf "https://github.com/"
+          task bootstrap
+          git config --global --unset-all url."https://x-access-token:${{ steps.gitapp.outputs.token }}@github.com/".insteadOf
+
+      # publishproof's tracer-bullet test publishes against anvil; without
+      # foundry installed the test self-skips (parity with build-deploy.yml).
+      - name: Install Foundry (anvil)
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          UNFORMATTED=$(find services -name '*.go' -not -path 'services/_deps/*' -print0 | xargs -0 gofmt -l)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::gofmt required for:" && echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          set -euo pipefail
+          for mod in $(find services -type f -name go.mod ! -path 'services/_deps/*' | sort); do
+            d=$(dirname "$mod")
+            (
+              cd "$d"
+              if [ -f ../go.work ]; then export GOWORK="$(pwd)/../go.work"; else unset GOWORK; fi
+              echo "::group::go vet $d"
+              go vet ./...
+              echo "::endgroup::"
+            )
+          done
+
+      - name: Unit tests
+        run: |
+          task test:unit
