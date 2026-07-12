@@ -212,7 +212,52 @@ verification (plan-2607-03 R2): confirm `ranger_hint` increments and the
 sealer logs no body-wrapper unmarshal warnings — the string-token pull
 encoding is unit-tested but must be confirmed once against a live queue.
 
+## Phase 1.5 — near-term latency/liveness code items (FOR-386 remaining scope)
+
+Measured 2026-07-13 (see results above); each is small and independently
+shippable ahead of phase 2:
+
+- **In-process `ErrDelegationPending` retry** (0.5s→1s→2s backoff, cap ~10s,
+  within the 30s visibility; cap concurrent waiters): first seal of a fresh
+  log drops from ~16s to ≈ issuance RTT, and the retry-exhaustion liveness
+  hole (visibility 30s × `max_retries` 3 ⇒ seal dropped forever) closes.
+- **Cross-batch duplicate-wake debounce** (`map[logId]→lastSealedKey/time`):
+  hint + R2 event per massif means ~half of `CheckpointLog` executions are
+  no-op re-derivations that still pay full R2 reads; suppressing them halves
+  wake-driven R2 load (throughput win that grows with log count). Phase 3
+  retires the duplicate source properly.
+- **Store/client reuse across `CheckpointLog` calls** (per-log LRU +
+  If-None-Match against the ETags the store already tracks): every wake
+  currently rebuilds S3 clients and re-reads massif + checkpoint; expect
+  ~0.5s off the ~1.2s execution and materially fewer R2 ops. LRU cap keeps
+  it safe for many logs; ETag revalidation preserves R2-is-truth.
+- **Receipt-path polish (canopy/client):** receipt polling granularity adds
+  ~0.5–1s client-side; the ingress ack already carries `firstLeafIndex` +
+  `massifHeight` for DO-side registration status ("return path
+  unification"), which a receipt-readiness hint could ride. Client kits
+  should honour Retry-After.
+
 ## Phase 2 — Seal-coordinator long-poll (kills the poll ceiling)
+
+**Scope additions (2026-07-13 review, from the FOR-386 measurements):**
+
+- **Long-poll BOTH legs.** The same pattern applies upstream: the ingress DO
+  holds the entries, so let the **ranger long-poll the ingress shards** too,
+  removing the commit-side ceiling. With both legs event-driven: commit
+  ~0.3s + nudge ~0.1s + seal ~0.7–1.2s ⇒ warm append **< 2s** end-to-end.
+- **Coverage-matched material retrieval at the coordinator.** Retrieval
+  currently exact-matches the requested range; returning any valid material
+  *covering* the request unlocks (a) **pre-issuance at genesis / signing-route
+  setup** — the first seal finds material waiting, so *first* receipts also
+  hit ~6s (demo-critical), and (b) voluntary wide/renewed signing ahead of
+  need. Verification remains against the actual seal window everywhere.
+- **Issuance-complete nudge.** The coordinator knows the logId when a cert
+  is submitted — one nudge into the seal-coordinator DO resolves any parked
+  sealer waiter immediately, making deferral latency ≈ signer latency.
+- **Scale-out.** The dirty-set DO is a serialization point: shard by logId
+  prefix like ingress shards if nudge volume grows, and note the existing
+  sharder operator already solves shard→worker assignment (extends from
+  rangers to sealers).
 
 - Canopy (cross-repo): `seal-coordinator` DO (or an extension of the
   forestrie-ingress worker family):

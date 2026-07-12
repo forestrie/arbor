@@ -192,6 +192,14 @@ func (m *DelegationLeaseManager) RenewBefore() time.Duration {
 	return m.renewBefore
 }
 
+// SetMaxLeases caps the per-log lease LRU (DELEGATION_MAX_LEASES). Ignores
+// non-positive values, keeping the constructor default.
+func (m *DelegationLeaseManager) SetMaxLeases(n int) {
+	if n > 0 {
+		m.maxLeases = n
+	}
+}
+
 // SetRangePad configures how far beyond the seal window delegation ISSUANCE
 // requests extend (DELEGATION_RANGE_PAD; FOR-386). Cache-coverage checks are
 // unaffected — they always use the caller's true window.
