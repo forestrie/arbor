@@ -48,6 +48,18 @@ type Config struct {
 	// Delegated checkpoint keys are ES256 (P-256) only.
 	DelegationKeyCurve string
 
+	// DelegationRangePad widens the MMR range requested at delegation issuance
+	// beyond the current seal window: the request becomes
+	// [mmrStart, mmrEnd + pad] (in MMR node indices). Every range-coverage
+	// check downstream (lease cache, on-chain publishCheckpoint, coordinator
+	// exact-match against the request) accepts the wider window, so one signed
+	// certificate covers every subsequent seal until the log outgrows the pad
+	// or the lease TTL expires — issuance leaves the per-append hot path
+	// (FOR-386). The pad trades signer round-trips for pre-authorization
+	// breadth; the TTL still bounds the delegation in time. 0 disables padding
+	// (legacy per-seal windows).
+	DelegationRangePad uint64
+
 	// Deprecated migration aliases (fall back when seam URLs/tokens unset).
 	CustodianURL      string
 	CustodianAppToken string
@@ -136,6 +148,15 @@ func LoadConfig() Config {
 		return defaultVal
 	}
 
+	getUint64 := func(key string, defaultVal uint64) uint64 {
+		if val := os.Getenv(key); val != "" {
+			if parsed, err := strconv.ParseUint(val, 10, 64); err == nil {
+				return parsed
+			}
+		}
+		return defaultVal
+	}
+
 	r2Token := getEnvOrDefault("R2_TOKEN", "")
 	awsSecretAccessKey := getEnvOrDefault("AWS_SECRET_ACCESS_KEY", "")
 	if awsSecretAccessKey == "" && r2Token != "" {
@@ -163,12 +184,16 @@ func LoadConfig() Config {
 		UnivocityAuthorityURL: os.Getenv("UNIVOCITY_AUTHORITY_URL"),
 		UnivocityAPIToken:     os.Getenv("UNIVOCITY_API_TOKEN"),
 		DelegationKeyCurve:    getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
-		ContractRPCURL:        os.Getenv("UNIVOCITY_CONTRACT_RPC_URL"),
-		R2URL:                 os.Getenv("R2_URL"),
-		R2Token:               r2Token,
-		AWSAccessKeyID:        os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey:    awsSecretAccessKey,
-		AWSRegion:             getEnvOrDefault("AWS_REGION", "auto"),
+		// Default 65536 MMR nodes (~32k leaves): generous enough that at demo
+		// and e2e append rates the lease TTL — not the range — is the binding
+		// constraint, i.e. many minutes of cached ephemeral-key reuse.
+		DelegationRangePad: getUint64("DELEGATION_RANGE_PAD", 65536),
+		ContractRPCURL:     os.Getenv("UNIVOCITY_CONTRACT_RPC_URL"),
+		R2URL:              os.Getenv("R2_URL"),
+		R2Token:            r2Token,
+		AWSAccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey: awsSecretAccessKey,
+		AWSRegion:          getEnvOrDefault("AWS_REGION", "auto"),
 	}
 
 	cfg.applyDelegationSeamFallbacks()
@@ -203,6 +228,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
 	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
+	logConfigValue(logger, "DELEGATION_RANGE_PAD", c.DelegationRangePad)
 	logConfigValue(logger, "UNIVOCITY_CONTRACT_RPC_URL", c.ContractRPCURL)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
