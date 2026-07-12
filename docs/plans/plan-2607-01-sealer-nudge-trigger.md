@@ -35,6 +35,62 @@ never depends on hint delivery; the sealer stays outbound-only.
 
 ---
 
+## FOR-386 delegation range pad — measured win (lane A, 2026-07-13)
+
+With phases 0–1 live, per-append latency was still ~17s because delegation
+certificates were issued for minimal per-seal windows — every append paid a
+fresh root-signature round-trip. Fixed by padding the **issuance request
+only** (`DELEGATION_RANGE_PAD`, default 65536 MMR nodes;
+[#55](https://github.com/forestrie/arbor/pull/55) +
+[#57](https://github.com/forestrie/arbor/pull/57) — #55 first padded the
+cache-lookup window too, which defeated the cache by construction; the #57
+regression test pins the corrected property). Per-log setting via the forest
+genesis doc is FOR-388.
+
+Measured end-to-end (registration→receipt via the `forestrie` CLI against
+lane A, wallet-mode instant signer, fresh forest per run):
+
+| Case | Before (per-seal certs) | After (#57) |
+|------|------------------------|-------------|
+| First seal of a fresh log | 13–17s (or never — see liveness note) | 15.8s (one-time issuance RTT) |
+| Warm append | ~17s each | **5.2–8.5s (mean ~7s)** |
+| Idle-lane append (11 min idle) | 30–90s (documented pre-hint worst case) | **6.0s** |
+| Root signatures for 1 grant + 5 appends | 6 | **1** (range `0:65537`, TTL 1h) |
+
+The residual ~6s ≈ ranger ingress-poll ceiling (0–2s) + sealer queue-poll
+ceiling (0–5s) + ~1.2s `CheckpointLog` execution + client receipt-poll
+granularity. **Liveness note (found live):** a first seal deferring on
+`ErrDelegationPending` consumes queue delivery attempts (visibility 30s ×
+`max_retries` 3) — a log whose delegation is not ready within ~90s of commit
+is never sealed until new traffic or a manual hint arrives; the phase 3
+sweep is therefore a correctness requirement, and in-process deferral retry
+(below) closes it sooner.
+
+### Follow-on latency/scale options (reviewed 2026-07-13; fold into phases 2–3)
+
+- **Config now:** sealer `POLL_INTERVAL_MAX` 5s→2s and ranger
+  `POLL_INTERVAL` 2s→1s (~2.5s mean saved; idle-poll cost only — busy
+  periods already re-poll immediately). Make the lease-cache LRU size
+  configurable (it is now latency-load-bearing; eviction ⇒ per-log
+  re-issuance storms on lanes with many active logs).
+- **Code, small:** (a) in-process `ErrDelegationPending` retry
+  (0.5s→1s→2s, cap ~10s, inside the 30s visibility) — collapses first seals
+  to ≈ issuance RTT and closes the retry-exhaustion hole; (b) cross-batch
+  duplicate-wake debounce (hint + R2 event per massif ⇒ today half of all
+  `CheckpointLog` executions are no-op re-derivations that still pay R2
+  reads); (c) reuse S3 client/factory/store across calls (LRU +
+  If-None-Match on cached ETags) — ~0.5s off execution and fewer R2 ops.
+- **Phase 2 shaping:** long-poll **both** legs (ranger↔ingress DO as well
+  as sealer↔seal-coordinator) ⇒ warm append <2s; make coordinator material
+  retrieval **coverage-matched** (unlocks pre-issuance at genesis/signing
+  setup ⇒ fast *first* receipts, and voluntary wide/renewed signing); fold
+  an issuance-complete nudge into the seal-coordinator DO; shard the
+  dirty-set DO by logId prefix and reuse the sharder for sealer assignment
+  if nudge volume grows.
+- **Guardrails:** don't shrink `VISIBILITY_TIMEOUT` (must cover multi-massif
+  catch-ups); keep hints authority-free and re-derive from R2; cap
+  fast-path worker concurrency.
+
 ## Phase 0–1 rollout results (lane A, 2026-07-12)
 
 Landed: [#50](https://github.com/forestrie/arbor/pull/50) (phase 0),
