@@ -15,6 +15,7 @@ import (
 	"github.com/forestrie/arbor/services/ranger/committer"
 	"github.com/forestrie/arbor/services/ranger/consumer/ingress"
 	"github.com/forestrie/arbor/services/ranger/metrics"
+	"github.com/forestrie/arbor/services/ranger/sealhint"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -97,12 +98,24 @@ func main() {
 		}
 	}()
 
+	// Seal hint publisher (ADR-0007 phase 1). Disabled (nil interface) when
+	// SEAL_HINT_QUEUE_URL is unset — R2 event notifications alone wake the
+	// sealer. Assign through the typed check so a nil *Publisher never becomes
+	// a non-nil interface.
+	var sealHintPublisher ingress.SealHintPublisher
+	if p := sealhint.New(cfg, ranger.NewHTTPClient(logger), logger, metricsHandles); p != nil {
+		sealHintPublisher = p
+		slog.Info("seal hint publishing enabled")
+	} else {
+		slog.Info("seal hint publishing disabled (SEAL_HINT_QUEUE_URL unset)")
+	}
+
 	// Start ingress consumers (one per shard)
 	httpClientFactory := func() *ranger.HTTPClient {
 		return ranger.NewHTTPClient(logger)
 	}
 
-	consumers, err := ingress.NewShardedConsumers(ctx, cfg, httpClientFactory, logger, massifCommitter, metricsHandles)
+	consumers, err := ingress.NewShardedConsumers(ctx, cfg, httpClientFactory, logger, massifCommitter, sealHintPublisher, metricsHandles)
 	if err != nil {
 		slog.Error("failed to discover shards", "error", err)
 		os.Exit(1)

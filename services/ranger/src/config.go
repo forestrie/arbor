@@ -32,6 +32,13 @@ type Config struct {
 	VisibilityTimeout      time.Duration // Lease duration for pulled entries
 	ShardDiscoveryInterval time.Duration // Interval for re-discovering shards (0 disables)
 
+	// Seal hint publishing (ADR-0007 phase 1). After each massif commit the
+	// ranger nudges the sealer by publishing a seal hint into the sealer's
+	// Cloudflare Queue. Empty SealHintQueueURL disables the feature; R2 event
+	// notifications remain the backstop either way.
+	SealHintQueueURL   string // Cloudflare Queues API base for the sealer queue (same shape as the sealer's QUEUE_URL)
+	SealHintQueueToken string // Bearer token scoped to Queues push
+
 	// R2 storage configuration (S3-compatible endpoint)
 	R2URL   string
 	R2Token string // Used to derive AWSSecretAccessKey when AWS_SECRET_ACCESS_KEY is not set
@@ -164,6 +171,8 @@ func LoadConfig() Config {
 		PollIntervalMax:        getDuration("POLL_INTERVAL", 2*time.Second),
 		VisibilityTimeout:      getDuration("VISIBILITY_TIMEOUT", 30*time.Second),
 		ShardDiscoveryInterval: getDuration("SHARD_DISCOVERY_INTERVAL", 5*time.Minute),
+		SealHintQueueURL:       os.Getenv("SEAL_HINT_QUEUE_URL"),
+		SealHintQueueToken:     os.Getenv("SEAL_HINT_QUEUE_TOKEN"),
 		R2URL:                  os.Getenv("R2_URL"),
 		R2Token:                r2Token,
 		AWSAccessKeyID:         os.Getenv("AWS_ACCESS_KEY_ID"),
@@ -187,6 +196,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "POLL_INTERVAL_MAX", c.PollIntervalMax)
 	logConfigValue(logger, "VISIBILITY_TIMEOUT", c.VisibilityTimeout)
 	logConfigValue(logger, "SHARD_DISCOVERY_INTERVAL", c.ShardDiscoveryInterval)
+	logConfigValue(logger, "SEAL_HINT_QUEUE_URL", c.SealHintQueueURL)
+	logSecretDigest(logger, "SEAL_HINT_QUEUE_TOKEN", c.SealHintQueueToken)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
 	logSecretDigest(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
