@@ -16,6 +16,23 @@ availability in ~1–2s on a warm lane, single-digit seconds when idle.
 `CheckpointLog()` re-derives all work from R2 state; ranger commit success
 never depends on hint delivery; the sealer stays outbound-only.
 
+## Tracking & decisions (grill-with-docs, 2026-07-12)
+
+- **Linear:** project [Low-latency sealer trigger](https://linear.app/forestrie/project/low-latency-sealer-trigger-662e0d8a2e0e)
+  under the *Self hosted, remote, sealer* initiative. Phase 0 = **FOR-379**,
+  Phase 1 = **FOR-380** (Phases 2–3 to be filed as they approach).
+- **Phase 1 producer auth:** ranger authenticates its hint `POST` with a
+  Cloudflare API token scoped to **Queues push** for the target queue, staged in
+  **forest-1/Doppler** — the same provisioning pattern as the sealer's existing
+  pull token (not a separate per-producer token).
+- **Terminology (canonical, now in
+  [devdocs/glossary.md](https://github.com/forestrie/devdocs/blob/main/glossary.md)):**
+  a **seal hint** is the trigger *message* (same `{"object":{"key":…}}` shape on
+  every transport); **nudge** is the *verb* — the act of delivering one. The plan
+  title keeps "nudge" only in the verb sense.
+- **Phase 0 baseline** (lane-A registration→receipt p50/p90) is a soft AC of
+  FOR-379, recorded back into this plan before Phase 1 lands.
+
 ---
 
 ## Phase 0–1 rollout results (lane A, 2026-07-12)
