@@ -23,6 +23,13 @@ type LogGroupCommitter interface {
 	CommitLogGroup(ctx context.Context, logId []byte, entries []Entry) (*CommitResult, error)
 }
 
+// SealHintPublisher nudges the sealer for massifs written by a commit
+// (ADR-0007 phase 1). Implementations are fire-and-forget: they must never
+// block for long nor surface errors — the commit and ack already succeeded.
+type SealHintPublisher interface {
+	PublishSealHints(ctx context.Context, objectKeys []string)
+}
+
 // Consumer polls the forestrie-ingress Durable Object for entries.
 // Each consumer instance is responsible for a single shard.
 //
@@ -32,6 +39,7 @@ type Consumer struct {
 	httpClient *ranger.HTTPClient
 	logger     *slog.Logger
 	committer  LogGroupCommitter
+	sealHints  SealHintPublisher // optional; nil disables seal hints
 	metrics    *metrics.Metrics
 	pollerId   string
 	shardIndex int    // Shard index this consumer is responsible for
@@ -41,7 +49,7 @@ type Consumer struct {
 
 // NewConsumer creates a new ingress consumer for a specific shard.
 // Use NewShardedConsumers to create consumers for all shards.
-func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger, committer LogGroupCommitter, m *metrics.Metrics, shardIndex int, pullURL, ackURL string) *Consumer {
+func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.Logger, committer LogGroupCommitter, sealHints SealHintPublisher, m *metrics.Metrics, shardIndex int, pullURL, ackURL string) *Consumer {
 	pollerId := cfg.PollerId
 	if pollerId == "" {
 		pollerId = uuid.New().String()
@@ -52,6 +60,7 @@ func NewConsumer(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog.
 		httpClient: httpClient,
 		logger:     logger.With("shard", shardIndex),
 		committer:  committer,
+		sealHints:  sealHints,
 		metrics:    m,
 		pollerId:   pollerId,
 		shardIndex: shardIndex,
@@ -68,6 +77,7 @@ func NewShardedConsumers(
 	httpClientFactory func() *ranger.HTTPClient,
 	logger *slog.Logger,
 	committer LogGroupCommitter,
+	sealHints SealHintPublisher,
 	m *metrics.Metrics,
 ) ([]*Consumer, error) {
 	discovery := NewShardDiscovery(cfg)
@@ -93,7 +103,7 @@ func NewShardedConsumers(
 	for i := 0; i < shardsResp.Count; i++ {
 		pullURL := discovery.BuildPullURL(i)
 		ackURL := discovery.BuildAckURL(i)
-		consumers[i] = NewConsumer(cfg, httpClientFactory(), logger, committer, m, i, pullURL, ackURL)
+		consumers[i] = NewConsumer(cfg, httpClientFactory(), logger, committer, sealHints, m, i, pullURL, ackURL)
 	}
 
 	return consumers, nil
@@ -314,6 +324,14 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 	} else {
 		if c.metrics != nil {
 			c.metrics.RecordAck(true)
+		}
+		// Nudge the sealer for each massif this commit wrote (ADR-0007
+		// phase 1). After commit + ack per the ADR; fire-and-forget — the
+		// publisher logs/counts failures and the R2 event notification
+		// remains the backstop. On the ack-failed path above the entries
+		// redeliver and the next attempt hints.
+		if c.sealHints != nil && len(result.MassifObjectKeys) > 0 {
+			c.sealHints.PublishSealHints(ctx, result.MassifObjectKeys)
 		}
 	}
 }
