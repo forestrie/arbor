@@ -259,9 +259,10 @@ func TestClassifyReceiptReReadAuthority(t *testing.T) {
 	if r := withLogState(10, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeSuperseded || !r.ShouldAck() {
 		t.Errorf("onchain>=sealed = %v (ack=%v), want Superseded/ack", r.Outcome, r.ShouldAck())
 	}
-	// Revert and on-chain still below sealed -> Reverted (nack).
-	if r := withLogState(5, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeReverted || r.ShouldAck() {
-		t.Errorf("onchain<sealed = %v (ack=%v), want Reverted/nack", r.Outcome, r.ShouldAck())
+	// Revert and on-chain still below sealed -> Reverted, terminal ack+alert
+	// (unpublishable as submitted; self-heals via the next seal, adr-0008).
+	if r := withLogState(5, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeReverted || !r.ShouldAck() {
+		t.Errorf("onchain<sealed = %v (ack=%v), want Reverted/ack", r.Outcome, r.ShouldAck())
 	}
 	// Re-read error -> Unsubmitted (nack, never ack on uncertainty).
 	if r := withLogState(0, errors.New("rpc down")).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeUnsubmitted || r.ShouldAck() {
@@ -306,6 +307,12 @@ func TestRevertReasonAtRetriesTipLag(t *testing.T) {
 func TestTipLagBlockNotFound(t *testing.T) {
 	if !tipLagBlockNotFound(errors.New("block not found: 0x29e5b11")) {
 		t.Fatal("expected tip-lag match")
+	}
+	// Base Sepolia's public RPC masks the receipt block behind this body; the
+	// matcher must recognise it or the true revert reason is lost (FOR-377).
+	if !tipLagBlockNotFound(errors.New(
+		`400 Bad Request: {"jsonrpc":"2.0","id":131,"error":{"code":3,"message":"Unknown block"}}`)) {
+		t.Fatal("expected tip-lag match for Base Sepolia 'Unknown block'")
 	}
 	if tipLagBlockNotFound(errors.New("execution reverted")) {
 		t.Fatal("did not expect tip-lag match")

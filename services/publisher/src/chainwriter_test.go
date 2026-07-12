@@ -215,3 +215,26 @@ func TestParsePublisherKey(t *testing.T) {
 		t.Errorf("expected error for invalid key")
 	}
 }
+
+// TestFinalizeResultDisposition locks the daemon disposition mapping after the
+// binary revert model (adr-0008): a mined revert (OutcomeReverted) is terminal
+// ack (StatusReverted), only a never-mined tx (OutcomeUnsubmitted) retries.
+func TestFinalizeResultDisposition(t *testing.T) {
+	cases := []struct {
+		outcome SubmitOutcome
+		want    PublishStatus
+		ack     bool
+	}{
+		{OutcomePublished, StatusPublished, true},
+		{OutcomeSuperseded, StatusAlreadyAnchored, true},
+		{OutcomeReverted, StatusReverted, true},
+		{OutcomeUnsubmitted, StatusRetry, false},
+	}
+	for _, c := range cases {
+		got := FinalizeResult(PublishResult{}, SubmitResult{Outcome: c.outcome})
+		if got.Status != c.want || got.ShouldAck() != c.ack {
+			t.Errorf("outcome %v -> status=%v ack=%v, want status=%v ack=%v",
+				c.outcome, got.Status, got.ShouldAck(), c.want, c.ack)
+		}
+	}
+}

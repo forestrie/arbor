@@ -289,13 +289,16 @@ func (q *QueueConsumer) assembleGroup(ctx context.Context, g logGroup) (publishe
 	}, true
 }
 
-// finishGroup settles a log's primary and, on a terminal-success outcome, acks
-// its subsumed siblings too (the anchored highest seal covers their lower
-// massifs via the consistency chain). On retry, siblings are left unacked and
+// finishGroup settles a log's primary and, only when the primary actually
+// anchored (published / already-anchored), acks its subsumed siblings too — the
+// anchored highest seal covers their lower massifs via the consistency chain. On
+// an unpublishable primary (StatusReverted) the primary is terminally acked but
+// the siblings are NOT: a lower massif is not necessarily unpublishable, so it is
+// left to redeliver and be adjudicated on its own. On retry, siblings also
 // redeliver with the primary.
 func (q *QueueConsumer) finishGroup(ctx context.Context, g logGroup, res publisher.PublishResult) {
 	q.finish(ctx, g.primary, g.key, res)
-	if res.ShouldAck() {
+	if res.Status == publisher.StatusPublished || res.Status == publisher.StatusAlreadyAnchored {
 		for _, sib := range g.siblings {
 			q.ackMsg(ctx, sib)
 		}
@@ -303,8 +306,12 @@ func (q *QueueConsumer) finishGroup(ctx context.Context, g logGroup, res publish
 }
 
 // finish records metrics for a terminal result and acks the message when the
-// outcome permits (published / already-anchored / superseded); transient
-// and unsubmitted outcomes are left for redelivery.
+// outcome permits (published / already-anchored / reverted); Retry and
+// OwnerNotAnchored are left for redelivery. A StatusReverted (unpublishable)
+// result is terminally acked AND alerted at ERROR — the checkpoint is dropped
+// from the queue and only self-heals via a later seal (adr-0008), so it warrants
+// operator attention (typically a non-conformant encoding, e.g. FOR-377's
+// InconsistentReceiptSignature bootstraps).
 func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string, res publisher.PublishResult) {
 	// Label reverts by the bounded error name only (raw strings stay in logs).
 	reason := ""
@@ -319,11 +326,17 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 			strconv.FormatUint(res.ChainID, 10), res.Contract.Hex(),
 			float64(res.SealedSize-res.OnchainSize))
 	}
-	q.logger.Info("publish result",
+	attrs := []any{
 		"messageID", msg.ID, "key", key, "status", res.Status.String(),
 		"chain", res.ChainID, "contract", res.Contract.Hex(),
 		"tx", res.TxHash.Hex(), "sealedSize", res.SealedSize,
-		"onchainSize", res.OnchainSize, "reason", res.Reason)
+		"onchainSize", res.OnchainSize, "reason", res.Reason,
+	}
+	if res.Status == publisher.StatusReverted {
+		q.logger.Error("unpublishable checkpoint terminally acked", attrs...)
+	} else {
+		q.logger.Info("publish result", attrs...)
+	}
 	if res.ShouldAck() {
 		q.ackMsg(ctx, msg)
 	}
