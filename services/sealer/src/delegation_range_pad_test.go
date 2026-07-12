@@ -1,11 +1,76 @@
 package sealer
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 )
+
+// capturingIssuerStub records issuance requests and returns pending; used to
+// assert whether (and with what range) issuance was attempted.
+type capturingIssuerStub struct {
+	requests []IssuerLeaseRequest
+}
+
+func (s *capturingIssuerStub) IssueForLog(_ context.Context, req IssuerLeaseRequest) (*IssuerLeaseResponse, error) {
+	s.requests = append(s.requests, req)
+	return nil, ErrDelegationPending
+}
+
+// TestEnsureValidForLog_CachedPaddedLeaseServesGrownWindows is THE FOR-386
+// regression: the cache must be consulted with the caller's TRUE seal window
+// (the first-cut padded the lookup window itself, advancing the requested end
+// past the cached cert on every append and defeating the cache by
+// construction — measured live as one issuance round-trip per append). A
+// cached wide lease must serve subsequent grown windows with ZERO issuer
+// calls until the log outgrows the pad.
+func TestEnsureValidForLog_CachedPaddedLeaseServesGrownWindows(t *testing.T) {
+	logID := "abcdef0123456789abcdef0123456789"
+	issuer := &capturingIssuerStub{}
+	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, issuer, time.Hour, time.Minute)
+	mgr.SetRangePad(65536)
+
+	// Simulate the lease issued for the first seal [0, 7] with the pad applied.
+	cached := &DelegationLease{
+		OnchainProof: &delegationcert.OnchainDelegationProof{
+			MMRStart: 0,
+			MMREnd:   paddedRangeEnd(7, 65536),
+		},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	elem := mgr.lru.PushFront(&leaseEntry{key: logID, lease: cached})
+	mgr.leases[logID] = elem
+
+	// Subsequent appends: windows advance but stay inside the pad — every one
+	// must be served from cache.
+	for _, w := range [][2]uint64{{7, 9}, {9, 12}, {12, 500}} {
+		lease, err := mgr.EnsureValidForLog(t.Context(), NewHTTPClient(nil), nil, "secp256r1", logID, w[0], w[1])
+		if err != nil {
+			t.Fatalf("window [%d,%d]: %v", w[0], w[1], err)
+		}
+		if lease != cached {
+			t.Fatalf("window [%d,%d]: expected cached lease", w[0], w[1])
+		}
+	}
+	if len(issuer.requests) != 0 {
+		t.Fatalf("issuer called %d times for covered windows, want 0", len(issuer.requests))
+	}
+
+	// Outgrown window: must go to issuance, and the new request must itself be
+	// padded.
+	_, err := mgr.EnsureValidForLog(t.Context(), NewHTTPClient(nil), nil, "secp256r1", logID, 65543, 65545)
+	if err == nil || len(issuer.requests) != 1 {
+		t.Fatalf("outgrown window: expected pending issuance, err=%v calls=%d", err, len(issuer.requests))
+	}
+	if got, want := issuer.requests[0].MMREnd, paddedRangeEnd(65545, 65536); got != want {
+		t.Errorf("issuance request MMREnd = %d, want padded %d", got, want)
+	}
+	if issuer.requests[0].MMRStart != 65543 {
+		t.Errorf("issuance request MMRStart = %d, want 65543 (true window start)", issuer.requests[0].MMRStart)
+	}
+}
 
 // TestPaddedRangeEnd covers the FOR-386 request-widening helper, including the
 // uint64 overflow clamp.

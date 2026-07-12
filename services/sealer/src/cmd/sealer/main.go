@@ -64,6 +64,7 @@ func main() {
 		HTTPClient: httpClient,
 	}
 	leaseMgr := sealer.NewDelegationLeaseManager(trustRoot, issuer, 0, 0)
+	leaseMgr.SetRangePad(cfg.DelegationRangePad)
 	if cfg.ContractRPCURL != "" {
 		if v, err := sealer.NewRPCERC1271Verifier(cfg.ContractRPCURL); err != nil {
 			slog.Error("invalid UNIVOCITY_CONTRACT_RPC_URL", "error", err)
