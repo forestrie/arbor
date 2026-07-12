@@ -147,10 +147,10 @@ type ChainReader interface {
 }
 
 type UnivocityContract struct {
-	client       *ethclient.Client
-	addr         common.Address
-	contract     abi.ABI
-	erc1271      abi.ABI
+	client   *ethclient.Client
+	addr     common.Address
+	contract abi.ABI
+	erc1271  abi.ABI
 }
 
 func (c *UnivocityContract) RootLogId(ctx context.Context) (logid.UUID, error) {

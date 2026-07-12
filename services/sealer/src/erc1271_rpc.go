@@ -13,8 +13,8 @@ import (
 )
 
 var (
-	erc1271ABI     abi.ABI
-	erc1271Magic   = [4]byte{0x16, 0x26, 0xba, 0x7e}
+	erc1271ABI   abi.ABI
+	erc1271Magic = [4]byte{0x16, 0x26, 0xba, 0x7e}
 )
 
 func init() {
