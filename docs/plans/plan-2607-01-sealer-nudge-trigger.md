@@ -66,6 +66,22 @@ is never sealed until new traffic or a manual hint arrives; the phase 3
 sweep is therefore a correctness requirement, and in-process deferral retry
 (below) closes it sooner.
 
+### Config ceilings applied (lane A, 2026-07-13)
+
+Sealer `POLL_INTERVAL_MAX` 5s→2s and ranger `POLL_INTERVAL` 2s→1s
+(`forest-dev-5/svc_sealer-a` / `svc_ranger-a`; lane B left at defaults).
+Measured warm appends after: **4.1s and 2.5s** (from ~7s), one 13.7s outlier
+caused by a mid-run pod rollout — flux reconciliation reverts imperative
+`kubectl rollout restart` annotations minutes later, churning the pods again.
+Two operational notes: (a) restart lane services by letting flux reconcile a
+manifest change (or suspend the kustomization first), not by imperative
+restarts; (b) the delegation lease cache is in-memory, so **any pod churn
+costs one issuance round-trip per active log** on its next seal — with many
+active logs a redeploy is an issuance storm. The phase 1.5 deferral retry
+makes recovery fast; coordinator pre-issuance/coverage-matching (phase 2)
+removes it. `DELEGATION_MAX_LEASES` (default 1000) sizes the cache
+([#59](https://github.com/forestrie/arbor/pull/59)).
+
 ### Follow-on latency/scale options (reviewed 2026-07-13; fold into phases 2–3)
 
 - **Config now:** sealer `POLL_INTERVAL_MAX` 5s→2s and ranger
