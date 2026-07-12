@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	coseAlgES256  int64 = -7
-	coseAlgKS256  int64 = -65799
+	coseAlgES256 int64 = -7
+	coseAlgKS256 int64 = -65799
 )
 
 // trustRootV2Response is the opaque (alg, key) CBOR shape from univocity v2.
