@@ -352,6 +352,13 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 			continue
 		}
 		w.messages = append(w.messages, msg)
+
+		// FOR-379 (ADR-0007): count accepted seal triggers by wake source. All
+		// triggers arrive via R2 event notifications today; phase 1 extends
+		// this with ranger-published seal hints.
+		if q.metrics != nil {
+			q.metrics.RecordSealTrigger(metrics.SealTriggerSourceR2Event)
+		}
 	}
 
 	// Log a concise summary; avoid dumping a large set into logs.
@@ -381,6 +388,7 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 		HTTPClient:   q.httpClient,
 		Logger:       q.logger,
 		LeaseManager: q.leaseMgr,
+		Metrics:      q.metrics,
 	}
 
 	var wg sync.WaitGroup

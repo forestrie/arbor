@@ -14,6 +14,7 @@ import (
 	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/go-merklelog/massifs"
+	"github.com/forestrie/go-merklelog/massifs/snowflakeid"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/forestrie/go-merklelog/mmr"
 	"github.com/fxamacker/cbor/v2"
@@ -241,12 +242,45 @@ func CheckpointLog(
 			return fmt.Errorf("write checkpoint (massif=%d): %w", mi, err)
 		}
 
+		observeCheckpointLag(svc, logger, &mc)
+
 		// Advance base state.
 		baseState.MMRSize = curSize
 		baseState.Peaks = newPeaks
 	}
 
 	return nil
+}
+
+// observeCheckpointLag records sealer_checkpoint_lag_seconds for a just-written
+// checkpoint: the time from the massif's last entry idtimestamp to now
+// (ADR-0007 / FOR-379 — the trigger latency the seal-hint work targets).
+// Best-effort: metric handles may be absent and the idtimestamp epoch must fit
+// snowflakeid's uint8; either just skips the observation.
+func observeCheckpointLag(svc SealerService, logger *slog.Logger, mc *massifs.MassifContext) {
+	if svc.Metrics == nil {
+		return
+	}
+	lastID := mc.GetLastIDTimestamp()
+	if lastID == 0 {
+		return
+	}
+	epoch := mc.Start.CommitmentEpoch
+	if epoch > 255 {
+		return
+	}
+	lastMS, err := snowflakeid.IDUnixMilli(lastID, uint8(epoch))
+	if err != nil {
+		logger.Debug("checkpoint lag: idtimestamp decode failed", "error", err)
+		return
+	}
+	lag := time.Since(time.UnixMilli(lastMS)).Seconds()
+	if lag < 0 {
+		// Clock skew between the ranger's snowflake clock and ours; clamp
+		// rather than feeding negatives to the histogram.
+		lag = 0
+	}
+	svc.Metrics.ObserveCheckpointLag(lag)
 }
 
 func putCheckpoint(ctx context.Context, store *merklelog.Store, massifIndex uint32, mmrSize uint64, data []byte) error {
