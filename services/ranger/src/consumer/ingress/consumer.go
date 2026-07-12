@@ -326,12 +326,17 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 			c.metrics.RecordAck(true)
 		}
 		// Nudge the sealer for each massif this commit wrote (ADR-0007
-		// phase 1). After commit + ack per the ADR; fire-and-forget — the
-		// publisher logs/counts failures and the R2 event notification
-		// remains the backstop. On the ack-failed path above the entries
-		// redeliver and the next attempt hints.
+		// phase 1). The ADR's ordering ("after the R2 write and queue ack
+		// succeed") constrains when the publish STARTS, not the poll loop:
+		// pollCycle's wg.Wait() gates the next pull on this goroutine, so
+		// the publish runs detached — a slow or dead hint queue must never
+		// stretch the shard's poll cadence. The publisher bounds itself
+		// (2 attempts x 2s per key) and the poll ctx cancels it on
+		// shutdown; failures are logged/counted and the R2 event
+		// notification remains the backstop. On the ack-failed path above
+		// the entries redeliver and the next attempt hints.
 		if c.sealHints != nil && len(result.MassifObjectKeys) > 0 {
-			c.sealHints.PublishSealHints(ctx, result.MassifObjectKeys)
+			go c.sealHints.PublishSealHints(ctx, result.MassifObjectKeys)
 		}
 	}
 }
