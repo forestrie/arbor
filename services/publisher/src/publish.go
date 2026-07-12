@@ -35,12 +35,14 @@ const (
 	// StatusChainNotConfigured — the forest is bound to a chain absent from
 	// UNIVOCITY_RPC_URLS (D3); skip + alert, leave queued for later.
 	StatusChainNotConfigured
-	// StatusReverted — the contract rejected the submission deterministically
-	// (retrying identical calldata cannot help); ack + alert with the reason.
+	// StatusReverted — the tx mined as a revert and on-chain size is still below
+	// our sealed size, so this seal is unpublishable as submitted. Terminal: ack
+	// + alert with the reason. Not a lost checkpoint — the next seal on this log
+	// re-anchors the skipped range via catch-up (adr-0008).
 	StatusReverted
-	// StatusRetry — a transient revert: the on-chain state advanced under us
-	// between read and submit, so a fresh catch-up proof would succeed. Retry
-	// (do not ack) — redelivery rebuilds against the new size.
+	// StatusRetry — the tx never mined (admission failure, receipt timeout, or an
+	// RPC/infra error), so the same message can still succeed. Retry (do not ack)
+	// — redelivery re-anchors idempotently.
 	StatusRetry
 )
 
@@ -79,13 +81,15 @@ type PublishResult struct {
 	Reason      string // decoded revert name, or skip explanation
 }
 
-// ShouldAck reports whether the queue message may be acked. Only the two
-// on-chain-confirmed outcomes ack — Published (we anchored it) and
-// AlreadyAnchored (a fresh logState read shows it is anchored/subsumed). Every
-// other status, including any revert, leaves the message for redelivery. This is
-// the single ack authority: no status acks a seal without on-chain confirmation.
+// ShouldAck reports whether the queue message may be acked. Three terminal
+// statuses ack: Published (we anchored it), AlreadyAnchored (a fresh logState
+// read shows it is anchored/subsumed), and Reverted (mined revert, unpublishable
+// as submitted — acked + alerted; it self-heals via the next seal's catch-up,
+// adr-0008). Retry and OwnerNotAnchored leave the message for redelivery.
 func (r PublishResult) ShouldAck() bool {
-	return r.Status == StatusPublished || r.Status == StatusAlreadyAnchored
+	return r.Status == StatusPublished ||
+		r.Status == StatusAlreadyAnchored ||
+		r.Status == StatusReverted
 }
 
 // Publisher is the one-shot publish core: it turns a checkpoint object key into
@@ -238,7 +242,11 @@ func FinalizeResult(res PublishResult, sub SubmitResult) PublishResult {
 	case OutcomeSuperseded:
 		// Reverted, but a fresh logState read shows it is already anchored/subsumed.
 		res.Status = StatusAlreadyAnchored
-	default: // OutcomeReverted / OutcomeUnsubmitted — not anchored; retry.
+	case OutcomeReverted:
+		// Mined revert, on-chain still below sealed: unpublishable as submitted.
+		// Terminal ack + alert; self-heals via the next seal's catch-up (adr-0008).
+		res.Status = StatusReverted
+	default: // OutcomeUnsubmitted — never mined; retry via redelivery.
 		res.Status = StatusRetry
 	}
 	return res

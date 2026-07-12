@@ -14,6 +14,7 @@ optional); date-cohort plans live in this directory.
 | Plan | Topic | Status |
 |------|-------|--------|
 | [plan-2607-01](plan-2607-01-sealer-nudge-trigger.md) | Low-latency sealer trigger: ranger seal hints → long-poll coordinator ([ADR-0007](../adr/adr-0007-low-latency-sealer-trigger.md), FOR-335) | draft |
+| [plan-2607-02](plan-2607-02-publisher-revert-probing-remediation.md) | Stop the publisher probing for revertable checkpoints: mirror grant bounds off-chain, pre-send `eth_call`, split revert disposition ([proposal](proposal-publisher-revert-probing.md)) | draft |
 
 ## Legacy plans (frozen ids)
 

@@ -37,8 +37,12 @@ const (
 	// publisher, or subsumed by a later seal). Terminal success — ack.
 	OutcomeSuperseded
 	// OutcomeReverted — the tx reverted and on-chain size is still below our
-	// sealed size, so the seal is NOT anchored. Always retry: redelivery rebuilds
-	// a fresh proof from the advanced size.
+	// sealed size, so this seal is unpublishable as submitted. Terminal: ack +
+	// alert, do NOT retry. Retrying identical calldata against identical state
+	// cannot succeed, and drop-safety comes from log self-healing, not from
+	// withholding the ack — the next seal on this log re-anchors the skipped
+	// range via the catch-up consistency proof (adr-0008). A dormant log that
+	// never re-seals is recovered by a future re-drive ("poke") endpoint.
 	OutcomeReverted
 	// OutcomeUnsubmitted — the tx never entered the mempool (admission failure or
 	// a stopped suffix after a sequential-admission gap) or was not mined before
@@ -72,15 +76,17 @@ func (r SubmitResult) String() string {
 	}
 }
 
-// ShouldAck reports whether the queue message may be acked. The decision is
-// authoritative on on-chain size: only Published (we anchored it) and Superseded
-// (a fresh logState read shows it is already anchored/subsumed) ack. Every other
-// outcome — including any revert where on-chain size is still below our sealed
-// size, and unknown reverts — is retried via redelivery. Safety over liveness: a
-// deterministically-bad checkpoint loops until the give-up guard / DLQ, but a
-// valid one is never dropped.
+// ShouldAck reports whether the queue message may be acked. Three outcomes are
+// terminal and ack: Published (we anchored it), Superseded (a fresh logState
+// read shows it is already anchored/subsumed), and Reverted (mined revert with
+// on-chain size still below sealed — unpublishable as submitted; acked + alerted
+// because it self-heals via the next seal's catch-up, adr-0008). Only
+// Unsubmitted (never mined: admission failure, receipt timeout, RPC error) is
+// retried via redelivery, since that same message can still succeed on retry.
 func (r SubmitResult) ShouldAck() bool {
-	return r.Outcome == OutcomePublished || r.Outcome == OutcomeSuperseded
+	return r.Outcome == OutcomePublished ||
+		r.Outcome == OutcomeSuperseded ||
+		r.Outcome == OutcomeReverted
 }
 
 // parsePublisherKey decodes the gas-only EOA private key from hex (0x optional).
@@ -411,14 +417,19 @@ func (w *ChainWriter) waitReceipt(
 }
 
 // tipLagBlockNotFound reports whether an eth_call error is the public-RPC tip
-// lag where the receipt's block is not yet queryable (Base Sepolia often
-// surfaces this as "block not found: 0x…"). Retriable; not a contract revert.
+// lag where the receipt's block is not yet queryable. Different backends phrase
+// it differently: some return "block not found: 0x…", Base Sepolia's public RPC
+// returns a JSON-RPC error `{"code":3,"message":"Unknown block"}`. Both mean the
+// same thing — retriable, not a contract revert. Matching the raw JSON-RPC
+// code:3 is unsafe (that code is also "execution reverted"), so we match the
+// message text of the known block-unavailable phrasings.
 func tipLagBlockNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "block not found")
+	return strings.Contains(msg, "block not found") ||
+		strings.Contains(msg, "unknown block")
 }
 
 // revertReasonAt re-runs the mined tx as an eth_call at its block to recover the
