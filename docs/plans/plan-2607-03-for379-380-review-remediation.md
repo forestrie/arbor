@@ -1,11 +1,41 @@
 ---
 id: 2607-03
-status: draft
+status: executed (re-review 2026-07-12; R2 open as a rollout gate)
 created: 2026-07-12
-refs: [ADR-0007, plan-2607-01, FOR-379, FOR-380]
+refs: [ADR-0007, plan-2607-01, FOR-379, FOR-380, FOR-383]
 ---
 
 # plan-2607-03 — FOR-379/FOR-380 review remediation (sealer trigger phases 0–1)
+
+## Verification (re-review, 2026-07-12)
+
+All items executed and verified by a second review-changes pass:
+
+- **R1 ✅** publish detached (`go c.sealHints.PublishSealHints(...)`); acceptance
+  test proves `processLogGroup` returns while a blocking publisher is in
+  flight. Race-clean under `go test -race` (the mode CI runs).
+- **R2 ⏳ open by design** — rollout gate: confirm
+  `sealer_seal_trigger_total{source="ranger_hint"}` increments on lane A and
+  no body-wrapper unmarshal warnings (plan-2607-01 exit criteria + FOR-380).
+- **R3 ✅** `merklelogtest.MemClient` + rollover test. Fake fidelity verified
+  against the real backends: GetOptions range semantics match the documented
+  contract (zero-value full read, 1-byte probe); `FailIfExists` never reaches
+  an ObjectClient without `IfNoneMatch:"*"` (Replacer pairs them), so the
+  fake's stronger create-only check cannot diverge for real callers.
+- **R4 ✅ (upgraded)** [arbor#52](https://github.com/forestrie/arbor/pull/52).
+  Executing it surfaced that `test:unit` ended with `exit 0` — test failures
+  did not fail even the main-branch pipeline. Fixed in #52 alongside the new
+  PR gate; all 13 modules verified passing hermetically before arming.
+- **R5/R7 ✅** plan-2607-01 updated (names, wire contract, lag caveat, R2 gate).
+- **R6 ✅** documented (by-design). **R8 ✅** covered by the ack-failure test.
+
+New (Low/informational) from the re-review — deferred: MemClient's list
+continuation is a snapshot offset (fine single-threaded; doc-comment worthy);
+#52's `paths:` filter means a later required-check branch protection would
+block doc-only PRs (use a job-level filter if/when protection is enabled);
+`tibdex/github-app-token@v1` is tag-pinned (matches existing build-deploy
+practice — sweep both together if hardening); plan-2607-01 is edited by both
+#51 and #48 in disjoint hunks (second to land may need a trivial rebase).
 
 Remediation plan from a review-changes pass over the two-PR stack implementing
 [plan-2607-01](plan-2607-01-sealer-nudge-trigger.md) phases 0–1:
