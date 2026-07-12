@@ -98,7 +98,7 @@ func (p *ContractClients) Close() {
 const univocityViewABI = `[
 	{"inputs":[],"name":"rootLogId","outputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],"stateMutability":"view","type":"function"},
 	{"inputs":[],"name":"bootstrapConfig","outputs":[{"internalType":"int64","name":"bootstrapAlg","type":"int64"},{"internalType":"bytes","name":"bootstrapKey","type":"bytes"}],"stateMutability":"view","type":"function"},
-	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logConfig","outputs":[{"internalType":"uint8","name":"kind","type":"uint8"},{"internalType":"bytes32","name":"authLogId","type":"bytes32"},{"internalType":"bytes","name":"rootKey","type":"bytes"},{"internalType":"uint256","name":"initializedAt","type":"uint256"}],"stateMutability":"view","type":"function"},
+	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logConfig","outputs":[{"components":[{"internalType":"uint8","name":"kind","type":"uint8"},{"internalType":"bytes32","name":"authLogId","type":"bytes32"},{"internalType":"bytes","name":"rootKey","type":"bytes"},{"internalType":"uint256","name":"initializedAt","type":"uint256"}],"internalType":"struct LogConfig","name":"","type":"tuple"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"isLogInitialized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logRootKey","outputs":[{"internalType":"bytes32","name":"rootKeyX","type":"bytes32"},{"internalType":"bytes32","name":"rootKeyY","type":"bytes32"}],"stateMutability":"view","type":"function"}
 ]`
@@ -224,23 +224,32 @@ func (c *UnivocityContract) LogConfig(ctx context.Context, logId logid.UUID) (Lo
 		return LogConfig{}, err
 	}
 	vals, err := c.contract.Unpack("logConfig", out)
-	if err != nil || len(vals) < 4 {
+	if err != nil || len(vals) < 1 {
 		return LogConfig{}, err
 	}
-	cfg := LogConfig{}
-	if v, ok := vals[0].(uint8); ok {
-		cfg.Kind = LogKind(v)
+	// The contract returns `LogConfig memory` — a single tuple, NOT flat
+	// outputs. Declaring it flat mis-decoded the tuple head offset as `kind`
+	// and read garbage offsets for the dynamic rootKey ("abi: cannot marshal
+	// in to go slice: offset … over slice boundary"), which 502'd every
+	// post-anchor authority lookup (FOR-389).
+	tup := abi.ConvertType(vals[0], new(logConfigTuple)).(*logConfigTuple)
+	cfg := LogConfig{
+		Kind:      LogKind(tup.Kind),
+		AuthLogId: logid.FromContractBytes32(tup.AuthLogId),
+		RootKey:   tup.RootKey,
 	}
-	if v, ok := vals[1].([32]byte); ok {
-		cfg.AuthLogId = logid.FromContractBytes32(v)
-	}
-	if v, ok := vals[2].([]byte); ok {
-		cfg.RootKey = v
-	}
-	if v, ok := vals[3].(*big.Int); ok && v != nil && v.IsUint64() {
-		cfg.InitializedAt = v.Uint64()
+	if tup.InitializedAt != nil && tup.InitializedAt.IsUint64() {
+		cfg.InitializedAt = tup.InitializedAt.Uint64()
 	}
 	return cfg, nil
+}
+
+// logConfigTuple mirrors the on-chain `struct LogConfig` for ABI conversion.
+type logConfigTuple struct {
+	Kind          uint8    `abi:"kind"`
+	AuthLogId     [32]byte `abi:"authLogId"`
+	RootKey       []byte   `abi:"rootKey"`
+	InitializedAt *big.Int `abi:"initializedAt"`
 }
 
 func (c *UnivocityContract) LogRootKey(ctx context.Context, logId logid.UUID) (rootKeyX, rootKeyY [32]byte, err error) {
