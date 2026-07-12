@@ -12,11 +12,13 @@ type Metrics struct {
 	LogsCheckpointedTotal     prometheus.Counter
 	MessagesProcessedTotal    prometheus.Counter
 	MessagesAcknowledgedTotal *prometheus.CounterVec
+	SealTriggerTotal          *prometheus.CounterVec
 
 	// Histograms
 	MessagesPerPoll    prometheus.Histogram
 	PollDuration       prometheus.Histogram
 	CheckpointDuration prometheus.Histogram
+	CheckpointLag      prometheus.Histogram
 
 	// Gauges
 	DelegationLeaseExpiry prometheus.Gauge
@@ -29,9 +31,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		LogsCheckpointedTotal:     newLogsCheckpointedTotal(),
 		MessagesProcessedTotal:    newMessagesProcessedTotal(),
 		MessagesAcknowledgedTotal: newMessagesAcknowledgedTotal(),
+		SealTriggerTotal:          newSealTriggerTotal(),
 		MessagesPerPoll:           newMessagesPerPoll(),
 		PollDuration:              newPollDuration(),
 		CheckpointDuration:        newCheckpointDuration(),
+		CheckpointLag:             newCheckpointLag(),
 		DelegationLeaseExpiry:     newDelegationLeaseExpiry(),
 	}
 
@@ -40,9 +44,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.LogsCheckpointedTotal,
 		m.MessagesProcessedTotal,
 		m.MessagesAcknowledgedTotal,
+		m.SealTriggerTotal,
 		m.MessagesPerPoll,
 		m.PollDuration,
 		m.CheckpointDuration,
+		m.CheckpointLag,
 		m.DelegationLeaseExpiry,
 	)
 
@@ -92,4 +98,23 @@ func (m *Metrics) ObserveCheckpointDuration(seconds float64) {
 // SetDelegationLeaseExpiry sets the delegation lease expiry timestamp.
 func (m *Metrics) SetDelegationLeaseExpiry(unixSeconds float64) {
 	m.DelegationLeaseExpiry.Set(unixSeconds)
+}
+
+// RecordSealTrigger increments the seal trigger counter for the given wake
+// source. Source must be one of the SealTriggerSource* constants; anything
+// else is recorded as "unknown" to keep label cardinality bounded.
+func (m *Metrics) RecordSealTrigger(source string) {
+	switch source {
+	case SealTriggerSourceR2Event, SealTriggerSourceRangerHint,
+		SealTriggerSourceLongPoll, SealTriggerSourceSweep:
+	default:
+		source = SealTriggerSourceUnknown
+	}
+	m.SealTriggerTotal.WithLabelValues(source).Inc()
+}
+
+// ObserveCheckpointLag records the seconds from the massif's last entry
+// idtimestamp to the checkpoint write (ADR-0007 trigger latency).
+func (m *Metrics) ObserveCheckpointLag(seconds float64) {
+	m.CheckpointLag.Observe(seconds)
 }
