@@ -124,7 +124,26 @@ func (c *Committer) CommitLogGroup(
 		lastCommit     int
 		committedCount int
 		firstLeafIndex uint64 = ^uint64(0) // sentinel: max uint64
+		// R2 object keys of massifs written by this call, in write order.
+		// Consumed by the seal-hint publisher after ack (ADR-0007 phase 1).
+		massifKeys []string
 	)
+
+	// recordMassifKey captures the R2 object key for a massif we just
+	// committed. Best-effort: a failure only costs the seal hint for that
+	// massif (the R2 event notification backstop still triggers the seal).
+	recordMassifKey := func(massifIndex uint32) {
+		key, err := store.ObjectPath(massifIndex, massifstorage.ObjectMassifData)
+		if err != nil {
+			c.logger.Warn("massif object key for seal hint unavailable",
+				"logId", logIDHex,
+				"massifIndex", massifIndex,
+				"error", err,
+			)
+			return
+		}
+		massifKeys = append(massifKeys, key)
+	}
 
 	for i, entry := range entries {
 		if len(entry.ContentHash) != sha256.Size {
@@ -171,6 +190,7 @@ func (c *Committer) CommitLogGroup(
 					FirstLeafIndex: firstLeafIndex,
 				}, fmt.Errorf("commit on massif full: %w", err)
 			}
+			recordMassifKey(mc.Start.MassifIndex)
 
 			entriesSinceRollover := i - lastCommit
 			lastCommit = i
@@ -226,6 +246,9 @@ func (c *Committer) CommitLogGroup(
 			FirstLeafIndex: firstLeafIndex,
 		}, fmt.Errorf("final commit: %w", err)
 	}
+	if committedCount > 0 {
+		recordMassifKey(mc.Start.MassifIndex)
+	}
 	c.logNotice(ctx,
 		"committed",
 		"logId", logIDHex,
@@ -235,8 +258,9 @@ func (c *Committer) CommitLogGroup(
 	)
 
 	return &ingress.CommitResult{
-		Committed:      committedCount,
-		FirstLeafIndex: firstLeafIndex,
+		Committed:        committedCount,
+		FirstLeafIndex:   firstLeafIndex,
+		MassifObjectKeys: massifKeys,
 	}, nil
 }
 

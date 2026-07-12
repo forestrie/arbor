@@ -292,13 +292,18 @@ func (q *QueueConsumer) PullAndProcessMessages(ctx context.Context) (int, error)
 	return msgCount, err
 }
 
-// ProcessAndAcknowledge extracts the set of unique log IDs referenced by messages.
-// It acknowledges all messages regardless of decode/parsing errors.
-func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *QueuePullResult) error {
+// groupLogWork parses and validates queue messages, grouping the valid ones by
+// log. Duplicate triggers for the same massif — e.g. a ranger seal hint AND
+// the R2 event notification for the same object key (ADR-0007) — coalesce into
+// a single logWork entry, so CheckpointLog runs once per log per batch and
+// re-derives its work from R2 state. The second return is the messages that
+// failed parsing/validation (acked unconditionally so they cannot poison the
+// queue).
+func (q *QueueConsumer) groupLogWork(messages []QueueMessage) (map[string]*logWork, []QueueMessage) {
 	unique := make(map[string]*logWork)
 	var invalidMessages []QueueMessage
 
-	for _, msg := range qbatch.Messages {
+	for _, msg := range messages {
 		var bodyJSON string
 		if err := json.Unmarshal(msg.Body, &bodyJSON); err != nil {
 			q.logger.Warn("failed to unmarshal message body wrapper", "messageID", msg.ID, "error", err)
@@ -353,13 +358,25 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 		}
 		w.messages = append(w.messages, msg)
 
-		// FOR-379 (ADR-0007): count accepted seal triggers by wake source. All
-		// triggers arrive via R2 event notifications today; phase 1 extends
-		// this with ranger-published seal hints.
+		// FOR-379 (ADR-0007): count accepted seal triggers by wake source.
+		// Plain R2 event notifications carry no hintSource; ranger seal hints
+		// mark themselves (RecordSealTrigger clamps unknown values).
 		if q.metrics != nil {
-			q.metrics.RecordSealTrigger(metrics.SealTriggerSourceR2Event)
+			source := metrics.SealTriggerSourceR2Event
+			if note.HintSource != "" {
+				source = note.HintSource
+			}
+			q.metrics.RecordSealTrigger(source)
 		}
 	}
+
+	return unique, invalidMessages
+}
+
+// ProcessAndAcknowledge extracts the set of unique log IDs referenced by messages.
+// It acknowledges all messages regardless of decode/parsing errors.
+func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *QueuePullResult) error {
+	unique, invalidMessages := q.groupLogWork(qbatch.Messages)
 
 	// Log a concise summary; avoid dumping a large set into logs.
 	q.logger.Info("sealer poll summary",
