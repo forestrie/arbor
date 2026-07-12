@@ -1,6 +1,10 @@
 package sealer
 
-import "log/slog"
+import (
+	"log/slog"
+
+	"github.com/forestrie/arbor/services/sealer/metrics"
+)
 
 // SealerService holds dependencies known at service startup time.
 type SealerService struct {
@@ -8,6 +12,8 @@ type SealerService struct {
 	HTTPClient   *HTTPClient
 	Logger       *slog.Logger
 	LeaseManager *DelegationLeaseManager
+	// Metrics is optional; nil disables recording (tests, ad-hoc tooling).
+	Metrics *metrics.Metrics
 }
 
 // SealerBatch holds values known when a batch of messages is received.
