@@ -222,7 +222,7 @@ func CheckpointLog(
 			extras[delegationCertUnprotectedLabel] = rawCert
 		}
 		if lease.OnchainProof != nil {
-			rawProof, err := cbor.Marshal(lease.OnchainProof)
+			rawProof, err := canonicalCBOR.Marshal(lease.OnchainProof)
 			if err != nil {
 				return fmt.Errorf("encode onchain delegation proof (massif=%d): %w", mi, err)
 			}

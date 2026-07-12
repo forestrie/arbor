@@ -82,7 +82,7 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 		RequestedTTLSeconds: req.RequestedTTLSeconds,
 		RequestID:           req.RequestID,
 	}
-	body, err := cbor.Marshal(issueReq)
+	body, err := canonicalCBOR.Marshal(issueReq)
 	if err != nil {
 		return nil, fmt.Errorf("encode delegation issue request: %w", err)
 	}
