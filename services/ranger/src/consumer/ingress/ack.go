@@ -28,7 +28,7 @@ type AckResponse struct {
 
 // EncodeAckRequest encodes an ack request to CBOR.
 func EncodeAckRequest(req AckRequest) ([]byte, error) {
-	return cbor.Marshal(req)
+	return canonicalCBOR.Marshal(req)
 }
 
 // DecodeAckResponse decodes a CBOR ack response.

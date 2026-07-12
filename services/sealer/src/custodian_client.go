@@ -113,7 +113,7 @@ func SignDigestByLogID(
 		PayloadHash:      digest,
 		RawSignatureOnly: true,
 	}
-	bodyBytes, err := cbor.Marshal(reqBody)
+	bodyBytes, err := canonicalCBOR.Marshal(reqBody)
 	if err != nil {
 		return nil, fmt.Errorf("encode request: %w", err)
 	}

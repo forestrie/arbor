@@ -221,7 +221,10 @@ func SetTransparentStatementIdtimestamp(raw, idtimestamp []byte) ([]byte, error)
 	if hasTag {
 		content = cbor.Tag{Number: tagNum, Content: outArr}
 	}
-	out, err := cbor.Marshal(content)
+	// Canonical (§4.2) so the rewritten unprotected map has a stable,
+	// deterministic order — the default cbor.Marshal serialises Go maps in
+	// random order, which is what the "stable CBOR" comment above intended.
+	out, err := canonicalCBOR.Marshal(content)
 	if err != nil {
 		return nil, fmt.Errorf("encode COSE Sign1: %w", err)
 	}

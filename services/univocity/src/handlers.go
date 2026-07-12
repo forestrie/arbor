@@ -11,7 +11,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
-	"github.com/fxamacker/cbor/v2"
 )
 
 func (a API) resolveScoped(
@@ -234,7 +233,7 @@ func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 		Contract:  res.Contract.Hex(),
 		Source:    res.Source,
 	}
-	out, err := cbor.Marshal(resp)
+	out, err := canonicalCBOR.Marshal(resp)
 	if err != nil {
 		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank",
 			"encode failed", err.Error())
@@ -356,7 +355,7 @@ func (a API) writePublicRoot(
 			record.ChainID = strconv.FormatUint(entry.ChainID, 10)
 			record.ContractAddress = entry.Contract.Hex()
 		}
-		body, err := cbor.Marshal(record)
+		body, err := canonicalCBOR.Marshal(record)
 		if err != nil {
 			a.writeProblem(w, r, http.StatusInternalServerError, "about:blank",
 				"encode failed", err.Error())

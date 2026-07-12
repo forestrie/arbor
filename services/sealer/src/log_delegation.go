@@ -165,7 +165,9 @@ func requestLogDelegationLeaseWithKeyPair(
 }
 
 func marshalDelegatedPublicKeyCBOR(key *delegationcert.DelegatedCoseKey) ([]byte, error) {
-	encMode, err := cbor.EncOptions{Sort: cbor.SortCanonical}.EncMode()
+	// RFC 8949 §4.2 core deterministic (bytewise), consistent with
+	// delegationcert and the TS @canopy/encoding writer. See build_certificate.go.
+	encMode, err := cbor.EncOptions{Sort: cbor.SortCoreDeterministic}.EncMode()
 	if err != nil {
 		return nil, fmt.Errorf("create delegated key cbor mode: %w", err)
 	}
