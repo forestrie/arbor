@@ -1,8 +1,8 @@
 ---
 id: 2607-01
-status: draft
+status: phases 0–1 live on lane A (2026-07-12); staged on lane B pending promotion; phases 2–3 pending
 created: 2026-07-10
-refs: [ADR-0007, FOR-335, FOR-334]
+refs: [ADR-0007, FOR-335, FOR-334, FOR-379, FOR-380]
 ---
 
 # plan-2607-01 — Sealer nudge trigger (ranger seal hints → long-poll coordinator)
@@ -15,6 +15,61 @@ availability in ~1–2s on a warm lane, single-digit seconds when idle.
 **Invariants (from the ADR, restated as review gates):** hints are hints —
 `CheckpointLog()` re-derives all work from R2 state; ranger commit success
 never depends on hint delivery; the sealer stays outbound-only.
+
+---
+
+## Phase 0–1 rollout results (lane A, 2026-07-12)
+
+Landed: [#50](https://github.com/forestrie/arbor/pull/50) (phase 0),
+[#53](https://github.com/forestrie/arbor/pull/53) (phase 1; supersedes #51),
+[#52](https://github.com/forestrie/arbor/pull/52) (PR test gate). Deployed to
+lane A as `main-5a71fb1-460`; enabled via `forest-dev-5/svc_ranger-a`
+(`SEAL_HINT_QUEUE_URL` = the sealer's `QUEUE_URL`; token: the sealer's queue
+token reused — push-verified — pending a dedicated Queues-push token, which
+needs an operator-minted CF API token). **Lane B: keys pre-staged on
+`svc_ranger-b`; inert until the next promotion carries a ranger release with
+the hint code (lane-B runs promoted semver images — v0.1.14 predates it).**
+
+**Baseline (hints off, `system-e2e` traffic, warm lane):** 7 checkpoints,
+`sealer_checkpoint_lag_seconds` mean **15.7s**, all in the (10, 20] bucket;
+triggers 14/14 `r2_event`.
+
+**After (hints on, same e2e):** +7 checkpoints, lag mean **15.4s**, all still
+(10, 20]; triggers +14 `ranger_hint` / +14 `r2_event`;
+`ranger_seal_hints_published_total` 7 (one per massif commit),
+`…failures_total` 0; zero sealer parse warnings. The wire contract was also
+verified independently pre-rollout: hand-published hints with the exact
+publisher encoding were consumed as valid by the production sealer.
+
+**Interpretation — functionally proven, latency win masked on this traffic
+shape:**
+
+- Every commit produced exactly one hint; delivery, parsing, and
+  source-attribution all work. Duplicate wake (hint + R2 event per massif)
+  is harmless as designed (28 CheckpointLog executions → 14 written
+  checkpoints; the extras no-op).
+- `sealer_checkpoint_duration_seconds` mean is **1.2s** — signing/proof/PUT
+  and the lease *API call* are not the residual. The ~15s lag on *fresh* logs
+  is dominated by **delegation issuance** (coordinator → agent webhook →
+  submit) deferring the first seal (`ErrDelegationPending` → no ack →
+  redelivery), which the e2e's log-per-run pattern hits on every log. This is
+  precisely the ADR risk row "delegation lease becomes dominant latency —
+  follow-up: per-log lease caching".
+- **Exit-criterion nuance:** `ranger_hint` cannot *dominate* `r2_event` in
+  raw counts while both paths deliver one message per massif — counts are
+  equal by construction until phase 3 demotes R2 events (or first-wake
+  attribution is added). The meaningful phase-1 signals — hints published ==
+  massifs committed, zero failures, zero parse errors — are all green.
+- The idle-lane case (where R2-event delivery lazily costs 30–90s and the
+  hint should win big) is not exercised by burst e2e traffic; measure it
+  once delegation issuance latency is addressed, on an already-delegated log.
+
+**Discovered en route:** lane-A e2e had been red since canopy #118 deployed —
+npm's `canopy-e2e-kit@0.5.1` predated the strict-CBOR migration; republished
+as 0.5.2 ([canopy#119](https://github.com/forestrie/canopy/pull/119)), which
+restored lane-A e2e (7 passed; 3 remaining failures are mandate Mode-C
+webhook specs + the missing `CANOPY_OPS_ADMIN_TOKEN` in the GitHub lane-a
+environment — tracked separately, unrelated to sequencing).
 
 ---
 
