@@ -22,11 +22,19 @@ never depends on hint delivery; the sealer stays outbound-only.
 
 Without this we cannot prove the win or see which path fires.
 
-- Sealer: add `seal_trigger_total{source}` counter. Source is inferable
-  today only as `r2_event`; the label exists so later phases extend it
-  (`ranger_hint`, `long_poll`, `sweep`).
-- Sealer: `checkpoint_lag_seconds` histogram — massif `lastID` idtimestamp
-  vs checkpoint write time (both already available in `CheckpointLog()`).
+Implemented in [arbor#50](https://github.com/forestrie/arbor/pull/50)
+(FOR-379). Metric names as landed carry the service prefix, consistent with
+every other sealer/ranger metric (plan-2607-03 R7):
+
+- Sealer: `sealer_seal_trigger_total{source}` counter. Source is inferable
+  today only as `r2_event`; the label set is fixed so later phases extend it
+  (`ranger_hint`, `long_poll`, `sweep`; unknown values clamp to `unknown`).
+- Sealer: `sealer_checkpoint_lag_seconds` histogram — massif `lastID`
+  idtimestamp vs checkpoint write time (both already available in
+  `CheckpointLog()`). **Interpretation caveat (plan-2607-03 R5):** catch-up
+  seals (multi-massif loops after idle gaps or backfills) observe genuinely
+  large lags; quote p50 alongside p90/p99 and prefer steady-state windows for
+  the before/after comparison.
 - Canopy (optional, cross-repo): registration→receipt latency is already
   observable from e2e poll timings; capture the current lane-A numbers in
   this plan before phase 1 lands.
@@ -38,25 +46,43 @@ Touches: `services/sealer/src/metrics/`, `consumer/consumer.go`,
 
 Smallest change that removes the uncontrollable leg (R2→event→queue).
 
+Implemented in [arbor#51](https://github.com/forestrie/arbor/pull/51)
+(FOR-380). Two wire-contract details the abbreviated body below glosses over,
+discovered against the consumer and pinned by tests: the hint must carry
+`"action": "PutObject"` (the consumer gates on it) and is published with
+`content_type: "text"` so the pull delivers the JSON-string token the
+consumer double-decodes. The hint additionally carries
+`hintSource: "ranger_hint"` for wake-path attribution (older sealers ignore
+it).
+
 - Ranger config: `SEAL_HINT_QUEUE_URL`, `SEAL_HINT_QUEUE_TOKEN` (empty =
   feature off). `services/ranger/src/config.go`.
 - Ranger: after a log group commits and acks
   (`consumer/ingress/consumer.go` → `processLogGroup`), publish one hint per
   written massif: body `{"object": {"key": "<massif object key>"}}` — the
   exact shape the sealer already parses (`sealer/src/consumer/cloudflarer2.go`),
-  so **no sealer change**. Fire-and-forget: bounded retry (e.g. 2 attempts,
-  short timeout), failure logs + `seal_hint_publish_failures_total`; never
-  blocks or fails the commit path.
+  so **no sealer consumption change**. Fire-and-forget: detached from the
+  poll cycle (publish starts after ack; the poll loop never waits on it —
+  plan-2607-03 R1), bounded retry (2 attempts, short timeout), failure logs +
+  `ranger_seal_hint_publish_failures_total` (successes:
+  `ranger_seal_hints_published_total`); never blocks or fails the commit
+  path.
 - Dedupe consideration: sealer may now see the same massif key twice (hint +
   R2 event). Already harmless — `CheckpointLog()` groups by log and
-  re-derives — but assert this in a test rather than by argument.
+  re-derives — asserted in `consumer/grouping_test.go`, not by argument.
 - Deploy config (cross-repo, forest-1): env vars for ranger; producer token
   for the sealer queue.
-- Tests: unit test for the publisher (success, retry, disabled); e2e (lane
-  A) soft assertion that registration→receipt < 10s p50.
+- Tests: unit test for the publisher (success, retry, disabled, wire
+  contract); publish-after-ack ordering + poll-cadence isolation
+  (`ingress/publish_after_ack_test.go`); massif key recording across rollover
+  (`committer/committer_massif_keys_test.go`); e2e (lane A) soft assertion
+  that registration→receipt < 10s p50.
 
-Exit criteria: `seal_trigger_total{source="ranger_hint"}` dominates
-`r2_event` on lane A; receipt p50 measurably below phase-0 baseline.
+Exit criteria: `sealer_seal_trigger_total{source="ranger_hint"}` dominates
+`r2_event` on lane A; receipt p50 measurably below phase-0 baseline. Rollout
+verification (plan-2607-03 R2): confirm `ranger_hint` increments and the
+sealer logs no body-wrapper unmarshal warnings — the string-token pull
+encoding is unit-tested but must be confirmed once against a live queue.
 
 ## Phase 2 — Seal-coordinator long-poll (kills the poll ceiling)
 
