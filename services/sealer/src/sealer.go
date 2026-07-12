@@ -177,7 +177,15 @@ func CheckpointLog(
 		mmrStart := baseState.MMRSize
 		mmrEnd := curSize
 
-		// Obtain per-log delegation lease from Custodian
+		// Obtain per-log delegation lease from Custodian.
+		//
+		// FOR-386: the requested range end is padded beyond the seal window so
+		// one signed certificate covers subsequent seals until the log outgrows
+		// it (the lease cache and on-chain publishCheckpoint are both
+		// range-coverage checks, and the coordinator/lease verifications
+		// exact-match against this request). Only the lease request widens —
+		// the consistency proof and checkpoint below still bind the true
+		// [mmrStart, curSize] window.
 		lease, err := svc.LeaseManager.EnsureValidForLog(
 			ctx,
 			svc.HTTPClient,
@@ -185,7 +193,7 @@ func CheckpointLog(
 			svc.Cfg.DelegationKeyCurve,
 			logIdHex,
 			mmrStart,
-			mmrEnd,
+			paddedRangeEnd(mmrEnd, svc.Cfg.DelegationRangePad),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to obtain delegation lease for log %s: %w", logIdHex, err)
@@ -250,6 +258,15 @@ func CheckpointLog(
 	}
 
 	return nil
+}
+
+// paddedRangeEnd widens a delegation range end by pad MMR nodes, clamping on
+// uint64 overflow (FOR-386 — see the EnsureValidForLog call site).
+func paddedRangeEnd(mmrEnd, pad uint64) uint64 {
+	if pad > ^uint64(0)-mmrEnd {
+		return ^uint64(0)
+	}
+	return mmrEnd + pad
 }
 
 // observeCheckpointLag records sealer_checkpoint_lag_seconds for a just-written
