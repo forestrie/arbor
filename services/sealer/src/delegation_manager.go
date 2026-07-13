@@ -3,6 +3,7 @@ package sealer
 import (
 	"container/list"
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -37,18 +38,19 @@ type pendingKeyEntry struct {
 // DelegationLeaseManager manages per-log, time-limited delegation leases
 // for the sealer process. Uses LRU eviction when the cache is full.
 type DelegationLeaseManager struct {
-	trustRoot   TrustRootClient
-	resolver    AuthorityResolver
-	issuer      DelegationIssuer
-	erc1271     delegationcert.ERC1271Verifier
-	mu          sync.Mutex
-	leases      map[string]*list.Element // logIdHex -> list element
-	pendingKeys map[string]*pendingKeyEntry
-	lru         *list.List // LRU order (front = most recent)
-	maxLeases   int
-	ttl         time.Duration
-	renewBefore time.Duration
-	rangePad    uint64
+	trustRoot    TrustRootClient
+	resolver     AuthorityResolver
+	issuer       DelegationIssuer
+	erc1271      delegationcert.ERC1271Verifier
+	mu           sync.Mutex
+	leases       map[string]*list.Element // logIdHex -> list element
+	pendingKeys  map[string]*pendingKeyEntry
+	lru          *list.List // LRU order (front = most recent)
+	maxLeases    int
+	ttl          time.Duration
+	renewBefore  time.Duration
+	rangePad     uint64
+	delegateKeys *DelegateKeySet
 }
 
 func NewDelegationLeaseManager(
@@ -128,17 +130,34 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		delete(m.leases, logIdHex)
 	}
 
-	keyPair, err := m.pendingKeyForLogLocked(curve, logIdHex, now)
-	if err != nil {
-		return nil, err
+	// Delegation-in-advance (FOR-390 phase D) vs on-demand ephemeral model.
+	var keyPair *DelegatedKeyPair
+	var heldKeys *DelegateKeySet
+	source := "demand"
+	issuanceEnd := paddedRangeEnd(mmrEnd, m.rangePad)
+	if current := m.currentDelegateKey(); current != nil {
+		// Request coverage for the standing delegate key over the TRUE window;
+		// the pre-signed wide certificate is served without a signer round-trip,
+		// and the lease's private key is resolved from the returned cert.
+		keyPair = &DelegatedKeyPair{Private: current, Public: &current.PublicKey}
+		heldKeys = m.delegateKeys
+		source = "delegate_key"
+		issuanceEnd = mmrEnd
+	} else {
+		var err error
+		keyPair, err = m.pendingKeyForLogLocked(curve, logIdHex, now)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// FOR-386: pad only the ISSUANCE request. The cache check above used the
-	// caller's true seal window; the wider certificate issued here then covers
-	// subsequent windows until the log outgrows the pad or the TTL expires.
+	// FOR-386 (on-demand): pad only the ISSUANCE request. The cache check above
+	// used the caller's true seal window; the wider certificate issued here then
+	// covers subsequent windows until the log outgrows the pad or the TTL
+	// expires. In advance mode the request uses the true window unpadded.
 	lease, err := requestLogDelegationLeaseWithKeyPair(
 		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
-		logIdHex, mmrStart, paddedRangeEnd(mmrEnd, m.rangePad), keyPair,
+		logIdHex, mmrStart, issuanceEnd, keyPair, heldKeys,
 	)
 	if err != nil {
 		if !errors.Is(err, ErrDelegationPending) {
@@ -159,6 +178,7 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 
 	logger.Info("obtained per-log delegation lease",
 		"log_id", logIdHex,
+		"source", source,
 		"cert_sha256", lease.Info.CertSHA256,
 		"alg", lease.Info.ProtectedAlg,
 		"kid_hex", lease.Info.ProtectedKidHex,
@@ -207,6 +227,15 @@ func (m *DelegationLeaseManager) SetRangePad(pad uint64) {
 	m.rangePad = pad
 }
 
+// SetDelegateKeys enables delegation-in-advance (FOR-390 phase D). When set,
+// issuance requests coverage for the current standing delegate key and the
+// TRUE seal window (no pad — the wide advance certificate already exists), and
+// leases resolve their signing key from the returned certificate's bound key
+// against this set. Nil (default) keeps the on-demand ephemeral-key model.
+func (m *DelegationLeaseManager) SetDelegateKeys(keys *DelegateKeySet) {
+	m.delegateKeys = keys
+}
+
 // paddedRangeEnd widens a delegation range end by pad MMR nodes, clamping on
 // uint64 overflow (FOR-386).
 func paddedRangeEnd(mmrEnd, pad uint64) uint64 {
@@ -248,6 +277,15 @@ func parseUint64Decimal(s string) (uint64, error) {
 		v = v*10 + uint64(c-'0')
 	}
 	return v, nil
+}
+
+// currentDelegateKey returns the advertised standing delegate key when
+// delegation-in-advance is enabled, or nil for the on-demand model.
+func (m *DelegationLeaseManager) currentDelegateKey() *ecdsa.PrivateKey {
+	if m.delegateKeys == nil {
+		return nil
+	}
+	return m.delegateKeys.Current()
 }
 
 func (m *DelegationLeaseManager) pendingKeyForLogLocked(

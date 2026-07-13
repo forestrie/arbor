@@ -120,8 +120,13 @@ func main() {
 	// coordinator. This is additive in Phase B: the derived key set is not yet
 	// consulted on the seal hot path (that is Phase D), so a failure here must
 	// not take down the sealer — log and continue.
-	if _, err := sealer.StartDelegateKeySchedule(ctx, httpClient, logger, cfg); err != nil {
+	if delegateKeys, err := sealer.StartDelegateKeySchedule(ctx, httpClient, logger, cfg); err != nil {
 		slog.Error("delegate key schedule failed to start (continuing without advance delegation)", "error", err)
+	} else if delegateKeys != nil {
+		// Phase D: route lease issuance through the standing delegate keys —
+		// coverage requests for the current key, cert→key resolution on the set.
+		leaseMgr.SetDelegateKeys(delegateKeys)
+		slog.Warn("delegation-in-advance enabled", "delegate_key_epoch", cfg.DelegateKeyEpoch)
 	}
 
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)

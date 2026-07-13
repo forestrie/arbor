@@ -68,6 +68,20 @@ func delegateCoseKeyBytes(pub *ecdsa.PublicKey) ([]byte, error) {
 	return canonicalCBOR.Marshal(coseKey.ToCBORMap())
 }
 
+// ecdsaFromDelegatedCoseKey reconstructs a P-256 public key from a certificate's
+// parsed delegated COSE_Key so it can be resolved against the standing set via
+// KeyFor (FOR-390 phase D / B4).
+func ecdsaFromDelegatedCoseKey(dk *delegationcert.DelegatedCoseKey) (*ecdsa.PublicKey, error) {
+	if dk == nil || len(dk.X) == 0 || len(dk.Y) == 0 {
+		return nil, fmt.Errorf("delegated cose key missing coordinates")
+	}
+	return &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     new(big.Int).SetBytes(dk.X),
+		Y:     new(big.Int).SetBytes(dk.Y),
+	}, nil
+}
+
 // pubkeyHashHex is the identity the coordinator stores as
 // delegated_pubkey_hash: hex(sha256(canonical COSE_Key CBOR)).
 func pubkeyHashHex(pub *ecdsa.PublicKey) (string, error) {
