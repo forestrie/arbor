@@ -18,10 +18,10 @@ import (
 // it. It carries no private material; the public key alone lets the
 // coordinator build and sign certificates + on-chain proofs.
 type DelegateKeyRegistration struct {
-	SealerID           string `json:"sealerId"`
-	Epoch              uint32 `json:"epoch"`
-	Algorithm          string `json:"algorithm"`
-	DelegatedPublicKey string `json:"delegatedPublicKey"` // hex(x||y), 128 hex chars
+	SealerID            string `json:"sealerId"`
+	Epoch               uint32 `json:"epoch"`
+	Algorithm           string `json:"algorithm"`
+	DelegatedPublicKey  string `json:"delegatedPublicKey"`  // hex(x||y), 128 hex chars
 	DelegatedPubkeyHash string `json:"delegatedPubkeyHash"` // hex(sha256(uncompressed point))
 }
 

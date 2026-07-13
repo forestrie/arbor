@@ -78,7 +78,7 @@ type Config struct {
 	// current key to the coordinator. No private material is ever at rest:
 	// the seed is re-derived each boot from KMS (via the custodian) or, for
 	// self-hosted sealers, from a locally-held DELEGATE_SEED.
-	SealerID      string
+	SealerID         string
 	DelegateKeyEpoch uint32
 
 	// Seed sources (first non-empty wins). DelegateSeedCustodianURL/Token hit
