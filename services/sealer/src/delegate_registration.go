@@ -3,44 +3,65 @@ package sealer
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
-// DelegateKeyRegistration is the JSON body for POST /api/sealer/delegate-keys
-// (plan-2607-20 phase C). It advertises the sealer's current standing
-// delegate key so the coordinator can pre-issue advance certificates bound to
-// it. It carries no private material; the public key alone lets the
-// coordinator build and sign certificates + on-chain proofs.
-type DelegateKeyRegistration struct {
-	SealerID            string `json:"sealerId"`
-	Epoch               uint32 `json:"epoch"`
-	Algorithm           string `json:"algorithm"`
-	DelegatedPublicKey  string `json:"delegatedPublicKey"`  // hex(x||y), 128 hex chars
-	DelegatedPubkeyHash string `json:"delegatedPubkeyHash"` // hex(sha256(uncompressed point))
+// DelegateKeyEntry is one standing key in a registration (plan-2607-20 phase
+// C, shape C1). PublicKey is the canonical COSE_Key CBOR (base64) — the same
+// bytes a signer binds into a certificate, so the coordinator's
+// sha256(publicKey) equals the certificate's delegated_pubkey_hash.
+type DelegateKeyEntry struct {
+	Alg       string `json:"alg"`
+	PublicKey string `json:"publicKey"` // base64(COSE_Key CBOR)
+	Epoch     uint32 `json:"epoch"`
+	NotAfter  int64  `json:"notAfter"` // unix seconds; retired past this
 }
 
-// registerDelegateKey advertises the current delegate key to the coordinator.
-// It is best-effort: a failure is logged and swallowed so it never blocks
-// sealer boot. The coordinator can also learn the key lazily at issuance time,
-// so registration is an optimization, not a correctness dependency.
-func registerDelegateKey(ctx context.Context, httpClient *HTTPClient, logger *slog.Logger, cfg Config, pub *ecdsa.PublicKey) {
+// DelegateKeyRegistration is the JSON body for POST /api/sealer/delegate-keys.
+// It advertises the sealer's standing delegate keys (epoch N and N-1) so the
+// coordinator can pre-issue advance certificates bound to them across a
+// rotation. It carries no private material.
+type DelegateKeyRegistration struct {
+	SealerID string             `json:"sealerId"`
+	Keys     []DelegateKeyEntry `json:"keys"`
+}
+
+// registerDelegateKeys advertises the sealer's standing delegate keys (N and
+// N-1) to the coordinator. Best-effort: a failure is logged and swallowed so
+// it never blocks sealer boot. Both epochs are registered with a
+// rotation-spanning notAfter so a certificate bound to the previous epoch's
+// key keeps issuing until its own expiry (review F2).
+func registerDelegateKeys(ctx context.Context, httpClient *HTTPClient, logger *slog.Logger, cfg Config, keys *DelegateKeySet, nowUnix int64) {
 	if cfg.CoordinatorRegisterURL == "" {
 		logger.Info("delegate key registration skipped: no coordinator URL")
 		return
 	}
-	reg := DelegateKeyRegistration{
-		SealerID:            cfg.SealerID,
-		Epoch:               cfg.DelegateKeyEpoch,
-		Algorithm:           "ES256",
-		DelegatedPublicKey:  hex.EncodeToString(pubkeyXYBytes(pub)),
-		DelegatedPubkeyHash: pubkeyHashHex(pub),
+	notAfter := nowUnix + int64(cfg.DelegateKeyTTL.Seconds())
+	reg := DelegateKeyRegistration{SealerID: cfg.SealerID}
+	for _, entry := range keys.entries {
+		coseKey, err := delegateCoseKeyBytes(&entry.priv.PublicKey)
+		if err != nil {
+			logger.Warn("delegate key registration: encode failed", "epoch", entry.epoch, "error", err)
+			return
+		}
+		reg.Keys = append(reg.Keys, DelegateKeyEntry{
+			Alg:       "ES256",
+			PublicKey: base64.StdEncoding.EncodeToString(coseKey),
+			Epoch:     entry.epoch,
+			NotAfter:  notAfter,
+		})
 	}
+	if len(reg.Keys) == 0 {
+		logger.Warn("delegate key registration skipped: no keys loaded")
+		return
+	}
+
 	body, err := json.Marshal(reg)
 	if err != nil {
 		logger.Warn("delegate key registration: marshal failed", "error", err)
@@ -65,11 +86,11 @@ func registerDelegateKey(ctx context.Context, httpClient *HTTPClient, logger *sl
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode/100 != 2 {
 		logger.Warn("delegate key registration rejected (best-effort)",
-			"status", resp.StatusCode, "pubkeyHash", reg.DelegatedPubkeyHash)
+			"status", resp.StatusCode, "sealerId", reg.SealerID, "keys", len(reg.Keys))
 		return
 	}
-	logger.Info("delegate key registered with coordinator",
-		"sealerId", reg.SealerID, "epoch", reg.Epoch, "pubkeyHash", reg.DelegatedPubkeyHash)
+	logger.Info("delegate keys registered with coordinator",
+		"sealerId", reg.SealerID, "keys", len(reg.Keys), "notAfter", notAfter)
 }
 
 // StartDelegateKeySchedule loads standing delegate keys (epoch N and N-1) and
@@ -90,10 +111,15 @@ func StartDelegateKeySchedule(ctx context.Context, httpClient *HTTPClient, logge
 	if err != nil {
 		return nil, fmt.Errorf("load delegate keys: %w", err)
 	}
+	currentHash, err := pubkeyHashHex(&keys.Current().PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("hash current delegate key: %w", err)
+	}
 	logger.Info("delegate keys loaded",
 		"epoch", cfg.DelegateKeyEpoch,
-		"currentPubkeyHash", pubkeyHashHex(&keys.Current().PublicKey),
+		"keys", len(keys.entries),
+		"currentPubkeyHash", currentHash,
 	)
-	registerDelegateKey(ctx, httpClient, logger, cfg, &keys.Current().PublicKey)
+	registerDelegateKeys(ctx, httpClient, logger, cfg, keys, time.Now().Unix())
 	return keys, nil
 }

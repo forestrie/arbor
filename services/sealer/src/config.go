@@ -81,6 +81,13 @@ type Config struct {
 	SealerID         string
 	DelegateKeyEpoch uint32
 
+	// DelegateKeyTTL bounds how long the coordinator keeps a registered
+	// standing delegate key (notAfter = registration time + TTL). It must
+	// outlive the longest outstanding delegation-certificate TTL plus one
+	// rotation interval so a certificate bound to the epoch N-1 key keeps
+	// issuing until its own expiry (review F2).
+	DelegateKeyTTL time.Duration
+
 	// Seed sources (first non-empty wins). DelegateSeedCustodianURL/Token hit
 	// the custodian POST /api/delegate-seed (KMS-MAC); they fall back to
 	// CustodianURL/CustodianAppToken. DelegateSeedLocal is the self-hosted
@@ -230,6 +237,7 @@ func LoadConfig() Config {
 
 		SealerID:                   getEnvOrDefault("SEALER_ID", "sealer-default"),
 		DelegateKeyEpoch:           uint32(getUint64("DELEGATE_KEY_EPOCH", 0)),
+		DelegateKeyTTL:             getDuration("DELEGATE_KEY_TTL", 720*time.Hour),
 		DelegateSeedCustodianURL:   os.Getenv("DELEGATE_SEED_CUSTODIAN_URL"),
 		DelegateSeedCustodianToken: os.Getenv("DELEGATE_SEED_CUSTODIAN_TOKEN"),
 		DelegateSeedLocal:          []byte(os.Getenv("DELEGATE_SEED")),
@@ -284,6 +292,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
 	logConfigValue(logger, "SEALER_ID", c.SealerID)
 	logConfigValue(logger, "DELEGATE_KEY_EPOCH", int(c.DelegateKeyEpoch))
+	logConfigValue(logger, "DELEGATE_KEY_TTL", c.DelegateKeyTTL)
 	logConfigValue(logger, "DELEGATE_SEED_CUSTODIAN_URL", c.DelegateSeedCustodianURL)
 	logSecretDigest(logger, "DELEGATE_SEED_CUSTODIAN_TOKEN", c.DelegateSeedCustodianToken)
 	logSecretDigest(logger, "DELEGATE_SEED", string(c.DelegateSeedLocal))
