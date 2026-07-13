@@ -41,6 +41,24 @@ type Config struct {
 	// DelegationCoordinatorToken is the Bearer token for coordinator management/issue APIs.
 	// Defaults to APP_TOKEN when unset.
 	DelegationCoordinatorToken string
+
+	// DelegateSeedMacKey is the full KMS CryptoKey resource name of the
+	// dedicated HMAC-SHA256 MAC key used to derive sealer delegate-key seeds
+	// (ADR-0050 / plan-2607-20 phase A). Empty disables POST /api/delegate-seed.
+	DelegateSeedMacKey string
+	// DelegateSeedSealers is the allowlist of sealerId values permitted to
+	// derive seeds (comma-separated env DELEGATE_SEED_SEALERS).
+	DelegateSeedSealers []string
+}
+
+// delegateSeedSealerAllowed reports whether sealerId is in the allowlist.
+func (c Config) delegateSeedSealerAllowed(sealerID string) bool {
+	for _, s := range c.DelegateSeedSealers {
+		if s == sealerID {
+			return true
+		}
+	}
+	return false
 }
 
 const defaultLogIDCacheSize = 1024
@@ -118,7 +136,20 @@ func LoadConfig() Config {
 			"/",
 		),
 		DelegationCoordinatorToken: strings.TrimSpace(os.Getenv("DELEGATION_COORDINATOR_TOKEN")),
+		DelegateSeedMacKey:         strings.TrimSpace(os.Getenv("DELEGATE_SEED_MAC_KEY")),
+		DelegateSeedSealers:        splitNonEmpty(os.Getenv("DELEGATE_SEED_SEALERS")),
 	}
+}
+
+// splitNonEmpty splits a comma-separated env value, trimming blanks.
+func splitNonEmpty(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // LogConfig logs non-secret configuration values for observability.
@@ -136,6 +167,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "LOG_ID_CACHE_SIZE", "value", c.LogIDCacheSize)
 	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_URL", "value", c.DelegationCoordinatorURL)
 	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_TOKEN", "value", secretDigest(c.DelegationCoordinatorToken))
+	logger.Warn("config value", "name", "DELEGATE_SEED_MAC_KEY", "value", c.DelegateSeedMacKey)
+	logger.Warn("config value", "name", "DELEGATE_SEED_SEALERS", "value", strings.Join(c.DelegateSeedSealers, ","))
 }
 
 func secretDigest(value string) string {

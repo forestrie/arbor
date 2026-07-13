@@ -31,6 +31,9 @@ type API struct {
 	listKeysOverride func(ctx context.Context, labels map[string]string, predicate string) ([]KeyListEntry, error)
 	// ensureKeyOverride is a test-only seam for POST /api/keys without GCP KMS.
 	ensureKeyOverride func(ctx context.Context, keyOwnerID, selfLogID, alg, protectionLevel string, labels map[string]string) (keyName, publicKeyPEM string, created bool, err error)
+	// macSignOverride is a test-only seam for POST /api/delegate-seed without
+	// GCP KMS. Returns (mac, keyVersionName, error).
+	macSignOverride func(ctx context.Context, keyName string, data []byte) ([]byte, string, error)
 }
 
 // NewAPI builds an API with the given logger and config.
@@ -86,6 +89,7 @@ func (a *API) publicKeyCacheDelete(shortKey string) {
 //     optional SignRequest.rawSignatureOnly → CBOR { signature } (r‖s), not COSE Sign1; optional ?log-id=true
 func (a *API) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/delegations", a.handleDelegations)
+	mux.HandleFunc("/api/delegate-seed", a.handleDelegateSeed)
 	mux.HandleFunc("/api/keys/list", a.handleListKeys)
 	mux.HandleFunc("/api/keys/curator/log-key", a.handleCuratorLogKey)
 	mux.HandleFunc("/api/keys", a.routeKeysEnsure)
