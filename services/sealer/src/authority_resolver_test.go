@@ -72,7 +72,7 @@ func TestRequestLogDelegationLease_UnivocityAuthority(t *testing.T) {
 
 	lease, err := requestLogDelegationLeaseWithKeyPair(
 		context.Background(), NewHTTPClient(nil), nil, resolver, issuer, nil,
-		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
+		"secp256r1", 30*time.Minute, logID, 7, 21, nil, nil,
 	)
 	if err != nil {
 		t.Fatalf("expected authority lease, got %v", err)
@@ -101,7 +101,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorityUnresolved(t *testing.T) {
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		nil,
-		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
+		"secp256r1", 30*time.Minute, logID, 7, 21, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("expected unresolved authority to fail")
@@ -129,7 +129,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorityWrongKey(t *testing.T) {
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		nil,
-		"secp256r1", 30*time.Minute, logID, 7, 21, nil,
+		"secp256r1", 30*time.Minute, logID, 7, 21, nil, nil,
 	)
 	if err == nil {
 		t.Fatal("expected mismatched authority key to fail local verification")

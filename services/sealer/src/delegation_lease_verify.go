@@ -18,6 +18,20 @@ type LeaseVerificationInput struct {
 	Curve               delegationcert.Curve
 	DelegatedPublicKey  *ecdsa.PublicKey
 	RequestedTTLSeconds uint64
+
+	// CoverageOK relaxes the range check from exact-match to coverage
+	// (cert range must contain [MMRStart, MMREnd]) for delegation-in-advance:
+	// the coordinator returns a wide standing certificate for a narrow seal
+	// window (FOR-390 phase D / B5). The on-chain range check is itself
+	// coverage, so a wider cert verifies the narrow seal correctly.
+	CoverageOK bool
+
+	// HeldKeys, when set, accepts a certificate bound to ANY standing delegate
+	// key the sealer holds (not just DelegatedPublicKey) — rotation overlap
+	// means a still-valid cert may be bound to the epoch N-1 key while the
+	// request advertised epoch N. Key resolution then picks the matching
+	// private key (FOR-390 phase D / B4).
+	HeldKeys *DelegateKeySet
 }
 
 // VerifyDelegationLease checks issuer material against the trust root and request.
@@ -76,11 +90,25 @@ func VerifyDelegationLease(
 			info.PayloadLogID, req.LogIdHex,
 		)
 	}
-	if info.PayloadMmrStart != fmt.Sprintf("%d", req.MMRStart) {
-		return nil, fmt.Errorf("delegation cert mmr_start mismatch")
-	}
-	if info.PayloadMmrEnd != fmt.Sprintf("%d", req.MMREnd) {
-		return nil, fmt.Errorf("delegation cert mmr_end mismatch")
+	if req.CoverageOK {
+		start, errStart := parseUint64Decimal(info.PayloadMmrStart)
+		end, errEnd := parseUint64Decimal(info.PayloadMmrEnd)
+		if errStart != nil || errEnd != nil {
+			return nil, fmt.Errorf("delegation cert has non-decimal mmr bounds")
+		}
+		if !(start <= req.MMRStart && end >= req.MMREnd) {
+			return nil, fmt.Errorf(
+				"delegation cert range [%d,%d] does not cover seal window [%d,%d]",
+				start, end, req.MMRStart, req.MMREnd,
+			)
+		}
+	} else {
+		if info.PayloadMmrStart != fmt.Sprintf("%d", req.MMRStart) {
+			return nil, fmt.Errorf("delegation cert mmr_start mismatch")
+		}
+		if info.PayloadMmrEnd != fmt.Sprintf("%d", req.MMREnd) {
+			return nil, fmt.Errorf("delegation cert mmr_end mismatch")
+		}
 	}
 	if info.PayloadExpiresAtUnix == 0 {
 		return nil, fmt.Errorf("delegation certificate missing expires_at")
@@ -90,7 +118,15 @@ func VerifyDelegationLease(
 	if err != nil {
 		return nil, err
 	}
-	if !delegationcert.DelegatedKeyMatches(delegated, req.DelegatedPublicKey) {
+	if req.HeldKeys != nil {
+		pub, err := ecdsaFromDelegatedCoseKey(delegated)
+		if err != nil {
+			return nil, fmt.Errorf("decode cert delegated key: %w", err)
+		}
+		if req.HeldKeys.KeyFor(pub) == nil {
+			return nil, fmt.Errorf("delegation cert is not bound to a held delegate key")
+		}
+	} else if !delegationcert.DelegatedKeyMatches(delegated, req.DelegatedPublicKey) {
 		return nil, fmt.Errorf("delegated public key does not match ephemeral key")
 	}
 

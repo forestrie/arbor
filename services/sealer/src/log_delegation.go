@@ -26,7 +26,7 @@ func RequestLogDelegationLease(
 ) (*DelegationLease, error) {
 	return requestLogDelegationLeaseWithKeyPair(
 		ctx, httpClient, trustRoot, nil, issuer, nil, curveRaw, ttl,
-		logIdHex, mmrStart, mmrEnd, nil,
+		logIdHex, mmrStart, mmrEnd, nil, nil,
 	)
 }
 
@@ -50,6 +50,7 @@ func requestLogDelegationLeaseWithKeyPair(
 	logIdHex string,
 	mmrStart, mmrEnd uint64,
 	keyPair *DelegatedKeyPair,
+	heldKeys *DelegateKeySet,
 ) (*DelegationLease, error) {
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is nil")
@@ -143,9 +144,34 @@ func requestLogDelegationLeaseWithKeyPair(
 		Curve:               curve,
 		DelegatedPublicKey:  keyPair.Public,
 		RequestedTTLSeconds: uint64(ttl.Seconds()),
+		CoverageOK:          heldKeys != nil,
+		HeldKeys:            heldKeys,
 	}, erc1271)
 	if err != nil {
 		return nil, fmt.Errorf("verify delegation lease: %w", err)
+	}
+
+	// Signing key resolution (B4): in delegation-in-advance mode the returned
+	// certificate may be bound to a standing key other than the one requested
+	// (rotation overlap), so resolve the private key from the certificate's own
+	// bound key rather than assuming the request keypair.
+	signingPriv := keyPair.Private
+	signingPub := keyPair.Public
+	if heldKeys != nil {
+		delegated, _, err := delegationcert.DelegatedKeyFromCertificate(issuerResp.Certificate)
+		if err != nil {
+			return nil, fmt.Errorf("read cert delegated key: %w", err)
+		}
+		certPub, err := ecdsaFromDelegatedCoseKey(delegated)
+		if err != nil {
+			return nil, fmt.Errorf("decode cert delegated key: %w", err)
+		}
+		resolved := heldKeys.KeyFor(certPub)
+		if resolved == nil {
+			return nil, fmt.Errorf("no held delegate key for the issued certificate")
+		}
+		signingPriv = resolved
+		signingPub = &resolved.PublicKey
 	}
 
 	return &DelegationLease{
@@ -153,8 +179,8 @@ func requestLogDelegationLeaseWithKeyPair(
 		OnchainProof:    issuerResp.OnchainProof,
 		Info:            info,
 		Curve:           curve,
-		PrivateKey:      keyPair.Private,
-		PublicKey:       keyPair.Public,
+		PrivateKey:      signingPriv,
+		PublicKey:       signingPub,
 		IssuedAt:        issuerResp.IssuedAt,
 		ExpiresAt:       issuerResp.ExpiresAt,
 		RootLogIDHex:    binding.RootLogIDHex,
