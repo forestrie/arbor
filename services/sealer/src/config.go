@@ -71,6 +71,38 @@ type Config struct {
 	CustodianURL      string
 	CustodianAppToken string
 
+	// Delegation-in-advance (ADR-0050 / plan-2607-20). When DelegateKeyEpoch
+	// is 0 the whole feature is off and the sealer behaves exactly as before
+	// (on-demand issuance). When >= 1 the sealer derives standing delegate
+	// keys for epochs N and N-1 at boot from a seed source and advertises the
+	// current key to the coordinator. No private material is ever at rest:
+	// the seed is re-derived each boot from KMS (via the custodian) or, for
+	// self-hosted sealers, from a locally-held DELEGATE_SEED.
+	SealerID         string
+	DelegateKeyEpoch uint32
+
+	// DelegateKeyTTL bounds how long the coordinator keeps a registered
+	// standing delegate key (notAfter = registration time + TTL). It must
+	// outlive the longest outstanding delegation-certificate TTL plus one
+	// rotation interval so a certificate bound to the epoch N-1 key keeps
+	// issuing until its own expiry (review F2).
+	DelegateKeyTTL time.Duration
+
+	// Seed sources (first non-empty wins). DelegateSeedCustodianURL/Token hit
+	// the custodian POST /api/delegate-seed (KMS-MAC); they fall back to
+	// CustodianURL/CustodianAppToken. DelegateSeedLocal is the self-hosted
+	// escape hatch (raw secret, HKDF-mixed per epoch).
+	DelegateSeedCustodianURL   string
+	DelegateSeedCustodianToken string
+	DelegateSeedLocal          []byte
+
+	// CoordinatorRegisterURL is where the sealer POSTs its advertised delegate
+	// key (POST /api/sealer/delegate-keys). Best-effort; falls back to
+	// TrustRootURL (the coordinator seam). Registration failure never blocks
+	// boot — the coordinator can also learn the key at issuance time.
+	CoordinatorRegisterURL   string
+	CoordinatorRegisterToken string
+
 	// Read-only chain RPC for KS256 ERC-1271 delegation verification (optional).
 	ContractRPCURL string
 
@@ -202,6 +234,15 @@ func LoadConfig() Config {
 		AWSAccessKeyID:      os.Getenv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey:  awsSecretAccessKey,
 		AWSRegion:           getEnvOrDefault("AWS_REGION", "auto"),
+
+		SealerID:                   getEnvOrDefault("SEALER_ID", "sealer-default"),
+		DelegateKeyEpoch:           uint32(getUint64("DELEGATE_KEY_EPOCH", 0)),
+		DelegateKeyTTL:             getDuration("DELEGATE_KEY_TTL", 720*time.Hour),
+		DelegateSeedCustodianURL:   os.Getenv("DELEGATE_SEED_CUSTODIAN_URL"),
+		DelegateSeedCustodianToken: os.Getenv("DELEGATE_SEED_CUSTODIAN_TOKEN"),
+		DelegateSeedLocal:          []byte(os.Getenv("DELEGATE_SEED")),
+		CoordinatorRegisterURL:     os.Getenv("COORDINATOR_REGISTER_URL"),
+		CoordinatorRegisterToken:   os.Getenv("COORDINATOR_REGISTER_TOKEN"),
 	}
 
 	cfg.applyDelegationSeamFallbacks()
@@ -217,6 +258,20 @@ func (c *Config) applyDelegationSeamFallbacks() {
 	}
 	if c.DelegationIssuerToken == "" {
 		c.DelegationIssuerToken = c.CustodianAppToken
+	}
+	// Delegate-seed and coordinator-registration seams reuse the custodian /
+	// trust-root plumbing unless overridden explicitly.
+	if c.DelegateSeedCustodianURL == "" {
+		c.DelegateSeedCustodianURL = c.CustodianURL
+	}
+	if c.DelegateSeedCustodianToken == "" {
+		c.DelegateSeedCustodianToken = c.CustodianAppToken
+	}
+	if c.CoordinatorRegisterURL == "" {
+		c.CoordinatorRegisterURL = c.TrustRootURL
+	}
+	if c.CoordinatorRegisterToken == "" {
+		c.CoordinatorRegisterToken = c.TrustRootToken
 	}
 }
 
@@ -235,6 +290,14 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logSecretDigest(logger, "UNIVOCITY_API_TOKEN", c.UnivocityAPIToken)
 	logConfigValue(logger, "CUSTODIAN_URL", c.CustodianURL)
 	logSecretDigest(logger, "CUSTODIAN_APP_TOKEN", c.CustodianAppToken)
+	logConfigValue(logger, "SEALER_ID", c.SealerID)
+	logConfigValue(logger, "DELEGATE_KEY_EPOCH", int(c.DelegateKeyEpoch))
+	logConfigValue(logger, "DELEGATE_KEY_TTL", c.DelegateKeyTTL)
+	logConfigValue(logger, "DELEGATE_SEED_CUSTODIAN_URL", c.DelegateSeedCustodianURL)
+	logSecretDigest(logger, "DELEGATE_SEED_CUSTODIAN_TOKEN", c.DelegateSeedCustodianToken)
+	logSecretDigest(logger, "DELEGATE_SEED", string(c.DelegateSeedLocal))
+	logConfigValue(logger, "COORDINATOR_REGISTER_URL", c.CoordinatorRegisterURL)
+	logSecretDigest(logger, "COORDINATOR_REGISTER_TOKEN", c.CoordinatorRegisterToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
 	logConfigValue(logger, "DELEGATION_RANGE_PAD", c.DelegationRangePad)
 	logConfigValue(logger, "DELEGATION_MAX_LEASES", c.DelegationMaxLeases)

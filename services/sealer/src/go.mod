@@ -13,6 +13,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/google/uuid v1.6.0
 	github.com/veraison/go-cose v1.3.0
+	golang.org/x/crypto v0.45.0
 	google.golang.org/api v0.257.0
 )
 
@@ -47,7 +48,6 @@ require (
 	go.opentelemetry.io/otel v1.39.0 // indirect
 	go.opentelemetry.io/otel/metric v1.39.0 // indirect
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
-	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/oauth2 v0.33.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect

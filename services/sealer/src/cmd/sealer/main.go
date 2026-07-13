@@ -114,6 +114,16 @@ func main() {
 		}
 	}()
 
+	// Delegation-in-advance (ADR-0050 / plan-2607-20 phase B). Off unless
+	// DELEGATE_KEY_EPOCH >= 1. When enabled, derive the standing delegate keys
+	// (epoch N and N-1) at boot and advertise the current key to the
+	// coordinator. This is additive in Phase B: the derived key set is not yet
+	// consulted on the seal hot path (that is Phase D), so a failure here must
+	// not take down the sealer — log and continue.
+	if _, err := sealer.StartDelegateKeySchedule(ctx, httpClient, logger, cfg); err != nil {
+		slog.Error("delegate key schedule failed to start (continuing without advance delegation)", "error", err)
+	}
+
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	go queueConsumer.ConsumeQueue(ctx)
 
