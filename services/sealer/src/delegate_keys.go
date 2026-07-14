@@ -58,9 +58,14 @@ type SeedProvider interface {
 	Seed(ctx context.Context, epoch uint32) ([]byte, error)
 }
 
-// localSeedProvider serves a fixed seed for all epochs mixed with the epoch
-// (self-hosted escape hatch; DELEGATE_SEED). It preserves per-epoch
-// distinctness by HKDF-mixing the epoch into the configured secret.
+// localSeedProvider serves a fixed seed for all epochs mixed with the epoch,
+// preserving per-epoch distinctness by HKDF-mixing the epoch into the secret.
+//
+// NOTE (FOR-390 phase J3): this is a TEST-ONLY seam (DELEGATE_SEED), not a
+// production deployment path. Self-hosted sealing is direct K(L) signing, not
+// delegation (ADR-0050 §"Trust model"), so a self-hoster never derives delegate
+// seeds; the production delegation path is custodian-gated only. It is retained
+// as a hermetic seed source for tests.
 type localSeedProvider struct{ secret []byte }
 
 func (p localSeedProvider) Seed(_ context.Context, epoch uint32) ([]byte, error) {

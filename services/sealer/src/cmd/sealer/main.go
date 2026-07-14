@@ -114,20 +114,15 @@ func main() {
 		}
 	}()
 
-	// Delegation-in-advance (ADR-0050 / plan-2607-20 phase B). Off unless
+	// Delegation-in-advance (ADR-0050 / plan-2607-20). Off unless
 	// DELEGATE_KEY_EPOCH >= 1. When enabled, derive the standing delegate keys
-	// (epoch N and N-1) at boot and advertise the current key to the
-	// coordinator. This is additive in Phase B: the derived key set is not yet
-	// consulted on the seal hot path (that is Phase D), so a failure here must
-	// not take down the sealer — log and continue.
-	if delegateKeys, err := sealer.StartDelegateKeySchedule(ctx, httpClient, logger, cfg); err != nil {
-		slog.Error("delegate key schedule failed to start (continuing without advance delegation)", "error", err)
-	} else if delegateKeys != nil {
-		// Phase D: route lease issuance through the standing delegate keys —
-		// coverage requests for the current key, cert→key resolution on the set.
-		leaseMgr.SetDelegateKeys(delegateKeys)
-		slog.Warn("delegation-in-advance enabled", "delegate_key_epoch", cfg.DelegateKeyEpoch)
-	}
+	// (epoch N and N-1) at boot from the custodian-gated seed and route lease
+	// issuance through them (Phase D). The custodian is required at boot (no
+	// on-demand degrade); StartDelegateKeysWithRetry retries in the background if
+	// the custodian is not yet up, so sealer and custodian start in any order
+	// (Phase J1). Deterministic re-derivation means a restart re-loads the same
+	// keys, so outstanding advance certificates stay valid.
+	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr)
 
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	go queueConsumer.ConsumeQueue(ctx)
