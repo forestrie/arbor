@@ -12,6 +12,7 @@ type Metrics struct {
 	LogsCheckpointedTotal     prometheus.Counter
 	MessagesProcessedTotal    prometheus.Counter
 	MessagesAcknowledgedTotal *prometheus.CounterVec
+	CheckpointDeferredTotal   *prometheus.CounterVec
 	SealTriggerTotal          *prometheus.CounterVec
 
 	// Histograms
@@ -31,6 +32,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		LogsCheckpointedTotal:     newLogsCheckpointedTotal(),
 		MessagesProcessedTotal:    newMessagesProcessedTotal(),
 		MessagesAcknowledgedTotal: newMessagesAcknowledgedTotal(),
+		CheckpointDeferredTotal:   newCheckpointDeferredTotal(),
 		SealTriggerTotal:          newSealTriggerTotal(),
 		MessagesPerPoll:           newMessagesPerPoll(),
 		PollDuration:              newPollDuration(),
@@ -44,6 +46,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.LogsCheckpointedTotal,
 		m.MessagesProcessedTotal,
 		m.MessagesAcknowledgedTotal,
+		m.CheckpointDeferredTotal,
 		m.SealTriggerTotal,
 		m.MessagesPerPoll,
 		m.PollDuration,
@@ -78,6 +81,17 @@ func (m *Metrics) RecordAck(success bool) {
 		status = "success"
 	}
 	m.MessagesAcknowledgedTotal.WithLabelValues(status).Inc()
+}
+
+// IncCheckpointDeferred increments the checkpoint-deferred counter for the given
+// reason ("pending" = no covering delegation yet; "expired" = lease expired).
+func (m *Metrics) IncCheckpointDeferred(reason string) {
+	switch reason {
+	case "pending", "expired":
+	default:
+		reason = "pending"
+	}
+	m.CheckpointDeferredTotal.WithLabelValues(reason).Inc()
 }
 
 // ObserveMessagesPerPoll records the number of messages returned in a poll.
