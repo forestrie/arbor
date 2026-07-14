@@ -10,8 +10,9 @@ RUN apk add --no-cache git ca-certificates tzdata
 # Build context is services/ (see taskfiles/service-custodian.yml)
 WORKDIR /build
 
-# Local replace: custodian/src/go.mod => ../../pkgs/delegationcert
+# Local replace: custodian/src/go.mod => ../../pkgs/delegationcert, ../../pkgs/delegatekeys
 COPY pkgs/delegationcert ./pkgs/delegationcert
+COPY pkgs/delegatekeys ./pkgs/delegatekeys
 
 WORKDIR /build/custodian/src
 

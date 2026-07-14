@@ -20,6 +20,7 @@ COPY sealer/src/go.mod sealer/src/go.sum* ./sealer/src/
 # Copy shared packages used via go.work
 COPY pkgs/s3storage ./pkgs/s3storage
 COPY pkgs/delegationcert ./pkgs/delegationcert
+COPY pkgs/delegatekeys ./pkgs/delegatekeys
 COPY pkgs/logid ./pkgs/logid
 COPY pkgs/logredact ./pkgs/logredact
 
