@@ -7,6 +7,7 @@ toolchain go1.24.4
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/ethereum/go-ethereum v1.17.1
+	github.com/forestrie/arbor/services/pkgs/delegatekeys v0.0.0
 	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0
 	github.com/forestrie/arbor/services/pkgs/logid v0.0.0
 	github.com/forestrie/arbor/services/pkgs/logredact v0.0.0
@@ -16,6 +17,8 @@ require (
 	golang.org/x/crypto v0.45.0
 	google.golang.org/api v0.257.0
 )
+
+replace github.com/forestrie/arbor/services/pkgs/delegatekeys => ../../pkgs/delegatekeys
 
 replace github.com/forestrie/arbor/services/pkgs/delegationcert => ../../pkgs/delegationcert
 

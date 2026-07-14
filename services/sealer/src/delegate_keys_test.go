@@ -6,9 +6,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -204,106 +201,11 @@ func TestNewSeedProvider_Selection(t *testing.T) {
 	}
 }
 
-// TestRegisterDelegateKeys confirms the registration shape (keys[] array),
-// that both epochs N and N-1 are advertised with a rotation-spanning notAfter,
-// and — the load-bearing property — that the advertised publicKey is the
-// canonical COSE_Key CBOR whose sha256 equals the coordinator's
-// delegated_pubkey_hash (review F1).
-func TestRegisterDelegateKeys(t *testing.T) {
-	var got DelegateKeyRegistration
-	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/sealer/delegate-keys" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		gotAuth = r.Header.Get("Authorization")
-		_ = json.NewDecoder(r.Body).Decode(&got)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	local := localSeedProvider{secret: testSeed(t)}
-	keys, _ := LoadDelegateKeys(context.Background(), local, 2)
-	logger, _ := NewLogger(0)
-	cfg := Config{
-		SealerID:                 "sealer-a",
-		DelegateKeyEpoch:         2,
-		DelegateKeyTTL:           720 * time.Hour,
-		CoordinatorRegisterURL:   srv.URL,
-		CoordinatorRegisterToken: "reg-token",
-	}
-	const now = int64(1_800_000_000)
-	registerDelegateKeys(context.Background(), NewHTTPClient(logger), logger, cfg, keys, now)
-
-	if got.SealerID != "sealer-a" {
-		t.Fatalf("sealerId = %q", got.SealerID)
-	}
-	if gotAuth != "Bearer reg-token" {
-		t.Fatalf("auth = %q", gotAuth)
-	}
-	// Epoch 2 loads N=2 and N-1=1 (rotation overlap).
-	if len(got.Keys) != 2 {
-		t.Fatalf("want 2 keys (N, N-1), got %d", len(got.Keys))
-	}
-	wantNotAfter := now + int64((720 * time.Hour).Seconds())
-	epochs := map[uint32]bool{}
-	var current *DelegateKeyEntry
-	for i := range got.Keys {
-		e := &got.Keys[i]
-		if e.Alg != "ES256" {
-			t.Fatalf("alg = %q", e.Alg)
-		}
-		if e.NotAfter != wantNotAfter {
-			t.Fatalf("notAfter = %d, want %d", e.NotAfter, wantNotAfter)
-		}
-		if _, err := base64.StdEncoding.DecodeString(e.PublicKey); err != nil {
-			t.Fatalf("publicKey not base64: %v", err)
-		}
-		epochs[e.Epoch] = true
-		if e.Epoch == 2 {
-			current = e
-		}
-	}
-	if !epochs[2] || !epochs[1] {
-		t.Fatalf("want epochs {1,2}, got %v", epochs)
-	}
-
-	// The current key's advertised bytes must be the canonical COSE_Key CBOR,
-	// and its sha256 must equal pubkeyHashHex — the coordinator's JOIN key.
-	rawCurrent, _ := base64.StdEncoding.DecodeString(current.PublicKey)
-	wantCose, err := delegateCoseKeyBytes(&keys.Current().PublicKey)
-	if err != nil {
-		t.Fatalf("cose encode: %v", err)
-	}
-	if !bytes.Equal(rawCurrent, wantCose) {
-		t.Fatal("advertised publicKey is not the canonical COSE_Key CBOR")
-	}
-	wantHash, _ := pubkeyHashHex(&keys.Current().PublicKey)
-	sum := sha256.Sum256(rawCurrent)
-	if hex.EncodeToString(sum[:]) != wantHash {
-		t.Fatal("sha256(publicKey) != pubkeyHashHex (JOIN key would not match)")
-	}
-}
-
-// TestRegisterDelegateKeys_BestEffort ensures registration never panics or
-// blocks when the coordinator is unreachable or rejects.
-func TestRegisterDelegateKeys_BestEffort(t *testing.T) {
-	local := localSeedProvider{secret: testSeed(t)}
-	keys, _ := LoadDelegateKeys(context.Background(), local, 1)
-	logger, _ := NewLogger(0)
-
-	// Rejecting coordinator.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	registerDelegateKeys(context.Background(), NewHTTPClient(logger), logger,
-		Config{SealerID: "s", DelegateKeyTTL: time.Hour, CoordinatorRegisterURL: srv.URL}, keys, 1)
-
-	// No URL configured.
-	registerDelegateKeys(context.Background(), NewHTTPClient(logger), logger, Config{}, keys, 1)
-}
+// The advertised COSE_Key ⇄ delegated_pubkey_hash equality (former review F1)
+// is now proven by the shared delegatekeys golden-vector test and the
+// custodian's registration test; the sealer no longer self-registers (the
+// custodian registers the standing key + voucher at seed issuance, FOR-390
+// phase G3/G4).
 
 // TestStartDelegateKeySchedule_Disabled confirms the feature is entirely off
 // at epoch 0 (no seed source needed, no key set returned).
@@ -318,23 +220,16 @@ func TestStartDelegateKeySchedule_Disabled(t *testing.T) {
 	}
 }
 
-// TestStartDelegateKeySchedule_LocalSeed exercises the full boot path with the
-// self-hosted seed source and a fake coordinator.
+// TestStartDelegateKeySchedule_LocalSeed exercises the full boot load path with
+// the self-hosted seed source. The sealer loads the standing keys but no longer
+// registers them (the custodian does — FOR-390 phase G3/G4).
 func TestStartDelegateKeySchedule_LocalSeed(t *testing.T) {
-	registered := false
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		registered = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
 	logger, _ := NewLogger(0)
 	cfg := Config{
-		SealerID:               "sealer-a",
-		DelegateKeyEpoch:       3,
-		DelegateKeyTTL:         720 * time.Hour,
-		DelegateSeedLocal:      testSeed(t),
-		CoordinatorRegisterURL: srv.URL,
+		SealerID:          "sealer-a",
+		DelegateKeyEpoch:  3,
+		DelegateKeyTTL:    720 * time.Hour,
+		DelegateSeedLocal: testSeed(t),
 	}
 	keys, err := StartDelegateKeySchedule(context.Background(), NewHTTPClient(logger), logger, cfg)
 	if err != nil {
@@ -342,8 +237,5 @@ func TestStartDelegateKeySchedule_LocalSeed(t *testing.T) {
 	}
 	if keys == nil || keys.Current() == nil {
 		t.Fatal("expected loaded key set")
-	}
-	if !registered {
-		t.Fatal("expected coordinator registration attempt")
 	}
 }

@@ -111,6 +111,16 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 		"epoch", req.Epoch,
 		"kmsKeyVersion", keyVersion,
 	)
+
+	// Register the standing delegate key + custodian voucher with the
+	// coordinator (FOR-390 phase G3). Best-effort: a failure must not fail the
+	// seed response (the sealer needs the seed to boot); the sealer re-requests
+	// on boot and registration is idempotent.
+	if err := a.registerStandingDelegateKey(r.Context(), req.SealerID, req.Epoch, seed); err != nil {
+		a.Logger.Warn("delegate key registration failed (non-fatal)",
+			"sealerId", req.SealerID, "epoch", req.Epoch, "error", err)
+	}
+
 	a.writeCBOR(w, http.StatusOK, DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion})
 }
 

@@ -5,67 +5,30 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"math/big"
 
+	"github.com/forestrie/arbor/services/pkgs/delegatekeys"
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"golang.org/x/crypto/hkdf"
 )
 
-// deriveDelegateKey deterministically derives the standing delegate key
-// (epoch, index) from the KMS-derived seed (ADR-0050 / plan-2607-20 phase B).
-// The same (seed, epoch, index) always yields the same key, so certificates
-// bound to it survive process restarts — no delegate private material is ever
-// at rest.
-//
-// Hash-to-scalar uses the RFC 9380 §5 expand-then-reduce construction: draw 40
-// bytes (320 bits) from HKDF and reduce mod (n-1), +1, so the scalar is in
-// [1, n-1] with negligible modular bias (~2^-64). The coordinator never
-// re-derives this key (it only stores the public half the sealer registers),
-// so there is no cross-implementation determinism requirement — only
-// self-consistency across restarts, which the fixed info string guarantees.
+// deriveDelegateKey / delegateCoseKeyBytes / pubkeyHashHex delegate to the
+// shared delegatekeys package (FOR-390 phase G). That package is the single
+// source of truth so the sealer (which holds the private keys) and the
+// custodian (which re-derives the public keys to register and vouch for them)
+// can never drift; a drift would silently break coverage retrieval. These
+// thin wrappers keep the existing call sites unchanged.
 func deriveDelegateKey(seed []byte, epoch uint32, index uint8) (*ecdsa.PrivateKey, error) {
-	if len(seed) == 0 {
-		return nil, fmt.Errorf("empty delegate seed")
-	}
-	curve := elliptic.P256()
-	n := curve.Params().N
-	info := fmt.Sprintf("forestrie/delegate-key/v1/%d/%d", epoch, index)
-	r := hkdf.New(sha256.New, seed, nil, []byte(info))
-	buf := make([]byte, 40) // 320 bits: bound modular bias before the range map
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, err
-	}
-	k := new(big.Int).SetBytes(buf)
-	k.Mod(k, new(big.Int).Sub(n, big.NewInt(1)))
-	k.Add(k, big.NewInt(1)) // k ∈ [1, n-1]
-	priv := new(ecdsa.PrivateKey)
-	priv.Curve = curve
-	priv.D = k
-	priv.X, priv.Y = curve.ScalarBaseMult(k.Bytes())
-	if priv.X.Sign() == 0 {
-		// Unreachable for a scalar in [1, n-1] on P-256; guard defensively.
-		return nil, fmt.Errorf("delegate key derivation produced identity (epoch=%d index=%d)", epoch, index)
-	}
-	return priv, nil
+	return delegatekeys.DeriveKey(seed, epoch, index)
 }
 
 // delegateCoseKeyBytes encodes the delegate public key as the canonical
 // (RFC 8949 §4.2) COSE_Key CBOR — byte-identical to what a signer binds into a
-// delegation certificate, so its sha256 equals the coordinator's
-// delegated_pubkey_hash and the certificate↔delegate-key JOIN matches.
+// delegation certificate.
 func delegateCoseKeyBytes(pub *ecdsa.PublicKey) ([]byte, error) {
-	x := make([]byte, 32)
-	y := make([]byte, 32)
-	pub.X.FillBytes(x)
-	pub.Y.FillBytes(y)
-	coseKey, err := delegationcert.NewDelegatedCoseKey(delegationcert.Secp256r1, x, y)
-	if err != nil {
-		return nil, err
-	}
-	return canonicalCBOR.Marshal(coseKey.ToCBORMap())
+	return delegatekeys.CoseKeyBytes(pub)
 }
 
 // ecdsaFromDelegatedCoseKey reconstructs a P-256 public key from a certificate's
@@ -85,12 +48,7 @@ func ecdsaFromDelegatedCoseKey(dk *delegationcert.DelegatedCoseKey) (*ecdsa.Publ
 // pubkeyHashHex is the identity the coordinator stores as
 // delegated_pubkey_hash: hex(sha256(canonical COSE_Key CBOR)).
 func pubkeyHashHex(pub *ecdsa.PublicKey) (string, error) {
-	b, err := delegateCoseKeyBytes(pub)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:]), nil
+	return delegatekeys.PubkeyHashHex(pub)
 }
 
 // SeedProvider yields the delegate-key seed for an epoch. Implementations:
@@ -100,9 +58,14 @@ type SeedProvider interface {
 	Seed(ctx context.Context, epoch uint32) ([]byte, error)
 }
 
-// localSeedProvider serves a fixed seed for all epochs mixed with the epoch
-// (self-hosted escape hatch; DELEGATE_SEED). It preserves per-epoch
-// distinctness by HKDF-mixing the epoch into the configured secret.
+// localSeedProvider serves a fixed seed for all epochs mixed with the epoch,
+// preserving per-epoch distinctness by HKDF-mixing the epoch into the secret.
+//
+// NOTE (FOR-390 phase J3): this is a TEST-ONLY seam (DELEGATE_SEED), not a
+// production deployment path. Self-hosted sealing is direct K(L) signing, not
+// delegation (ADR-0050 §"Trust model"), so a self-hoster never derives delegate
+// seeds; the production delegation path is custodian-gated only. It is retained
+// as a hermetic seed source for tests.
 type localSeedProvider struct{ secret []byte }
 
 func (p localSeedProvider) Seed(_ context.Context, epoch uint32) ([]byte, error) {

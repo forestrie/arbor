@@ -7,12 +7,16 @@ toolchain go1.24.4
 require (
 	cloud.google.com/go/iam v1.5.3
 	cloud.google.com/go/kms v1.25.0
+	github.com/forestrie/arbor/services/pkgs/delegatekeys v0.0.0
 	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0
 	github.com/fxamacker/cbor/v2 v2.9.0
+	github.com/stretchr/testify v1.11.1
 	github.com/veraison/go-cose v1.3.0
 	google.golang.org/api v0.256.0
 	google.golang.org/grpc v1.77.0
 )
+
+replace github.com/forestrie/arbor/services/pkgs/delegatekeys => ../../pkgs/delegatekeys
 
 replace github.com/forestrie/arbor/services/pkgs/delegationcert => ../../pkgs/delegationcert
 
@@ -24,6 +28,7 @@ require (
 	cloud.google.com/go/longrunning v0.7.0 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/go-ethereum v1.17.1 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -33,6 +38,7 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.7 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.61.0 // indirect
@@ -51,4 +57,5 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20251222181119-0a764e51fe1b // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
