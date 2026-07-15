@@ -13,9 +13,8 @@ dependency [canopy#135](https://github.com/forestrie/canopy/pull/135), per
 `review-changes` (distributed-systems + applied-crypto lens). Reviewed by the
 author plus an independent adversarial pass; findings agreed.
 
-**These are pre-merge findings on open PRs.** F1/F2 below are block-merge and
-should be fixed on the existing branches before either PR merges; the rest are
-follow-ups.
+**Status:** R1–R4 have been **fixed on the PR branches** (with tests; both
+suites green). R5–R8 remain as deferred follow-ups ([FOR-392](https://linear.app/forestrie/issue/FOR-392/sealer-resync-deferred-review-follow-ups-r5-r8)).
 
 ## Scope
 - **Repos/branches:** arbor `for-390-sealer-resync-impl` (#68); canopy
@@ -48,20 +47,22 @@ reseals, never a missed reseal).
 
 ## Remediation items
 
-**Block-merge (fix on the existing PR branches before merge):**
-1. **R1 — reset cursor on fetch error.** In `tick`, on `fetchActivePage` error set
-   `r.cursor = ""` (restart from shard 0 next tick). *AC:* a simulated persistent
-   400 does not wedge; a unit test asserts the cursor is cleared on error. *Branch:* #68.
-2. **R2 — enforce the kill-switch in `handleGetActive`.** Add the same
-   `COALESCE((SELECT (user_enabled!=0 AND operator_enabled!=0) FROM
-   log_delegation_config …),1)=1` guard the pending query uses. *AC:* a disabled
-   log is absent from `/active`; unit test covers it. *Branch:* #135.
+**Block-merge — ✅ FIXED on the PR branches:**
+1. ✅ **R1 — reset cursor on fetch error** (arbor#68). `tick` sets `r.cursor = ""`
+   on any `fetchActivePage` error; `TestTickResetsCursorOnFetchError` (httptest
+   400) asserts it. No longer wedges.
+2. ✅ **R2 — kill-switch in `handleGetActive`** (canopy#135). Added the same
+   `COALESCE((SELECT (user_enabled!=0 AND operator_enabled!=0) …),1)=1` guard as
+   `handleGetPending`; a test asserts a disabled log drops out of the walk.
 
-**Follow-ups (do not block; this stack or a sibling branch):**
-3. **R3 — negative-cache unresolved heights** with backoff and downgrade the
-   pre-write case below WARN (distinguish "no data yet" from misconfig). *Branch:* #68 or follow-up.
-4. **R4 — use or drop the range hint.** Short-circuit the head LIST when cached
-   `sealedSize >= mmrEnd`, or remove the doc claim. *Branch:* #68/#135.
+**Follow-ups — ✅ FIXED on the PR branch:**
+3. ✅ **R3 — negative-cache unresolved heights** (arbor#68). `resolveHeight`
+   backs off re-probes and logs the miss at WARN once per log (Debug after), so
+   delegation-in-advance logs no longer spam WARN or re-LIST every tick.
+   `TestResolveHeightNegativeCacheSkipsProbe` covers the backoff skip.
+4. ✅ **R4 — use the range hint** (arbor#68). `checkAndReseal` short-circuits the
+   R2 head read when cached `sealedSize >= mmrEnd`;
+   `TestHintFastPathSkipsWhenSealedCoversMmrEnd` covers it.
 
 **Deferred (Low / separate):**
 - **R5** — evaluate a `(expires_at, log_id_hex32)` index + expired-cert pruning
