@@ -87,29 +87,56 @@ its cert expires mid-repair. (Rebuilt from the coordinator on boot; loss is
 self-healing — the next resync re-observes it.)
 
 ### 3.3 Coordinator API — server-side-aggregated `active` (sealer stays shard-agnostic)
-`GET /api/delegations/active?cursor={opaque}&limit={n}` on the coordinator:
+`GET /api/delegations/active?cursor={opaque}&limit={n}&graceSeconds={s}`
+(implemented — [canopy#135](https://github.com/forestrie/canopy/pull/135)):
 - The **coordinator** owns the fan-out over its `COORDINATOR_SHARD_COUNT` shard
   DOs (the *only* party that knows N) and returns
-  `[{logId, expiresAt, mmrEnd}]` for `expires_at > now − grace` + an **opaque
-  next-cursor**. Because a resync needs no global ordering, it pages
+  `[{logIdHex32, expiresAt, mmrStart, mmrEnd}]` for `expires_at > now − grace` +
+  an **opaque next-cursor**. Because a resync needs no global ordering, it pages
   **shard-by-shard** (cursor = `(shardIndex, keysetCursor)`) — **one DO per
   page, no cross-shard merge**. Index-only via the existing
   `idx_delegation_certificates_coverage (log_id_hex32, expires_at, mmr_start, mmr_end)`.
+- **The response carries the delegation coverage range** (`mmrStart`..`mmrEnd`,
+  the union across the log's certs). `mmrEnd` is the furthest *authorized* mmr
+  index and is a **hint** to the sealer (note: it is the SIGNED cert range, so
+  with `DELEGATION_RANGE_PAD` it can sit *ahead* of the true head — an upper
+  bound / authority ceiling, not the head itself).
 - The **sealer treats the cursor as opaque**, never learns N, so **resharding is
   transparent** and there is **no shard-count config to drift**. (Confirmed:
   `COORDINATOR_SHARD_COUNT` is the coordinator's own, single source of truth,
   independent of ingestion's `QUEUE_SHARD_COUNT`.)
 - The sealer reads it **directly** (it already dials the coordinator as
-  `TRUST_ROOT_URL`); plain read, bearer-authed, no signing.
+  `TRUST_ROOT_URL`); plain read, bearer-authed with `COORDINATOR_APP_TOKEN`.
 
-### 3.4 Resync loop — one page per tick, spread over intervals
-Each resync tick: fetch **one page**, and for each candidate compare its massif
-head to its latest checkpoint in R2 (the freshness check `CheckpointLog` already
-does); for each **unsealed** head, **enqueue a `sweep`-sourced seal hint** into
-the existing seal queue (same `{object:{key}}` shape, `hintSource:"sweep"`) —
-sealing stays one path with one concurrency cap and one dedupe; the resync is a
-cheap *detector*, not a sealer. One page/tick means a large active set is walked
-over many ticks (`fullCycle = ⌈|active|/pageSize⌉ × tick`) — the RAM-spread.
+### 3.4 Resync loop — pull-only, re-drives via direct `CheckpointLog(sweep)`
+**The sealer is strictly pull-only and MUST NOT publish to its own seal queue**
+(a sealer that produces onto the queue it consumes creates a self-amplification
+loop). So the resync does **not** enqueue a hint — it calls the same seal
+function in-process, `sealer.CheckpointLog(ctx, svc, logID, height)`, recording
+`SealTriggerSourceSweep`, under a small bounded worker pool. `CheckpointLog`
+already re-derives all work from R2 and is **idempotent**: it no-ops when the
+latest checkpoint already covers the head (`sealer.go` `CheckConsistency`→nil,
+`:168`; and the equal-or-newer-size early stop, `:320`). So driving it for an
+already-sealed log is safe and cheap.
+
+**Freshness is by MMR size, not massif index** — reuse go-merklelog's existing
+massif/checkpoint scanning (the cheap prefix of `CheckpointLog`):
+- **Last checkpoint** → `store.HeadIndex(ObjectCheckpoint)` +
+  `DecodeCheckpointReceipt` → `Proof.TreeSize2` = sealed MMR size (and the first
+  massif to scan from).
+- **Head massif** → `store.HeadIndex(ObjectMassifData)` + head-massif
+  `RangeCount()` = current MMR size (and the massif to associate the new
+  checkpoint with).
+- **Reseal iff `headSize > checkpointTreeSize2`.** Critically this catches the
+  case the massif index did **not** advance but the log did (more leaves in the
+  same massif) — the checkpoint for that massif is **replaced**, not appended.
+- **Massif height** is not configured on the sealer (today it is parsed only
+  from the R2 event path). The resync must **discover height from R2** per log
+  (go-merklelog scan) and cache it per-log in RAM to avoid re-listing.
+
+One page/tick means a large active set is walked over many ticks
+(`fullCycle = ⌈|active|/pageSize⌉ × tick`) — the RAM-spread. The resync is a
+cheap **detector**; the actual seal is the same code path the queue uses.
 
 ### 3.5 Cadence
 A **fixed slow resync tick** suffices for a backstop (it only needs `fullCycle ≪
@@ -122,16 +149,19 @@ edge path already owns latency.
 ## §4 — Remediation items (acceptance criteria + assignment)
 
 **Core (the F1 fix):**
-1. **canopy — coordinator `active` endpoint** (§3.3). *AC:* keyset-paged,
+1. ✅ **canopy — coordinator `active` endpoint** (§3.3) —
+   [canopy#135](https://github.com/forestrie/canopy/pull/135). Keyset-paged,
    shard-by-shard, opaque cursor; index-only; returns active-or-recently-expired
-   per-log rows; bearer-authed; unit test that a paged full walk returns every
-   log with a cert `expires_at > now−grace` exactly once across a reshard-stable
-   cursor. *Repo:* canopy (delegation-coordinator).
-2. **arbor — sealer resync loop + RAM known-unsealed set** (§3.2/3.4/3.5). *AC:*
-   a dropped/deferred first checkpoint is re-driven and sealed within one resync
-   cycle **without any new write**; resync enqueues `sweep`-sourced hints;
-   per-tick work is O(page); `sealer_seal_trigger_total{source="sweep"}` and a
-   `sealer_resync_*` gauge set exist. Live-repro the exact F1 scenario and show
+   per-log rows **with the delegation coverage range**; `COORDINATOR_APP_TOKEN`
+   auth; tested (exact-once multi-shard walk, grace clamp).
+2. ▶️ **arbor — sealer resync loop + RAM known-unsealed set** (§3.2/3.4/3.5).
+   *AC:* a dropped/deferred first checkpoint is re-driven and sealed within one
+   resync cycle **without any new write**; the sealer stays **pull-only** (no
+   queue publish) and re-drives via direct `CheckpointLog(source=sweep)`;
+   freshness is `headSize > checkpointTreeSize2` (reseals within-massif advance
+   / checkpoint replacement); massif height discovered from R2 + RAM-cached
+   per-log; per-tick work is O(page); `sealer_seal_trigger_total{source="sweep"}`
+   and a `sealer_resync_*` gauge set exist. Live-repro the F1 scenario and show
    it self-heals. *Repo:* arbor (sealer).
 
 **Independent (do regardless of the resync):**
