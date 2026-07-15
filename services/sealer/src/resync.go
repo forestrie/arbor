@@ -49,6 +49,7 @@ type ResyncManager struct {
 	cursor      string
 	factories   map[uint8]*merklelog.Factory
 	heightByLog map[string]uint8
+	heightMiss  map[string]time.Time // logID -> earliest re-probe time (negative cache)
 	sealedByLog map[string]uint64
 }
 
@@ -88,6 +89,7 @@ func NewResyncManager(cfg Config, httpClient *HTTPClient, logger *slog.Logger, l
 		s3Client:    s3Client,
 		factories:   map[uint8]*merklelog.Factory{},
 		heightByLog: map[string]uint8{},
+		heightMiss:  map[string]time.Time{},
 		sealedByLog: map[string]uint64{},
 	}, nil
 }
@@ -123,7 +125,14 @@ func (r *ResyncManager) Run(ctx context.Context) {
 func (r *ResyncManager) tick(ctx context.Context) {
 	page, err := r.fetchActivePage(ctx, r.cursor)
 	if err != nil {
-		r.logger.Warn("resync: active-set page fetch failed", "error", err)
+		// Reset the cursor so a persistent 4xx (e.g. a reshard that invalidates
+		// the held opaque cursor) cannot wedge the backstop: the next tick
+		// restarts the walk from the first shard rather than re-sending a dead
+		// cursor forever.
+		r.logger.Warn("resync: active-set page fetch failed; restarting walk next tick", "error", err)
+		r.mu.Lock()
+		r.cursor = ""
+		r.mu.Unlock()
 		return
 	}
 	if r.metrics != nil {
@@ -171,13 +180,23 @@ func (r *ResyncManager) checkAndReseal(ctx context.Context, lg activeLog) {
 		return
 	}
 
+	// Range-hint fast path: mmrEnd is the furthest authorized index. If a prior
+	// checkpoint read already covers it, nothing more can be sealed under the
+	// current delegation — skip the R2 head read entirely. Pure fast-path: a log
+	// with no cached sealed size falls through to the authoritative check.
+	if lg.MmrEnd != nil && *lg.MmrEnd >= 0 {
+		r.mu.Lock()
+		cached, ok := r.sealedByLog[lg.LogIDHex32]
+		r.mu.Unlock()
+		if ok && cached >= uint64(*lg.MmrEnd) {
+			return
+		}
+	}
+
+	// resolveHeight owns miss logging (rate-limited, below WARN after the first
+	// miss) so a delegation-in-advance log with no massifs yet does not spam.
 	height, ok := r.resolveHeight(ctx, lg.LogIDHex32, logIDBytes)
 	if !ok {
-		// Visible, not silent: a log with an active delegation but no locatable
-		// massifs at any candidate height means RESYNC_MASSIF_HEIGHTS is likely
-		// misconfigured (or the log has no data yet).
-		r.logger.Warn("resync: massif height not found for log; check RESYNC_MASSIF_HEIGHTS",
-			"logId", lg.LogIDHex32, "candidateHeights", r.cfg.ResyncMassifHeights)
 		return
 	}
 
@@ -232,14 +251,26 @@ func (r *ResyncManager) checkAndReseal(ctx context.Context, lg activeLog) {
 }
 
 // resolveHeight returns the massif height for a log, discovering it from R2 by
-// probing the configured candidate heights and caching the hit.
+// probing the configured candidate heights and caching the hit. Misses are
+// negative-cached with a backoff so a delegation-in-advance log (active cert,
+// no massifs yet — normal) is not re-probed (len(heights) LISTs) every tick,
+// and the miss is logged at WARN only on the first occurrence per log; a
+// persistent miss across all logs still surfaces (bad RESYNC_MASSIF_HEIGHTS).
 func (r *ResyncManager) resolveHeight(ctx context.Context, logIDHex string, logIDBytes []byte) (uint8, bool) {
+	now := time.Now()
+
 	r.mu.Lock()
-	h, ok := r.heightByLog[logIDHex]
-	r.mu.Unlock()
-	if ok {
+	if h, ok := r.heightByLog[logIDHex]; ok {
+		r.mu.Unlock()
 		return h, true
 	}
+	retryAt, missedBefore := r.heightMiss[logIDHex]
+	if missedBefore && now.Before(retryAt) {
+		r.mu.Unlock()
+		return 0, false // within negative-cache backoff; skip the re-probe
+	}
+	r.mu.Unlock()
+
 	for _, cand := range r.cfg.ResyncMassifHeights {
 		prefix, err := r.massifPrefix(cand, logIDBytes)
 		if err != nil {
@@ -253,9 +284,25 @@ func (r *ResyncManager) resolveHeight(ctx context.Context, logIDHex string, logI
 		if len(page.Objects) > 0 {
 			r.mu.Lock()
 			r.heightByLog[logIDHex] = cand
+			delete(r.heightMiss, logIDHex)
 			r.mu.Unlock()
 			return cand, true
 		}
+	}
+
+	backoff := 10 * r.cfg.ResyncInterval
+	if backoff < time.Minute {
+		backoff = time.Minute
+	}
+	r.mu.Lock()
+	r.heightMiss[logIDHex] = now.Add(backoff)
+	r.mu.Unlock()
+	if !missedBefore {
+		r.logger.Warn("resync: no massifs found for log at any candidate height "+
+			"(normal for a not-yet-written log; check RESYNC_MASSIF_HEIGHTS if this persists for all logs)",
+			"logId", logIDHex, "candidateHeights", r.cfg.ResyncMassifHeights)
+	} else {
+		r.logger.Debug("resync: still no massifs for log", "logId", logIDHex)
 	}
 	return 0, false
 }
