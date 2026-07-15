@@ -425,9 +425,22 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				}
 				if errors.Is(err, sealer.ErrDelegationExpired) || errors.Is(err, sealer.ErrDelegationPending) {
 					// Expected retry paths: do not ack messages for this log so the queue will redeliver.
-					q.logger.Info("log checkpointing deferred; will retry",
+					// Log at WARN (not INFO) and count it: at the deployed "notice"
+					// level an INFO deferral is invisible, so a log stuck awaiting a
+					// delegation looks like the sealer is idle. This is the primary
+					// operator signal that a first checkpoint is blocked on
+					// delegation (e.g. an advance cert not pre-submitted in time).
+					reason := "pending"
+					if errors.Is(err, sealer.ErrDelegationExpired) {
+						reason = "expired"
+					}
+					if q.metrics != nil {
+						q.metrics.IncCheckpointDeferred(reason)
+					}
+					q.logger.Warn("log checkpointing deferred; awaiting delegation, will retry",
 						"logID", keyFromLogIDBytes(w.logIDBytes),
 						"massifHeight", w.massifHeight,
+						"reason", reason,
 						"error", err,
 					)
 					return
