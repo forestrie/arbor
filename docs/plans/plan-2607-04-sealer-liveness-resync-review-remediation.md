@@ -157,3 +157,30 @@ edge path already owns latency.
   safety requirement.
 - ADR-0007 should be updated to record item 1–2 as the concrete phase-3 design
   (or a short follow-up ADR) once accepted.
+
+## §6 — Deliberately out of scope: does the coordinator need to shard at all?
+The `active` endpoint (item 1) is specified with an **opaque cursor precisely so
+this plan does not depend on the answer** — the sealer never learns
+`COORDINATOR_SHARD_COUNT`, so the coordinator can keep N=4, drop to N=1, or
+reshard later with **zero sealer change**. That decoupling is the only thing this
+plan needs to get right now; the shard-count decision itself is deferred.
+
+Whether the coordinator sharding earns its cost is a **separate
+production-readiness question** (load-estimate-driven, coordinator-wide, not a
+liveness fix) → **tracked as a Linear in "Ship a reliable production platform",
+not changed here.** Framing for that issue:
+- **Buys:** aggregate throughput past a single DO's single-threaded ceiling;
+  storage past a single DO's limit; hot-log isolation.
+- **But near-term:** per-log delegation state is tiny (a few certs/routes — far
+  from any single-DO storage limit); delegation-in-advance + sealer lease-caching
+  make coverage-retrieval *not* per-seal, pushing the throughput ceiling far out;
+  N=1 is **already supported** (`handler.ts` fallback) so un-sharding is a config
+  flip + trivial (dev-sized) migration.
+- **Costs it imposes today:** `get-pending` and `post-delegate-keys` already
+  **fan out writes/reads to every shard** (N× amplification); the `active`
+  endpoint needs shard-by-shard paging *because* of N>1; resharding is a
+  cert-migration hazard.
+- **Likely conclusion (to confirm with load numbers):** sharding is speculative
+  for current+near-term scale; lease-caching + keyset pagination are the load
+  levers that matter first. Keep N configurable, default low, shard when measured
+  issue/seal rates demand it.
