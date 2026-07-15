@@ -14,6 +14,9 @@ type Metrics struct {
 	MessagesAcknowledgedTotal *prometheus.CounterVec
 	CheckpointDeferredTotal   *prometheus.CounterVec
 	SealTriggerTotal          *prometheus.CounterVec
+	ResyncPagesTotal          prometheus.Counter
+	ResyncChecksTotal         prometheus.Counter
+	ResyncResealsTotal        prometheus.Counter
 
 	// Histograms
 	MessagesPerPoll    prometheus.Histogram
@@ -23,6 +26,7 @@ type Metrics struct {
 
 	// Gauges
 	DelegationLeaseExpiry prometheus.Gauge
+	ResyncLastPageLogs    prometheus.Gauge
 }
 
 // NewMetrics creates and registers all metrics with the provided registry.
@@ -39,6 +43,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		CheckpointDuration:        newCheckpointDuration(),
 		CheckpointLag:             newCheckpointLag(),
 		DelegationLeaseExpiry:     newDelegationLeaseExpiry(),
+		ResyncPagesTotal:          newResyncPagesTotal(),
+		ResyncChecksTotal:         newResyncChecksTotal(),
+		ResyncResealsTotal:        newResyncResealsTotal(),
+		ResyncLastPageLogs:        newResyncLastPage(),
 	}
 
 	reg.MustRegister(
@@ -53,6 +61,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.CheckpointDuration,
 		m.CheckpointLag,
 		m.DelegationLeaseExpiry,
+		m.ResyncPagesTotal,
+		m.ResyncChecksTotal,
+		m.ResyncResealsTotal,
+		m.ResyncLastPageLogs,
 	)
 
 	return m
@@ -131,4 +143,20 @@ func (m *Metrics) RecordSealTrigger(source string) {
 // idtimestamp to the checkpoint write (ADR-0007 trigger latency).
 func (m *Metrics) ObserveCheckpointLag(seconds float64) {
 	m.CheckpointLag.Observe(seconds)
+}
+
+// RecordResyncPage records one active-set page fetch and its size.
+func (m *Metrics) RecordResyncPage(logsInPage int) {
+	m.ResyncPagesTotal.Inc()
+	m.ResyncLastPageLogs.Set(float64(logsInPage))
+}
+
+// IncResyncChecks increments the per-log freshness-check counter.
+func (m *Metrics) IncResyncChecks() {
+	m.ResyncChecksTotal.Inc()
+}
+
+// IncResyncReseals increments the count of logs the resync re-drove.
+func (m *Metrics) IncResyncReseals() {
+	m.ResyncResealsTotal.Inc()
 }

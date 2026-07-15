@@ -103,6 +103,23 @@ type Config struct {
 	CoordinatorRegisterURL   string
 	CoordinatorRegisterToken string
 
+	// Level-triggered resync (ADR-0007 phase-3 sweep / plan-2607-04). The
+	// correctness backstop to the edge-triggered queue path: pages the
+	// coordinator active-delegation set and re-drives any log whose head has
+	// advanced past its latest checkpoint, so dropped/deferred seals self-heal
+	// without a new write. The sealer stays strictly pull-only — it re-drives
+	// in-process via CheckpointLog, never by publishing to its own queue.
+	//
+	// Disabled unless ResyncMassifHeights is non-empty: the sealer has no other
+	// source of a log's massif height (the edge path parses it from the R2
+	// object key), so the resync probes these candidate heights to locate a
+	// log's objects. A forest is uniform-height, so this is typically one value.
+	ResyncInterval      time.Duration
+	ResyncPageSize      int
+	ResyncGraceSeconds  int
+	ResyncConcurrency   int
+	ResyncMassifHeights []uint8
+
 	// Read-only chain RPC for KS256 ERC-1271 delegation verification (optional).
 	ContractRPCURL string
 
@@ -243,6 +260,12 @@ func LoadConfig() Config {
 		DelegateSeedLocal:          []byte(os.Getenv("DELEGATE_SEED")),
 		CoordinatorRegisterURL:     os.Getenv("COORDINATOR_REGISTER_URL"),
 		CoordinatorRegisterToken:   os.Getenv("COORDINATOR_REGISTER_TOKEN"),
+
+		ResyncInterval:      getDuration("RESYNC_INTERVAL", 30*time.Second),
+		ResyncPageSize:      getInt("RESYNC_PAGE_SIZE", 100),
+		ResyncGraceSeconds:  getInt("RESYNC_GRACE_SECONDS", 3600),
+		ResyncConcurrency:   getInt("RESYNC_CONCURRENCY", 4),
+		ResyncMassifHeights: parseMassifHeights(os.Getenv("RESYNC_MASSIF_HEIGHTS")),
 	}
 
 	cfg.applyDelegationSeamFallbacks()
@@ -273,6 +296,38 @@ func (c *Config) applyDelegationSeamFallbacks() {
 	if c.CoordinatorRegisterToken == "" {
 		c.CoordinatorRegisterToken = c.TrustRootToken
 	}
+}
+
+// ResyncEnabled reports whether the level-triggered resync loop should run. It
+// requires at least one candidate massif height (the only way it can locate a
+// log's objects) and a coordinator seam to page the active set.
+func (c Config) ResyncEnabled() bool {
+	return len(c.ResyncMassifHeights) > 0 && c.CoordinatorRegisterURL != ""
+}
+
+// parseMassifHeights parses a comma-separated list of uint8 massif heights
+// (e.g. "14" or "14,15"). Empty/invalid entries are skipped; a fully empty or
+// unparseable value yields nil (resync disabled).
+func parseMassifHeights(raw string) []uint8 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var heights []uint8
+	seen := map[uint8]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		h, err := strconv.ParseUint(part, 10, 8)
+		if err != nil || h == 0 || seen[uint8(h)] {
+			continue
+		}
+		seen[uint8(h)] = true
+		heights = append(heights, uint8(h))
+	}
+	return heights
 }
 
 func (c Config) LogConfig(logger *slog.Logger) {

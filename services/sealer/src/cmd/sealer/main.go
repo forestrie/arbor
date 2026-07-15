@@ -127,6 +127,16 @@ func main() {
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	go queueConsumer.ConsumeQueue(ctx)
 
+	// Level-triggered resync (ADR-0007 phase-3 / plan-2607-04): the correctness
+	// backstop to the edge-triggered queue above. Disabled unless
+	// RESYNC_MASSIF_HEIGHTS is set; stays strictly pull-only (re-drives seals
+	// in-process, never publishes to the queue).
+	if resyncMgr, err := sealer.NewResyncManager(cfg, httpClient, logger, leaseMgr, metricsHandles); err != nil {
+		slog.Error("failed to build resync manager; resync disabled", "error", err)
+	} else {
+		go resyncMgr.Run(ctx)
+	}
+
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
 
