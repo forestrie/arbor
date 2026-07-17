@@ -75,3 +75,43 @@ func TestValidateDaemonRequiresQueue(t *testing.T) {
 		t.Errorf("daemon config rejected: %v", err)
 	}
 }
+
+// validDaemonConfig is a valid daemon config (queue set) for drain-bound tests.
+func validDaemonConfig() Config {
+	c := baseValidCLIConfig()
+	c.QueueURL = "https://api.cloudflare.com/x"
+	c.QueueToken = "tok"
+	c.QueueBatchSize = 31
+	return c
+}
+
+// TestValidateOwnerWaitBound: OwnerWait + ReceiptTimeout must stay inside the
+// visibility window, or a group that clears mid-drain and then mines is
+// redelivered as a duplicate while still in flight (FOR-395). ReceiptTimeout=60,
+// VisibilityTimeout=90 → OwnerWait must be < 30.
+func TestValidateOwnerWaitBound(t *testing.T) {
+	valid := map[string]time.Duration{
+		"disabled (zero)":   0,
+		"comfortably under": 20 * time.Second,
+	}
+	for name, ow := range valid {
+		cfg := validDaemonConfig()
+		cfg.OwnerWait = ow
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("%s: OwnerWait=%s rejected: %v", name, ow, err)
+		}
+	}
+
+	invalid := map[string]time.Duration{
+		"negative":           -1 * time.Second,
+		"equals the window":  30 * time.Second, // 30+60 == 90
+		"exceeds the window": 40 * time.Second, // 40+60 > 90
+	}
+	for name, ow := range invalid {
+		cfg := validDaemonConfig()
+		cfg.OwnerWait = ow
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: OwnerWait=%s should be rejected", name, ow)
+		}
+	}
+}

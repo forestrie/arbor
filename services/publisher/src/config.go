@@ -67,6 +67,15 @@ type Config struct {
 	ReceiptTimeout          time.Duration
 	ReceiptPollInterval     time.Duration
 
+	// OwnerWait bounds the in-cycle drain for owner_not_anchored groups: a child
+	// checkpoint whose owner (authority log) is not yet on-chain is held and
+	// re-assembled against fresh logState until the owner anchors or this bound
+	// elapses, then released to redeliver. Zero disables the drain (release
+	// immediately, the pre-FOR-395 behaviour). OwnerPoll is the re-assembly
+	// interval. See plan-2607-06.
+	OwnerWait time.Duration
+	OwnerPoll time.Duration
+
 	// Queue poll backoff tuning.
 	BackoffBase time.Duration
 	PollJitter  float64 // fraction of the sleep applied as ± jitter (e.g. 0.1)
@@ -202,6 +211,8 @@ func LoadConfig() Config {
 		MaxPriorityFeePerGasWei: maxPriorityWei,
 		ReceiptTimeout:          getDuration("PUBLISHER_RECEIPT_TIMEOUT", 60*time.Second),
 		ReceiptPollInterval:     getDuration("PUBLISHER_RECEIPT_POLL_INTERVAL", 200*time.Millisecond),
+		OwnerWait:               getDuration("PUBLISHER_OWNER_WAIT", 20*time.Second),
+		OwnerPoll:               getDuration("PUBLISHER_OWNER_POLL", 2*time.Second),
 		BackoffBase:             getDuration("PUBLISHER_BACKOFF_BASE", 10*time.Millisecond),
 		PollJitter:              getFloat("PUBLISHER_POLL_JITTER", 0.1),
 		RPCURLs:                 rpcURLs,
@@ -272,6 +283,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "PUBLISHER_MAX_FEE_PER_GAS", weiOrEmpty(c.MaxFeePerGasWei))
 	logConfigValue(logger, "PUBLISHER_MAX_PRIORITY_FEE", weiOrEmpty(c.MaxPriorityFeePerGasWei))
 	logConfigValue(logger, "PUBLISHER_RECEIPT_TIMEOUT", c.ReceiptTimeout)
+	logConfigValue(logger, "PUBLISHER_OWNER_WAIT", c.OwnerWait)
+	logConfigValue(logger, "PUBLISHER_OWNER_POLL", c.OwnerPoll)
 	logConfigValue(logger, "PUBLISHER_RECEIPT_POLL_INTERVAL", c.ReceiptPollInterval)
 	logConfigValue(logger, "PUBLISHER_BACKOFF_BASE", c.BackoffBase)
 	logConfigValue(logger, "PUBLISHER_POLL_JITTER", fmt.Sprintf("%g", c.PollJitter))
@@ -307,6 +320,20 @@ func (c Config) Validate() error {
 	if c.VisibilityTimeout <= c.ReceiptTimeout {
 		return fmt.Errorf("VISIBILITY_TIMEOUT (%s) must exceed PUBLISHER_RECEIPT_TIMEOUT (%s)",
 			c.VisibilityTimeout, c.ReceiptTimeout)
+	}
+	// The owner drain holds a message in-cycle for up to OwnerWait; a group that
+	// clears mid-drain then still needs ReceiptTimeout to mine. Both happen
+	// under the same lease, so OwnerWait + ReceiptTimeout must stay inside the
+	// visibility window or a still-in-flight message is redelivered as a
+	// duplicate (FOR-395, plan-2607-06). Negative OwnerWait is nonsensical; zero
+	// disables the drain.
+	if c.OwnerWait < 0 {
+		return fmt.Errorf("PUBLISHER_OWNER_WAIT (%s) must not be negative", c.OwnerWait)
+	}
+	if c.OwnerWait > 0 && c.OwnerWait+c.ReceiptTimeout >= c.VisibilityTimeout {
+		return fmt.Errorf(
+			"PUBLISHER_OWNER_WAIT (%s) + PUBLISHER_RECEIPT_TIMEOUT (%s) must be less than VISIBILITY_TIMEOUT (%s)",
+			c.OwnerWait, c.ReceiptTimeout, c.VisibilityTimeout)
 	}
 	return nil
 }
