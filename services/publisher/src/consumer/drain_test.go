@@ -159,6 +159,31 @@ func TestDrain_OwnerNeverAnchors_ReleasesForRedelivery(t *testing.T) {
 	}
 }
 
+// TestDrain_PollLongerThanWait_DoesNotOvershoot (F1 regression): a poll interval
+// longer than OwnerWait must not hold the message past OwnerWait — otherwise a
+// misconfigured OwnerPoll could keep a message in flight past its lease and the
+// queue would redeliver it, duplicating the publish. The per-iteration sleep is
+// capped to the remaining budget.
+func TestDrain_PollLongerThanWait_DoesNotOvershoot(t *testing.T) {
+	key := ckKey("a0717273-7475-4677-a879-7a7b7c7d7e7f", 0)
+	pub := newFakePub()
+	pub.readyAfter[key] = 1 << 30 // never anchors
+
+	// OwnerPoll (1s) >> OwnerWait (20ms): without the deadline cap the drain
+	// would sleep ~1s.
+	q, acked := drainConsumer(t, pub, 20*time.Millisecond, 1*time.Second)
+	start := time.Now()
+	q.drainDeferred(context.Background(), []deferredGroup{deferredOf(key, "lease-z")})
+	held := time.Since(start)
+
+	if held > 250*time.Millisecond {
+		t.Errorf("drain held %s, must be bounded by OwnerWait (20ms) not OwnerPoll (1s)", held)
+	}
+	if has(acked(), "lease-z") {
+		t.Errorf("timed-out group must not be acked; acked=%v", acked())
+	}
+}
+
 // TestDrain_DisabledWhenOwnerWaitZero_ReleasesImmediately: OwnerWait == 0
 // disables the drain; deferred groups are released at once (no re-assembly).
 func TestDrain_DisabledWhenOwnerWaitZero_ReleasesImmediately(t *testing.T) {

@@ -312,3 +312,17 @@ a follow-up once the mechanism is chosen.
 - **5a:** ~1–2h, pure additive metric/log. **Risk: negligible.**
 - **5b:** ~half a day either option; **Risk: low** (A gated on the provider
   probe; B is plain Go).
+
+## 8. Phase-1 self-review (2026-07-17)
+
+Reviewed the Phase-1 implementation (distributed-systems / correctness lens).
+One defect fixed pre-merge; the rest are prioritised follow-ups.
+
+| ID | Sev | Disposition |
+|----|-----|-------------|
+| F1 | High | **Fixed.** The drain's poll sleep was `time.After(OwnerPoll)` uncapped by the deadline, and nothing validated `OwnerPoll` vs `OwnerWait`. An `OwnerPoll` ≥ `VisibilityTimeout` (misconfig) would hold a message past its lease → duplicate publish, defeating the very invariant W2 protects. Confirmed empirically (held 1.0s vs a 10ms bound). Fix: cap each sleep to `time.Until(deadline)`, so the drain can never exceed `OwnerWait` regardless of `OwnerPoll`; plus a negative-`OwnerPoll` config rejection. Regression test `TestDrain_PollLongerThanWait_DoesNotOvershoot`. |
+| F2 | Medium | **Open.** Each drain pass re-runs full `Assemble` (R2 massif + checkpoint + grant + owner `logState`) per deferred group; a burst of N children of one cold owner is O(N × passes) redundant reads that all share one owner-anchored fact. Remedy = the event-driven waiter-map (§3.2) or a per-pass owner-`logState` cache. Rarity-mitigated (the common case is one child). |
+| F3 | Medium | **Open.** `processBatch` is synchronous in the poll loop, so the drain stalls new pulls for up to `OwnerWait`. Small post-Phase-1 (owners publish in ~2–4s) but adversarial child-before-owner arrival could stall throughput. Remedy = background the drain, or a shorter default `OwnerWait`, once profiled. |
+| F4 | Low | **Accepted.** W2's bound ignores pre-drain assembly latency (~1–2s); the default 10s margin (20+60 vs 90) absorbs it. Documented here. |
+| F5 | Low | **Accepted.** A transient `Assemble` error mid-drain drops the group out of the drain into full-timeout redelivery — forfeits the fast path, no correctness loss. |
+| F6 | Low | **Accepted / feeds 5a.** `PublishDuration` no longer includes the owner-wait for deferred groups (arguably more correct). The attempt/duration observability lands properly in 5a. |

@@ -363,11 +363,24 @@ func (q *QueueConsumer) drainDeferred(ctx context.Context, deferred []deferredGr
 	deadline := time.Now().Add(q.cfg.OwnerWait)
 
 	for len(deferred) > 0 {
+		// Cap the sleep to the remaining budget so a poll interval longer than
+		// OwnerWait (or than the time left) can never hold the message past
+		// OwnerWait — holding it past its lease would let the queue redeliver it
+		// while we still have it in flight, duplicating the publish (the same
+		// hazard as VISIBILITY_TIMEOUT > RECEIPT_TIMEOUT).
+		wait := poll
+		if rem := time.Until(deadline); rem < wait {
+			wait = rem
+		}
+		if wait <= 0 {
+			q.releaseDeferred(ctx, deferred)
+			return
+		}
 		select {
 		case <-ctx.Done():
 			q.releaseDeferred(ctx, deferred)
 			return
-		case <-time.After(poll):
+		case <-time.After(wait):
 		}
 
 		var (

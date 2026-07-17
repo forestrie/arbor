@@ -330,6 +330,9 @@ func (c Config) Validate() error {
 	if c.OwnerWait < 0 {
 		return fmt.Errorf("PUBLISHER_OWNER_WAIT (%s) must not be negative", c.OwnerWait)
 	}
+	if c.OwnerPoll < 0 {
+		return fmt.Errorf("PUBLISHER_OWNER_POLL (%s) must not be negative", c.OwnerPoll)
+	}
 	if c.OwnerWait > 0 && c.OwnerWait+c.ReceiptTimeout >= c.VisibilityTimeout {
 		return fmt.Errorf(
 			"PUBLISHER_OWNER_WAIT (%s) + PUBLISHER_RECEIPT_TIMEOUT (%s) must be less than VISIBILITY_TIMEOUT (%s)",
