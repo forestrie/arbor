@@ -1,14 +1,21 @@
-# Plan 2607-06 — publisher: bounded in-delivery wait for owner_not_anchored
+# Plan 2607-06 — publisher: dependency-blocked checkpoints (latency + durability)
 
 **Status:** DRAFT
-**Date:** 2026-07-17
-**Related:** [FOR-395](https://linear.app/forestrie/issue/FOR-395) (this plan),
-[FOR-394](https://linear.app/forestrie/issue/FOR-394) (exhausted retries silently
-drop checkpoints — no DLQ; deferred, see §5),
-[FOR-393](https://linear.app/forestrie/issue/FOR-393) (the univocity lone-peak
-bug that surfaced this; fixed in univocity v0.1.8),
+**Date:** 2026-07-17 (rev 2 — expanded to fully deliver FOR-394 alongside FOR-395)
+**Related:** [FOR-395](https://linear.app/forestrie/issue/FOR-395) (latency —
+Phase 1), [FOR-394](https://linear.app/forestrie/issue/FOR-394) (silent drop —
+Phase 2), [FOR-393](https://linear.app/forestrie/issue/FOR-393) (the univocity
+lone-peak bug that surfaced both; fixed in univocity v0.1.8),
 [ADR-0008](https://github.com/forestrie/arbor/blob/main/docs/adr/adr-0008-publisher-catchup.md)
-(catch-up), `forest-1/infra/publisher-queue.tf` (queue settings).
+(catch-up), prior [arbor#69](https://github.com/forestrie/arbor/pull/69) (this
+plan, rev 1 — Phase 1 scope only), `forest-1/infra/publisher-queue.tf`.
+
+> **rev 2 scope.** rev 1 delivered Phase 1 (FOR-395) and *deferred* FOR-394.
+> This revision folds FOR-394 back in as **Phase 2** so the plan fully delivers
+> both. The two are one problem surface — "what happens to a checkpoint blocked
+> on its owner" — and they compose: Phase 1 removes the false positives (a child
+> that just lost a race), so that after it lands the only messages reaching the
+> retry cliff are genuine poison, which is exactly what Phase 2 must capture.
 
 ## 1. Problem
 
@@ -80,119 +87,242 @@ SequencingQueue DO in canopy `forestrie-ingress` (which does have `deadLetters`
 in `QueueStats` and is consumed by ranger). Queue semantics here are the
 vendor's; prefer designs that do not depend on them.
 
-## 3. Approach: bounded in-delivery wait
+**C5 — the pipeline shape decides where the fix can live** (established by
+reading `consumer.go:200-224` + `batchsubmit.go:36-53`, not assumed). Per pull
+cycle the publisher:
 
-Treat `owner_not_anchored` as a **dependency wait**, not a release. On that
-status, poll the owner's `logState` until it anchors or a bound elapses, then
-re-run the attempt once.
+1. **assembles all log-groups concurrently** — one goroutine per log,
+   `wg.Wait()`. The `owner_not_anchored` decision is made *here*, in the read
+   phase (`Assemble` returns `ready=false`, `Status=owner_not_anchored`);
+2. **submits the ready ones only after `wg.Wait()`** — `SubmitBatch(ready)`
+   runs once *all* assembly (including any child) has finished;
+3. **resolves receipts asynchronously** via a persistent per-chain collector
+   that fires each `Ack` later.
+
+Consequence: for a **co-batched** owner+child, the owner's tx is not even
+submitted until after the child has been assembled, and does not anchor until it
+mines after that. So at the moment the child is assessed, the owner is
+*structurally* un-anchored, regardless of assembly order.
+
+## 3. Approach: bounded post-submit drain
+
+The rev-1 framing ("poll the owner's `logState` inside the publish/assemble
+path, then retry once") is **wrong for this pipeline** (C5): a child that polls
+inside its own assemble goroutine holds up `wg.Wait()`, which delays the
+*owner's own submission* — self-defeating. And topological ordering of assembly
+(owner-group before child-group) is **ineffective**: assembly order does not
+change *when* the owner anchors, because nothing is submitted during assembly.
+
+The mechanism that fits: after `SubmitBatch`, collect the groups that returned
+`owner_not_anchored` and **re-assemble them in a bounded loop**, reading fresh
+on-chain `logState` each pass, until they clear or a time bound elapses; then
+release the stragglers to redeliver.
+
+```text
+blocked := groups that assembled to owner_not_anchored   // deferred, NOT released
+SubmitBatch(ready)                                        // owners now submitted, mining
+deadline := now + OwnerWait
+for len(blocked) > 0 && now < deadline:
+    sleep(OwnerPoll)
+    reReady, stillBlocked := reassemble(blocked)          // fresh logState read per group
+    if reReady: SubmitBatch(reReady)
+    blocked = stillBlocked
+release(blocked)                                          // finishGroup(owner_not_anchored) → redeliver
+```
 
 Why this shape:
 
-- **Consumes zero extra attempts** — one delivery covers the whole wait, so the
-  finite budget from C1 is untouched. This is the decisive advantage over any
-  nack-based scheme.
-- **No vendor-semantics dependency** (C2, C4): no `delay_seconds`, no nack.
-- **Subsumes topological batch ordering.** Ordering a batch owner-before-child
-  would require resolving each message's owner up front (an R2 grant read per
-  message) purely to sort. The same effect falls out for free: by the time the
-  rest of the pulled batch is processed the owner has published, so the
-  in-delivery retry succeeds. No sort, no pre-resolution.
+- **Handles the co-batched case** (the observed failure): the owner's tx —
+  submitted in *this* cycle — mines during the drain, and the child's
+  re-assembly catches it. ~2–4s, not 91s.
+- **Handles the cross-batch case for free**: a child whose owner anchored in a
+  *prior* cycle succeeds on its **first** assemble; it never enters the drain.
+- **Consumes zero retry budget** (C1): nothing is released until the bound, so
+  the finite ~31-min tolerance is untouched.
+- **No vendor-semantics dependency** (C2, C4): no `delay_seconds`, no nack; the
+  owner-anchored signal is a chain `logState` read, which is authoritative
+  regardless of our own collector.
+- **Subsumes topological ordering** — it discovers the dependency by convergence
+  (loop-until-dry) rather than pre-sorting, so no per-message owner
+  pre-resolution/grant read is needed just to order the batch.
+- **Loop *around* the pipeline, not surgery inside it** — the single-writer
+  nonce counter, concurrent assembly, and async collector are untouched.
 
-### 3.1 Rejected alternatives
+### 3.1 Why not topological ordering (the question that prompted rev 2)
+
+Ordering the batch owner-before-child is the right *goal* but the wrong
+*mechanism* here (C5). To make ordering actually gate a child on its owner you
+would have to serialise assemble→submit→**mine** owner before assembling the
+child — which destroys the concurrent-assemble / batch-submit / async-receipt
+design built for throughput (100 statements → one checkpoint, fast). The drain
+achieves the same goal (owner resolves before child) without touching that
+design, and additionally covers the cross-batch case that ordering-within-a-batch
+cannot. Ordering is therefore **neither necessary nor complementary** — the
+drain is its correct realisation.
+
+### 3.2 Rejected alternatives
 
 | Option | Why not |
 |--------|---------|
+| Poll inside `assembleGroup` (rev-1) | C5 — a child polling in-assemble delays `wg.Wait()` and thus the owner's own submission; self-defeating for the co-batched case. |
+| Topological batch ordering | §3.1 — assembly order does not change when the owner anchors; would need to serialise submit+mine, destroying the throughput pipeline. |
 | Lower `VISIBILITY_TIMEOUT` | C3 — duplicates in-flight publishes; violates an enforced invariant. |
 | Flat short nack | C2 — burns the budget in ~40s, drops sooner than today. |
-| Exponential nack ladder | Safe but unverified (`delay_seconds`, C2) and buys little once §3 lands — the only messages still reaching redelivery are ones where 90s is acceptable. Revisit only if cross-batch waits prove common. |
-| Event-driven waiter map (re-drive children when their owner publishes) | Strictly better in theory (zero polling), but needs cross-replica coordination. §3 captures nearly all the benefit for a fraction of the risk. Revisit if profiling shows the poll cost matters. |
+| Exponential nack ladder | Safe but depends on unverified `delay_seconds` (C2) and consumes the attempt budget; the drain gives the same latency without either cost. |
+| Event-driven waiter map (re-drive children when their owner publishes) | Strictly better in theory (zero polling) but needs cross-replica coordination. The drain captures nearly all the benefit for a fraction of the risk; revisit if profiling shows the poll cost matters. |
 
-## 4. Work items
+## 4. Phase 1 — latency: the bounded drain (FOR-395)
 
 ### W1 — config (`services/publisher/src/config.go`)
 
-Add:
+- `PUBLISHER_OWNER_WAIT` (default **20s**) — max drain duration per pull cycle.
+- `PUBLISHER_OWNER_POLL` (default **2s**) — re-assembly interval.
 
-- `PUBLISHER_OWNER_WAIT` (default **15s**) — max in-delivery wait for the owner.
-- `PUBLISHER_OWNER_POLL` (default **1s**) — `logState` poll interval.
-
-Do **not** reuse `PUBLISHER_RECEIPT_TIMEOUT`. It bounds *tx-receipt* waiting and
-is load-bearing for the C3 invariant; overloading it means raising a dependency
-bound silently changes tx semantics and can break `VISIBILITY_TIMEOUT >
-PUBLISHER_RECEIPT_TIMEOUT`.
-
-Sizing the default: one link is ~20s measured (seal 2.6s + poll ≤5s + mine
-~2–4s), worst case bounded by `PUBLISHER_RECEIPT_TIMEOUT`=60s. The overwhelming
-case is the ~1s race, so 15s is generous for the fast path; deeper/cold chains
-fall through to redelivery, which is what the budget is for. Do not size the
-fast path for a cold multi-level chain.
+Do **not** reuse `PUBLISHER_RECEIPT_TIMEOUT`; it bounds *tx-receipt* waiting and
+is load-bearing for C3. Sizing (your 2× rule): a co-batched owner's tx mines in
+~2–4s after this cycle's `SubmitBatch`, so ~20s covers the common case plus a
+couple of chained levels; deeper cold chains fall through to redelivery, which
+is what the budget (C1) is for. Do not size the fast path for a fully-cold chain.
 
 ### W2 — validation (`config.go`, beside the existing check at :308)
 
 Enforce `OwnerWait + ReceiptTimeout < VisibilityTimeout`, mirroring the existing
-rule and failing fast on misconfiguration.
+rule. **The** safety constraint (C3): hold a message past its lease and it is
+redelivered mid-flight, duplicating the publish. Defaults: 20 + 60 = 80 < 90 ✓.
 
-This is **the** safety constraint: hold a message past its lease and it is
-redelivered while still in flight, duplicating the publish. Defaults:
-15 + 60 = 75 < 90 ✓.
+### W3 — the drain (`services/publisher/src/consumer/consumer.go`)
 
-### W3 — publish path (`services/publisher/src/publish.go`)
+In `processQueueMessages`, after `SubmitBatch(ready)`:
 
-On `StatusOwnerNotAnchored`, poll the owner's on-chain `logState` every
-`OwnerPoll` until anchored or `OwnerWait` elapses; if it anchors, re-run the
-attempt once. If the bound elapses, return `StatusOwnerNotAnchored` unchanged —
-today's release-and-redeliver behaviour is preserved as the slow path.
+1. Refactor `assembleGroup` so an `owner_not_anchored` group is **returned as
+   deferred**, not settled in place (today it calls `finishGroup` at
+   consumer.go:276). The caller decides: ready → submit; deferred → drain;
+   other terminal (already-anchored / reverted / chain-not-configured) →
+   settle now, as today.
+2. Drain loop: while deferred groups remain and `OwnerWait` not elapsed, sleep
+   `OwnerPoll`, re-assemble each deferred group (fresh `logState` read),
+   `SubmitBatch` any that became ready, keep the rest.
+3. On timeout, `finishGroup(owner_not_anchored)` the stragglers — today's
+   release-and-redeliver path, preserved as the slow tail.
 
-Bound the extra chain reads: one `logState` per poll (cheap `eth_call`), only
-for the rare dependent-child case.
+The drain reads on-chain `logState` (cheap `eth_call`); it does **not** couple
+to the async receipt collector — the owner anchoring is observable directly on
+chain whether it was submitted by this cycle or a prior one (C5). Nothing in the
+single-writer nonce / concurrent-assemble / collector machinery changes.
 
-### W4 — observability (`consumer/consumer.go`, `metrics`)
+Concurrency note: the deferred set is built after `wg.Wait()` (assembly done),
+so the drain is single-goroutine over a fixed slice — no new shared-state races.
+
+### W4 — tests (`services/publisher`)
+
+- co-batched owner+child in one pull → child publishes within the drain, no
+  redelivery (the regression: this is the observed 91s case);
+- cross-batch child whose owner is already anchored → publishes on first
+  assemble, never enters the drain;
+- owner never anchors → still `owner_not_anchored` after the bound, released,
+  today's path preserved;
+- `OwnerWait + ReceiptTimeout >= VisibilityTimeout` → config rejected (W2).
+
+Use the existing in-memory seams (`MassifReaderFactory`,
+`publishproof.ObjectGetter`) and a fake chain reader that flips the owner's
+`logState` to anchored after N polls — no network.
+
+**Phase 1 acceptance:** the measured 91s becomes ~2–4s on lane-A for the
+co-batched case; retry-budget consumption unchanged (a still-blocked child uses
+one delivery per `VISIBILITY_TIMEOUT`, not more); `go test ./...` green.
+
+## 5. Phase 2 — durability: never drop silently (FOR-394)
+
+Phase 1 removes the *false positives* from the retry cliff (a child that merely
+lost a race now clears in the drain). What is left reaching exhaustion after
+Phase 1 is **genuine poison** — an owner that never anchors (e.g. a terminally
+reverted owner, or a malformed checkpoint). That is exactly what must not vanish.
+
+Delivered in two independently-shippable slices, cheapest-first:
+
+### 5a — observability (arbor Go; ~1–2h; do first, standalone value)
 
 `QueueMessage.Attempts` is parsed (`consumer/dto.go:10`) and **never read**.
-Log it and export it; alert at ≥15 of 20. This is the tripwire whose absence
-made FOR-394's drop invisible.
 
-### W5 — tests (`services/publisher`)
+- Export a Prometheus metric for delivery attempts (the metrics layer is
+  `prometheus/client_golang` at `/metrics`, `src/metrics/metrics.go`), e.g. a
+  `publisher_message_attempts` histogram plus a `publisher_near_exhaustion_total`
+  counter incremented when `Attempts >= threshold` (default 15 of 20).
+- `WARN` log with logId + key + attempts at the same threshold.
 
-- owner anchors mid-wait → published within a single delivery (no redelivery);
-- owner never anchors → still `owner_not_anchored` after the bound, message
-  released, today's path preserved;
-- `OwnerWait + ReceiptTimeout >= VisibilityTimeout` → config rejected (W2);
-- attempts surfaced in logs/metrics (W4).
+This converts a silent drop into an **alertable** event with zero Cloudflare
+work — it closes the "silent" in "silently drops" on its own. Alert rule:
+`publisher_near_exhaustion_total` increase > 0.
 
-Follow the existing in-memory seams (`MassifReaderFactory`,
-`publishproof.ObjectGetter`) — no new network in tests.
+### 5b — durable capture (choose one mechanism; ~half a day)
 
-## 5. Scope decision: FOR-394 (DLQ) is NOT in this plan
+So the checkpoint is not just *alerted* but *recoverable*:
 
-Deferred deliberately. The demo is the near-term focus and an alert does not
-make the demo pass; after univocity v0.1.8 the demo path cannot reach the cliff
-(the owner anchors within one delivery, not 21).
+**Option A — native Cloudflare DLQ (recommended for standard tooling).** Add a
+`cloudflare_queue` DLQ (per slot) in `forest-1/infra/publisher-queue.tf` and set
+`dead_letter_queue` on the publisher consumer. On exhaustion Cloudflare moves the
+message to the DLQ instead of dropping. **Blockers to verify first:** (i) does
+the `http_pull` consumer support `dead_letter_queue` on provider `~> 5.5.0`?
+(unverified — the pull-consumer schema differs from push); (ii) `publisher-queue.tf:47-52`
+`lifecycle { ignore_changes = [settings, type] }` plus the provider-5.4x
+consumer_id bug mean a settings edit will **not** apply to the existing consumer
+— apply out-of-band, mirroring the existing `cloudflare:ensure-r2-notifications-publisher`
+task (`forest-1/taskfiles/cloudflare.yml:565`), which already PUTs queue
+config via the API for exactly this reason. Then alert on DLQ depth
+(`message_backlog_count` is already in the pull response) and provide an
+operator replay path (re-enqueue once the owner is unstuck).
 
-It is filed rather than folded in because it is a *correctness* hole with a
-confirmed production occurrence, and it is cheap when picked up (~half a day):
-a `cloudflare_queue` DLQ resource + `dead_letter_queue` in the consumer
-settings, plus a backlog alert (`message_backlog_count` is already in the pull
-response). Note the wrinkle at `publisher-queue.tf:47-52`:
-`lifecycle { ignore_changes = [settings, type] }` means settings changes will
-not apply to the existing consumer — it needs a recreate or a direct API call
-(pattern exists at `taskfiles/service-ranger.yml:107`). This is Cloudflare
-config, **not** bespoke queue work (C4).
+**Option B — app-level dead-letter record (no vendor dependency).** When
+`Attempts >= threshold`, before releasing, the publisher writes
+`{key, logId, owner, attempts, last reason}` to a durable R2 prefix
+(`publisher-deadletter/`) and emits the alert, then lets natural exhaustion
+proceed. Replay = re-emit the R2 notification from the record. Fully testable in
+Go; sidesteps every Cloudflare-provider issue in Option A; the cost is
+re-implementing capture/replay we would otherwise get from the queue.
 
-## 6. Acceptance
+**Recommendation:** verify Option A's blocker (i) first (one API probe). If the
+pull consumer supports a DLQ, take A — standard tooling, no app code. If not,
+take B. Do **not** block 5a on this choice; 5a ships independently and delivers
+most of the value (loud instead of silent).
 
-- The measured 91s dependency wait becomes ~1–2s on lane-A for the
-  owner-published-moments-later case.
-- No change to retry budget consumption: a child that waits still uses one
-  delivery per `VISIBILITY_TIMEOUT`, not more.
-- `go test ./...` green in `services/publisher`.
-- Config rejects a misconfigured `OwnerWait` (W2) rather than silently risking
-  duplicate publishes.
+**Phase 2 acceptance:** a checkpoint that exhausts retries produces a metric +
+alert (5a) and is captured for replay, not dropped (5b); a synthetic
+never-anchoring owner is observed to land in the DLQ / dead-letter record in a
+test or a controlled lane-B run.
+
+## 6. Delivery & sequencing
+
+| Slice | Repo | Depends on | Ship |
+|-------|------|-----------|------|
+| Phase 1 (W1–W4) | arbor | — | first; fixes the latency, and makes the Phase-2 cliff genuine-poison-only |
+| 5a observability | arbor | — | independent; can land with or before Phase 1 |
+| 5b durable capture | forest-1 (A) or arbor (B) | 5a (shares the threshold) | after the A/B probe |
+
+Phase 1 and 5a are pure arbor Go and can share one PR or land separately. 5b is
+a follow-up once the mechanism is chosen.
 
 ## 7. Effort / risk
 
-**~half a day.** One Go service; `config.go` + `publish.go` + tests, plus a
-small observability change. **Risk: low.** The only new failure mode is
-worker-slot occupancy while waiting, bounded by `OwnerWait` and confined to the
-dependent-child case; the queue contract, verification, and publish idempotency
-are all unchanged.
+- **Phase 1:** ~half to one day. `config.go` + a drain loop in `consumer.go` +
+  a small `assembleGroup` refactor + tests. **Risk: low–moderate** — it touches
+  the pull-cycle control flow, but as a loop *around* the existing concurrent
+  assembly/submit, not inside it; the nonce single-writer invariant, collector,
+  and publish idempotency are untouched. New failure mode: worker-cycle
+  occupancy during the drain, bounded by `OwnerWait`.
+- **5a:** ~1–2h, pure additive metric/log. **Risk: negligible.**
+- **5b:** ~half a day either option; **Risk: low** (A gated on the provider
+  probe; B is plain Go).
+
+## 8. Phase-1 self-review (2026-07-17)
+
+Reviewed the Phase-1 implementation (distributed-systems / correctness lens).
+One defect fixed pre-merge; the rest are prioritised follow-ups.
+
+| ID | Sev | Disposition |
+|----|-----|-------------|
+| F1 | High | **Fixed.** The drain's poll sleep was `time.After(OwnerPoll)` uncapped by the deadline, and nothing validated `OwnerPoll` vs `OwnerWait`. An `OwnerPoll` ≥ `VisibilityTimeout` (misconfig) would hold a message past its lease → duplicate publish, defeating the very invariant W2 protects. Confirmed empirically (held 1.0s vs a 10ms bound). Fix: cap each sleep to `time.Until(deadline)`, so the drain can never exceed `OwnerWait` regardless of `OwnerPoll`; plus a negative-`OwnerPoll` config rejection. Regression test `TestDrain_PollLongerThanWait_DoesNotOvershoot`. |
+| F2 | Medium | **Open.** Each drain pass re-runs full `Assemble` (R2 massif + checkpoint + grant + owner `logState`) per deferred group; a burst of N children of one cold owner is O(N × passes) redundant reads that all share one owner-anchored fact. Remedy = the event-driven waiter-map (§3.2) or a per-pass owner-`logState` cache. Rarity-mitigated (the common case is one child). |
+| F3 | Medium | **Open.** `processBatch` is synchronous in the poll loop, so the drain stalls new pulls for up to `OwnerWait`. Small post-Phase-1 (owners publish in ~2–4s) but adversarial child-before-owner arrival could stall throughput. Remedy = background the drain, or a shorter default `OwnerWait`, once profiled. |
+| F4 | Low | **Accepted.** W2's bound ignores pre-drain assembly latency (~1–2s); the default 10s margin (20+60 vs 90) absorbs it. Documented here. |
+| F5 | Low | **Accepted.** A transient `Assemble` error mid-drain drops the group out of the drain into full-timeout redelivery — forfeits the fast path, no correctness loss. |
+| F6 | Low | **Accepted / feeds 5a.** `PublishDuration` no longer includes the owner-wait for deferred groups (arguably more correct). The attempt/duration observability lands properly in 5a. |

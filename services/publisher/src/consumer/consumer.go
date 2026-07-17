@@ -21,17 +21,29 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+
 	"github.com/forestrie/arbor/services/pkgs/logredact"
 	"github.com/forestrie/arbor/services/publisher"
 	"github.com/forestrie/arbor/services/publisher/metrics"
 )
+
+// publishCore is the subset of *publisher.Publisher the consumer drives. It is
+// an interface so the drain (assemble → submit) can be tested with a fake that
+// flips owner_not_anchored to ready after N polls. *publisher.Publisher
+// satisfies it.
+type publishCore interface {
+	From() common.Address
+	Assemble(ctx context.Context, key string) (calldata []byte, res publisher.PublishResult, ready bool, err error)
+	SubmitBatch(ctx context.Context, reqs []publisher.AssembledPublish)
+}
 
 // QueueConsumer coordinates Cloudflare Queue message consumption for the publisher.
 type QueueConsumer struct {
 	cfg        publisher.Config
 	httpClient *publisher.HTTPClient
 	logger     *slog.Logger
-	pub        *publisher.Publisher
+	pub        publishCore
 	metrics    *metrics.Metrics
 }
 
@@ -200,20 +212,25 @@ func (q *QueueConsumer) processBatch(ctx context.Context, msgs []QueueMessage) {
 	groups := q.coalesce(ctx, msgs)
 
 	var (
-		wg    sync.WaitGroup
-		mu    sync.Mutex
-		ready []publisher.AssembledPublish
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		ready    []publisher.AssembledPublish
+		deferred []deferredGroup
 	)
 	for _, g := range groups {
 		g := g
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if req, ok := q.assembleGroup(ctx, g); ok {
-				mu.Lock()
+			req, st, res := q.assembleGroup(ctx, g)
+			mu.Lock()
+			switch st {
+			case assembleReady:
 				ready = append(ready, req)
-				mu.Unlock()
+			case assembleDeferred:
+				deferred = append(deferred, deferredGroup{g: g, res: res})
 			}
+			mu.Unlock()
 		}()
 	}
 	wg.Wait()
@@ -222,6 +239,13 @@ func (q *QueueConsumer) processBatch(ctx context.Context, msgs []QueueMessage) {
 		// Returns once sends are admitted; acks fire async from the collector.
 		q.pub.SubmitBatch(ctx, ready)
 	}
+
+	// Drain owner_not_anchored groups: their owner (authority log) may have just
+	// been submitted by this cycle — or a prior one — and anchors within a few
+	// seconds. Re-assemble against fresh on-chain logState until they clear or
+	// OwnerWait elapses, rather than releasing straight to a full
+	// visibility-timeout redelivery (FOR-395, plan-2607-06).
+	q.drainDeferred(ctx, deferred)
 }
 
 // coalesce groups the batch by logId, keeping the highest massifIndex per log as
@@ -260,21 +284,49 @@ func (q *QueueConsumer) coalesce(ctx context.Context, msgs []QueueMessage) []log
 	return out
 }
 
-// assembleGroup runs the read phase for a log's primary. It returns a
-// ready-to-send AssembledPublish (ok=true) whose Ack finalises the primary and
-// its subsumed siblings when the receipt resolves; otherwise it settles here.
-func (q *QueueConsumer) assembleGroup(ctx context.Context, g logGroup) (publisher.AssembledPublish, bool) {
+// assembleState routes a group after its read phase.
+type assembleState int
+
+const (
+	// assembleDone: no further action this cycle — either settled here
+	// (acked/released terminal outcome) or left unacked on an infra error to
+	// redeliver.
+	assembleDone assembleState = iota
+	// assembleReady: calldata is set; submit it.
+	assembleReady
+	// assembleDeferred: owner_not_anchored — hold for the drain, do NOT settle.
+	assembleDeferred
+)
+
+// deferredGroup is an owner_not_anchored group held by the drain, carrying the
+// last PublishResult so it can be released with the correct status on timeout.
+type deferredGroup struct {
+	g   logGroup
+	res publisher.PublishResult
+}
+
+// assembleGroup runs the read phase for a log's primary. A ready group returns
+// an AssembledPublish whose Ack finalises the primary and its subsumed siblings
+// when the receipt resolves. An owner_not_anchored group is returned deferred
+// (NOT settled) so the drain can re-assemble it; every other non-ready outcome
+// is settled here, as before.
+func (q *QueueConsumer) assembleGroup(ctx context.Context, g logGroup) (publisher.AssembledPublish, assembleState, publisher.PublishResult) {
 	start := time.Now()
 	calldata, res, ready, err := q.pub.Assemble(ctx, g.key)
 	if err != nil {
 		q.metrics.ObservePublishDuration(time.Since(start).Seconds())
 		q.logger.Warn("assemble failed", "messageID", g.primary.ID, "key", g.key, "error", err)
-		return publisher.AssembledPublish{}, false // leave primary + siblings unacked
+		return publisher.AssembledPublish{}, assembleDone, res // leave primary + siblings unacked
 	}
 	if !ready {
+		if res.Status == publisher.StatusOwnerNotAnchored {
+			// Hold for the drain; do not settle. The drain re-assembles it to
+			// ready once the owner anchors, or releases it on timeout.
+			return publisher.AssembledPublish{}, assembleDeferred, res
+		}
 		q.metrics.ObservePublishDuration(time.Since(start).Seconds())
 		q.finishGroup(ctx, g, res)
-		return publisher.AssembledPublish{}, false
+		return publisher.AssembledPublish{}, assembleDone, res
 	}
 	return publisher.AssembledPublish{
 		ChainID:    res.ChainID,
@@ -286,7 +338,87 @@ func (q *QueueConsumer) assembleGroup(ctx context.Context, g logGroup) (publishe
 			q.metrics.ObservePublishDuration(time.Since(start).Seconds())
 			q.finishGroup(ctx, g, publisher.FinalizeResult(res, sub))
 		},
-	}, true
+	}, assembleReady, res
+}
+
+// drainDeferred re-assembles owner_not_anchored groups against fresh on-chain
+// logState until they clear or OwnerWait elapses, submitting any that become
+// ready. Stragglers are released (finishGroup with owner_not_anchored) for
+// redelivery — the pre-FOR-395 slow path. OwnerWait == 0 disables the drain
+// (release immediately). The drain reads chain state directly, so it needs no
+// coupling to the async receipt collector: an owner submitted by this cycle (or
+// a prior one) becomes visible in logState once it mines (plan-2607-06 C5).
+func (q *QueueConsumer) drainDeferred(ctx context.Context, deferred []deferredGroup) {
+	if len(deferred) == 0 {
+		return
+	}
+	if q.cfg.OwnerWait <= 0 {
+		q.releaseDeferred(ctx, deferred)
+		return
+	}
+	poll := q.cfg.OwnerPoll
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+	deadline := time.Now().Add(q.cfg.OwnerWait)
+
+	for len(deferred) > 0 {
+		// Cap the sleep to the remaining budget so a poll interval longer than
+		// OwnerWait (or than the time left) can never hold the message past
+		// OwnerWait — holding it past its lease would let the queue redeliver it
+		// while we still have it in flight, duplicating the publish (the same
+		// hazard as VISIBILITY_TIMEOUT > RECEIPT_TIMEOUT).
+		wait := poll
+		if rem := time.Until(deadline); rem < wait {
+			wait = rem
+		}
+		if wait <= 0 {
+			q.releaseDeferred(ctx, deferred)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			q.releaseDeferred(ctx, deferred)
+			return
+		case <-time.After(wait):
+		}
+
+		var (
+			ready []publisher.AssembledPublish
+			still []deferredGroup
+		)
+		for _, dg := range deferred {
+			req, st, res := q.assembleGroup(ctx, dg.g)
+			switch st {
+			case assembleReady:
+				ready = append(ready, req)
+			case assembleDeferred:
+				still = append(still, deferredGroup{g: dg.g, res: res})
+				// assembleDone: settled inside assembleGroup (now already-anchored,
+				// or a revert) — nothing more to do.
+			}
+		}
+		if len(ready) > 0 {
+			q.pub.SubmitBatch(ctx, ready)
+		}
+		deferred = still
+		if len(deferred) == 0 {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			q.releaseDeferred(ctx, deferred)
+			return
+		}
+	}
+}
+
+// releaseDeferred hands each still-blocked group back for redelivery, recording
+// the owner_not_anchored outcome. finishGroup does not ack that status, so the
+// message redelivers on lease expiry — identical to the pre-drain behaviour.
+func (q *QueueConsumer) releaseDeferred(ctx context.Context, deferred []deferredGroup) {
+	for _, dg := range deferred {
+		q.finishGroup(ctx, dg.g, dg.res)
+	}
 }
 
 // finishGroup settles a log's primary and, only when the primary actually
