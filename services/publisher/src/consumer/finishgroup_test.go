@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/forestrie/arbor/services/publisher"
 	"github.com/forestrie/arbor/services/publisher/metrics"
@@ -66,6 +67,32 @@ func group() logGroup {
 		primary:  QueueMessage{ID: "p", LeaseID: "lease-p"},
 		key:      ckKey("70717273-7475-4677-a879-7a7b7c7d7e7f", 2),
 		siblings: []QueueMessage{{ID: "s0", LeaseID: "lease-s0"}, {ID: "s1", LeaseID: "lease-s1"}},
+	}
+}
+
+// TestFinishGroupOwnerGatedRedeliversWithoutResync: with the sweep disabled
+// (ResyncInterval 0), owner_not_anchored keeps the pre-plan-2607-07 contract —
+// nothing acked, redelivery reconciles.
+func TestFinishGroupOwnerGatedRedeliversWithoutResync(t *testing.T) {
+	q, acked := ackRecorder(t)
+	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusOwnerNotAnchored})
+	if got := acked(); len(got) != 0 {
+		t.Fatalf("acked %v, want none (redelivery owns reconciliation when resync is off)", got)
+	}
+}
+
+// TestFinishGroupOwnerGatedAcksUnderResync: with RESYNC_INTERVAL set the sweep
+// owns reconciliation, so an owner-gated primary and its subsumed siblings are
+// acked instead of marching to the retry cliff (plan-2607-07 R2 / FOR-408).
+func TestFinishGroupOwnerGatedAcksUnderResync(t *testing.T) {
+	q, acked := ackRecorder(t)
+	q.cfg.ResyncInterval = time.Minute
+	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusOwnerNotAnchored})
+	got := acked()
+	for _, lease := range []string{"lease-p", "lease-s0", "lease-s1"} {
+		if !has(got, lease) {
+			t.Fatalf("acked %v, missing %s", got, lease)
+		}
 	}
 }
 

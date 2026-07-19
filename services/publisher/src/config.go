@@ -76,6 +76,18 @@ type Config struct {
 	OwnerWait time.Duration
 	OwnerPoll time.Duration
 
+	// ResyncInterval enables the notification-loss backstop (plan-2607-07): a
+	// periodic sweep that lists the checkpoints prefix and re-drives the
+	// one-shot publish for any seal not yet anchored, so a lost R2 event
+	// notification can never permanently strand a forest. Zero (the default)
+	// disables the sweep — rollout is inert until GitOps sets RESYNC_INTERVAL
+	// (the sealer's equivalent backstop defaults on; the publisher starts
+	// inert per plan-2607-07 §4). While enabled, owner_not_anchored messages
+	// are acked instead of redelivered to the retry cliff — the sweep is the
+	// reconciliation mechanism. ResyncPageSize bounds each list page.
+	ResyncInterval time.Duration
+	ResyncPageSize int
+
 	// Queue poll backoff tuning.
 	BackoffBase time.Duration
 	PollJitter  float64 // fraction of the sleep applied as ± jitter (e.g. 0.1)
@@ -213,6 +225,8 @@ func LoadConfig() Config {
 		ReceiptPollInterval:     getDuration("PUBLISHER_RECEIPT_POLL_INTERVAL", 200*time.Millisecond),
 		OwnerWait:               getDuration("PUBLISHER_OWNER_WAIT", 20*time.Second),
 		OwnerPoll:               getDuration("PUBLISHER_OWNER_POLL", 2*time.Second),
+		ResyncInterval:          getDuration("RESYNC_INTERVAL", 0),
+		ResyncPageSize:          getInt("RESYNC_PAGE_SIZE", 500),
 		BackoffBase:             getDuration("PUBLISHER_BACKOFF_BASE", 10*time.Millisecond),
 		PollJitter:              getFloat("PUBLISHER_POLL_JITTER", 0.1),
 		RPCURLs:                 rpcURLs,
@@ -285,6 +299,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "PUBLISHER_RECEIPT_TIMEOUT", c.ReceiptTimeout)
 	logConfigValue(logger, "PUBLISHER_OWNER_WAIT", c.OwnerWait)
 	logConfigValue(logger, "PUBLISHER_OWNER_POLL", c.OwnerPoll)
+	logConfigValue(logger, "RESYNC_INTERVAL", c.ResyncInterval)
+	logConfigValue(logger, "RESYNC_PAGE_SIZE", c.ResyncPageSize)
 	logConfigValue(logger, "PUBLISHER_RECEIPT_POLL_INTERVAL", c.ReceiptPollInterval)
 	logConfigValue(logger, "PUBLISHER_BACKOFF_BASE", c.BackoffBase)
 	logConfigValue(logger, "PUBLISHER_POLL_JITTER", fmt.Sprintf("%g", c.PollJitter))
