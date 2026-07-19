@@ -7,14 +7,20 @@ ARG BUILD_DATE=unknown
 
 RUN apk add --no-cache git ca-certificates tzdata
 
+# Workspace root (Docker build context is expected to be the services/ directory,
+# so the go.mod replace ../../pkgs/logredact resolves — plan-2607-08/FOR-409)
 WORKDIR /build
 
+# Copy shared packages used via replace directives
+COPY pkgs/logredact ./pkgs/logredact
+
 # Copy module files and download dependencies
-COPY src/go.mod src/go.sum* ./
+COPY scout/src/go.mod scout/src/go.sum* ./scout/src/
+WORKDIR /build/scout/src
 RUN go mod download
 
 # Copy application source
-COPY src/ ./
+COPY scout/src/ ./
 
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
@@ -32,7 +38,7 @@ RUN addgroup -g 1000 scout && \
 
 WORKDIR /app
 
-COPY --from=builder /build/scout /app/scout
+COPY --from=builder /build/scout/src/scout /app/scout
 
 RUN chown -R scout:scout /app
 

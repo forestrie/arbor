@@ -32,7 +32,8 @@ tasks:
           --build-arg COMMIT={{.COMMIT}} \
           --build-arg BUILD_DATE={{.BUILD_DATE}} \
           -t {{.IMAGE_URL}}/scout:{{.IMAGE_TAG}} \
-          ./services/scout
+          -f ./services/scout/Dockerfile \
+          ./services
         echo "Build complete: {{.IMAGE_URL}}/scout:{{.IMAGE_TAG}}"
 
   push:
