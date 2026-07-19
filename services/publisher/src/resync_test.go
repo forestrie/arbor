@@ -443,4 +443,10 @@ func TestSweepSubmissionBudgetBoundsBurst(t *testing.T) {
 	if stats.CapDeferred == 0 {
 		t.Fatalf("stats = %+v, want CapDeferred > 0", stats)
 	}
+	// Classification is free: every group is still assembled even once the
+	// submission budget is spent (budget-order refinement — a random-subset
+	// sweep starved gap pickup behind the poison backlog on lane-a).
+	if len(pub.assembles) != resyncMaxSubmitsPerSweep+5 {
+		t.Fatalf("assembled %d groups, want all %d", len(pub.assembles), resyncMaxSubmitsPerSweep+5)
+	}
 }
