@@ -443,7 +443,7 @@ func validateHTTPSURL(raw string) error {
 }
 
 func logSecretDigest(logger *slog.Logger, name, value string) {
-	logConfigValue(logger, name, logredact.StringSHA256Hex(value))
+	logConfigValue(logger, name, logredact.StringFingerprint(value))
 }
 
 func logConfigValue[T any](logger *slog.Logger, name string, value T) {
