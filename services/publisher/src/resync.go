@@ -190,13 +190,38 @@ type Resync struct {
 	// gates the consumer's owner-gated acks on it (W2).
 	lastGood atomic.Int64
 
-	// poison maps checkpoint key -> ETag proven unpublishable (mined revert
-	// or assemble-terminal). A poison seal is skipped on later sweeps until
-	// its object changes, so reverts are mined at most ONCE per seal content
-	// rather than re-mined every interval (first-rollout finding, FOR-408:
-	// 85 historical poison seals would otherwise re-revert every sweep).
-	// In-memory only: a restart re-mines each at most once more.
-	poison map[string]string
+	// poison maps checkpoint key -> the seal content (ETag) proven
+	// unpublishable (mined revert or assemble-terminal), with ageing: an
+	// entry is re-adjudicated on an exponential backoff (1h doubling, 24h
+	// cap) so a transiently-misassembled seal is not cemented forever
+	// (FOR-411), while genuine poison re-mines at most ~1/day. A content
+	// change (new ETag — e.g. a FOR-410 self-heal re-seal) clears the entry
+	// immediately. In-memory only: a restart re-mines each at most once.
+	poison map[string]*poisonEntry
+}
+
+// poisonEntry records one unpublishable seal content and its retry state.
+type poisonEntry struct {
+	etag  string
+	at    time.Time
+	tries int
+}
+
+const (
+	poisonRetryBase = time.Hour
+	poisonRetryMax  = 24 * time.Hour
+)
+
+// poisonBackoff is the wait before re-adjudicating a poison entry.
+func poisonBackoff(tries int) time.Duration {
+	d := poisonRetryBase
+	for i := 0; i < tries && d < poisonRetryMax; i++ {
+		d *= 2
+	}
+	if d > poisonRetryMax {
+		return poisonRetryMax
+	}
+	return d
 }
 
 // NewResync wires the sweep from config. The publish core is shared with the
@@ -229,7 +254,7 @@ func NewResync(cfg Config, pub *Publisher, doer s3.HTTPDoer, logger *slog.Logger
 		logger:   logger,
 		metrics:  m,
 		handoffs: handoffs,
-		poison:   make(map[string]string),
+		poison:   make(map[string]*poisonEntry),
 	}, nil
 }
 
@@ -420,9 +445,11 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 			return assembled{}, 0, true
 		}
 		// Poison cache: a seal proven unpublishable at this exact content is
-		// skipped without assembling or (worse) re-mining its revert; a
-		// changed ETag (re-seal) clears it for one fresh adjudication.
-		if etag, known := r.poison[key]; known && etag == ref.etag {
+		// skipped without assembling or (worse) re-mining its revert. A
+		// changed ETag (re-seal) or an elapsed backoff (FOR-411 ageing)
+		// clears it for one fresh adjudication.
+		if e, known := r.poison[key]; known && e.etag == ref.etag &&
+			time.Since(e.at) < poisonBackoff(e.tries) {
 			stats.PoisonSkipped++
 			continue
 		}
@@ -450,7 +477,7 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 			// Terminal at assemble (poison-shaped): alert once, cache, and try
 			// the next lower massif of the same log.
 			stats.Unpublishable++
-			r.poison[key] = ref.etag
+			r.cachePoison(key, ref.etag)
 			r.logger.Error("unpublishable checkpoint skipped by resync sweep",
 				"key", key, "status", res.Status.String(), "reason", res.Reason)
 		}
@@ -463,10 +490,20 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 func (r *Resync) markPoison(g *logSeals, key string) {
 	for _, ref := range g.seals {
 		if ref.key == key {
-			r.poison[key] = ref.etag
+			r.cachePoison(key, ref.etag)
 			return
 		}
 	}
+}
+
+// cachePoison records (or re-arms with backoff) a poison entry.
+func (r *Resync) cachePoison(key, etag string) {
+	if e, ok := r.poison[key]; ok && e.etag == etag {
+		e.tries++
+		e.at = time.Now()
+		return
+	}
+	r.poison[key] = &poisonEntry{etag: etag, at: time.Now()}
 }
 
 // driveLowerMassifs synchronously drives g's remaining lower candidates after

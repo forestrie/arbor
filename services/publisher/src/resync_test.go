@@ -159,7 +159,7 @@ func newTestResync(pub sweepCore, lister objectLister, m ResyncMetrics, h *Owner
 	return &Resync{
 		pub: pub, lister: lister, interval: time.Minute, pageSize: 500,
 		logger: testLogger(), metrics: m, handoffs: h,
-		poison: make(map[string]string),
+		poison: make(map[string]*poisonEntry),
 	}
 }
 
@@ -448,5 +448,54 @@ func TestSweepSubmissionBudgetBoundsBurst(t *testing.T) {
 	// sweep starved gap pickup behind the poison backlog on lane-a).
 	if len(pub.assembles) != resyncMaxSubmitsPerSweep+5 {
 		t.Fatalf("assembled %d groups, want all %d", len(pub.assembles), resyncMaxSubmitsPerSweep+5)
+	}
+}
+
+// TestPoisonCacheAgeing (FOR-411): a poison entry past its backoff is
+// re-adjudicated (one fresh submission); a further revert re-arms it with an
+// incremented try count; a fresh entry stays skipped.
+func TestPoisonCacheAgeing(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {stepRevert, stepRevert, stepPublish},
+	})
+	lister := onePage(ckpt(robertLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if len(pub.submits) != 1 {
+		t.Fatalf("sweep 1 should mine the revert once; submits=%v", pub.submits)
+	}
+
+	// Fresh entry: skipped.
+	if s2, _ := r.SweepOnce(context.Background()); s2.PoisonSkipped != 1 || len(pub.submits) != 1 {
+		t.Fatalf("fresh poison must be skipped; stats=%+v submits=%v", s2, pub.submits)
+	}
+
+	// Age the entry past its backoff: re-adjudicated (reverts again, tries++).
+	r.poison[ckpt(robertLog, 0)].at = time.Now().Add(-2 * poisonRetryBase)
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if len(pub.submits) != 2 {
+		t.Fatalf("aged poison must be re-adjudicated; submits=%v", pub.submits)
+	}
+	if e := r.poison[ckpt(robertLog, 0)]; e.tries != 1 {
+		t.Fatalf("re-revert must increment tries; entry=%+v", e)
+	}
+
+	// Backoff doubles: not yet due at 1.5x base, due after 2x base elapses.
+	r.poison[ckpt(robertLog, 0)].at = time.Now().Add(-poisonRetryBase - poisonRetryBase/2)
+	if s5, _ := r.SweepOnce(context.Background()); s5.PoisonSkipped != 1 {
+		t.Fatalf("tries=1 entry within doubled backoff must skip; stats=%+v", s5)
+	}
+	r.poison[ckpt(robertLog, 0)].at = time.Now().Add(-3 * poisonRetryBase)
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 6: %v", err)
+	}
+	// Third adjudication publishes (transient revert resolved).
+	if len(pub.submits) != 3 {
+		t.Fatalf("expired doubled backoff must re-adjudicate; submits=%v", pub.submits)
 	}
 }
