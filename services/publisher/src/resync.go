@@ -314,10 +314,6 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 		// submittable, blocked, or the group is exhausted (W3 fallback for
 		// assemble-time terminal statuses).
 		for _, g := range pending {
-			if budget <= 0 {
-				stats.CapDeferred++
-				continue
-			}
 			req, outcome, done := r.assembleCandidate(ctx, g, &stats)
 			if ctx.Err() != nil {
 				return stats, ctx.Err()
@@ -327,6 +323,11 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 				// settled at assemble time (covered / errors / exhausted)
 			case outcome == StatusOwnerNotAnchored:
 				blocked = append(blocked, g)
+			case budget <= 0:
+				// Ready but over budget: classification still happened above
+				// (covered/poison progress is free); only the submission
+				// waits for the next sweep.
+				stats.CapDeferred++
 			default:
 				budget--
 				g := g
@@ -591,5 +592,8 @@ func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 		}
 		groups = append(groups, &logSeals{seals: seals})
 	}
+	// Deterministic order (map iteration is randomized): monotonic poison
+	// burn-down and gap pickup across sweeps rather than random subsets.
+	sort.Slice(groups, func(i, j int) bool { return groups[i].seals[0].key < groups[j].seals[0].key })
 	return groups, nil
 }
