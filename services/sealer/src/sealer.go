@@ -99,14 +99,21 @@ func CheckpointLog(
 		return fmt.Errorf("head massif index: %w", err)
 	}
 
-	// Determine the latest existing checkpoint (if any).
+	// Determine the latest existing checkpoint (if any). The head checkpoint
+	// decides only where sealing resumes and whether the head massif has
+	// grown since the last seal — it is NEVER the proof base. ADR-0056
+	// (FOR-410): every checkpoint's base is its massif's entry boundary, so
+	// replacing sth(a->b) with a seal at size c always yields sth(a->c) and
+	// each massif's final retained checkpoint is a boundary-to-boundary
+	// consistency link (the publisher's relay and offline chain verification
+	// depend on this; seal-to-seal chaining was the FOR-410 drift bug).
 	var startMassifIndex uint32 = 0
-	var baseState massifs.MMRState
+	var lastSealedSize uint64
+	hasCheckpoint := false
 	lastCheckpointIndex, err := store.HeadIndex(ctx, massifstorage.ObjectCheckpoint)
 	switch {
 	case errors.Is(err, massifstorage.ErrLogEmpty):
 		// Start from scratch.
-		baseState = massifs.MMRState{MMRSize: 0}
 	case err != nil:
 		return fmt.Errorf("head checkpoint index: %w", err)
 	default:
@@ -119,9 +126,9 @@ func CheckpointLog(
 			return fmt.Errorf("decode checkpoint %d: %w", lastCheckpointIndex, err)
 		}
 		startMassifIndex = lastCheckpointIndex
-		// v3 checkpoint: the sealed size is the proof's tree-size-2; base peaks
-		// are rehydrated from the massif on first use below.
-		baseState = massifs.MMRState{MMRSize: receipt.Proof.TreeSize2}
+		hasCheckpoint = true
+		// v3 checkpoint: the sealed size is the proof's tree-size-2.
+		lastSealedSize = receipt.Proof.TreeSize2
 	}
 
 	// Process each massif from the last checkpoint to head.
@@ -139,19 +146,18 @@ func CheckpointLog(
 			return fmt.Errorf("massif height mismatch: path=%d header=%d", massifHeight, mc.Start.MassifHeight)
 		}
 
-		// Rehydrate base peaks on first use.
-		if baseState.MMRSize != 0 && baseState.Peaks == nil {
-			peaks, err := mmr.PeakHashes(&mc, baseState.MMRSize-1)
-			if err != nil {
-				return fmt.Errorf("rehydrate base peaks: %w", err)
-			}
-			baseState.Peaks = peaks
-		}
-
 		curSize := mc.RangeCount()
-		if curSize == 0 {
+		decision := decideSeal(
+			mc.Start.FirstIndex,
+			curSize,
+			lastSealedSize,
+			hasCheckpoint && mi == lastCheckpointIndex,
+		)
+		if decision.skip {
 			continue
 		}
+
+		baseState := massifs.MMRState{MMRSize: decision.base}
 
 		var newPeaks [][]byte
 		if baseState.MMRSize == 0 {
@@ -161,12 +167,17 @@ func CheckpointLog(
 			}
 			newPeaks = peaks
 		} else {
+			basePeaks, err := mmr.PeakHashes(&mc, baseState.MMRSize-1)
+			if err != nil {
+				return fmt.Errorf("rehydrate boundary peaks (massif=%d): %w", mi, err)
+			}
+			baseState.Peaks = basePeaks
 			peaks, err := mc.CheckConsistency(baseState)
 			if err != nil {
 				return fmt.Errorf("consistency check (massif=%d): %w", mi, err)
 			}
 			if peaks == nil {
-				// No advance since last checkpoint (or already covered).
+				// Massif holds no entries past its own boundary.
 				continue
 			}
 			newPeaks = peaks
@@ -211,8 +222,8 @@ func CheckpointLog(
 		}
 
 		// Checkpoint format v3 (ADR-0046): emit a draft-bryce consistency
-		// receipt from the previous checkpoint (baseState.MMRSize) to this seal
-		// (curSize); the sealer signs the detached raw-concat payload with the
+		// receipt from the massif entry boundary (baseState.MMRSize, ADR-0056)
+		// to this seal (curSize); the sealer signs the detached raw-concat payload with the
 		// delegated key. Peak receipts are pre-signed with the same key so any
 		// holder of the checkpoint and replicated log data can mint inclusion
 		// receipts without the signing key. When the lease carries the
@@ -221,6 +232,14 @@ func CheckpointLog(
 		proof, err := massifs.BuildConsistencyProof(&mc, baseState.MMRSize, curSize)
 		if err != nil {
 			return fmt.Errorf("build consistency proof (massif=%d): %w", mi, err)
+		}
+		// ADR-0056 invariant enforcement: never write a checkpoint whose base
+		// is not this massif's entry boundary (the FOR-410 drift class).
+		if proof.TreeSize1 != mc.Start.FirstIndex {
+			return fmt.Errorf(
+				"boundary invariant violated (massif=%d): proof base %d != entry boundary %d (ADR-0056/FOR-410)",
+				mi, proof.TreeSize1, mc.Start.FirstIndex,
+			)
 		}
 		signOpts := []massifs.CheckpointSignOption{massifs.WithPeakReceipts(kid)}
 		extras := map[int64]cbor.RawMessage{}
@@ -252,10 +271,6 @@ func CheckpointLog(
 		}
 
 		observeCheckpointLag(svc, logger, &mc)
-
-		// Advance base state.
-		baseState.MMRSize = curSize
-		baseState.Peaks = newPeaks
 	}
 
 	return nil
@@ -361,4 +376,39 @@ func kidFromECDSAPublicKey(pub *ecdsa.PublicKey) ([]byte, error) {
 	kid := make([]byte, 16)
 	copy(kid, sum[:16])
 	return kid, nil
+}
+
+// sealDecision is the per-massif checkpoint decision (ADR-0056 / FOR-410).
+type sealDecision struct {
+	// base is the consistency-proof base: ALWAYS the massif's entry
+	// boundary, so replacing sth(a->b) with a re-seal at size c yields
+	// sth(a->c) and each massif's final retained checkpoint is a
+	// boundary-to-boundary link in the retained chain. It is never derived
+	// from a prior checkpoint's tree-size-2 (the FOR-410 drift bug);
+	// structural derivation also self-heals drifted legacy logs on their
+	// next re-seal.
+	base uint64
+	// skip is true when the massif needs no (re-)seal.
+	skip bool
+}
+
+// decideSeal chooses the checkpoint proof base and skip for one massif.
+// entryBoundary is the massif's first MMR index (Start.FirstIndex), curSize
+// the massif's current RangeCount, lastSealedSize the head checkpoint's
+// tree-size-2 (0 when no checkpoint exists), and isHeadCheckpointMassif
+// whether this massif is the one the head checkpoint covers.
+func decideSeal(
+	entryBoundary uint64,
+	curSize uint64,
+	lastSealedSize uint64,
+	isHeadCheckpointMassif bool,
+) sealDecision {
+	if curSize == 0 {
+		return sealDecision{skip: true}
+	}
+	if isHeadCheckpointMassif && curSize <= lastSealedSize {
+		// No advance since the head checkpoint; nothing to re-seal.
+		return sealDecision{skip: true}
+	}
+	return sealDecision{base: entryBoundary}
 }
