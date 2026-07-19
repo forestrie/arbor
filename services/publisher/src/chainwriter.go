@@ -333,10 +333,14 @@ func (w *ChainWriter) Close() {
 }
 
 // Submit synchronously sends publishCheckpoint calldata to (chainID, contract)
-// and waits for the classified outcome. It is the CLI one-shot path; the daemon
-// uses SubmitBatch. Gas for publishCheckpoint is predictable, so it uses a
-// configured gas limit rather than EstimateGas (P13); a would-revert therefore
-// mines as a revert and is classified from the receipt.
+// and waits for the classified outcome. It is the OUT-OF-PROCESS CLI one-shot
+// path ONLY: it reads PendingNonceAt directly and bypasses chainNonce, so any
+// in-daemon writer using it would break the counter's single-writer invariant
+// (plan-2607-08 F1). Every in-daemon writer — the queue consumer and the
+// resync sweep — must submit through SubmitBatch. Gas for publishCheckpoint
+// is predictable, so it uses a configured gas limit rather than EstimateGas
+// (P13); a would-revert therefore mines as a revert and is classified from
+// the receipt.
 func (w *ChainWriter) Submit(
 	ctx context.Context, chainID uint64, contract common.Address, logID [32]byte, sealedSize uint64, calldata []byte,
 ) (SubmitResult, error) {

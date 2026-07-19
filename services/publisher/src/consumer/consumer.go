@@ -49,6 +49,13 @@ type QueueConsumer struct {
 	logger     *slog.Logger
 	pub        publishCore
 	metrics    *metrics.Metrics
+
+	// resyncHealthy and handoffs are set via WithResync when the resync
+	// sweep is enabled (plan-2607-08 W2): owner-gated acks require a
+	// recently-successful sweep, and every such ack is recorded so the
+	// sweep can tell a deliberate handoff from a lost notification.
+	resyncHealthy func() bool
+	handoffs      *publisher.OwnerGateHandoffs
 }
 
 // NewQueueConsumer constructs a QueueConsumer.
@@ -445,10 +452,23 @@ func (q *QueueConsumer) finishGroup(ctx context.Context, g logGroup, res publish
 	}
 }
 
+// WithResync arms the owner-gated ack contract: healthy gates each ack on a
+// recently-successful sweep, and handoffs records what was acked so the
+// sweep's "notification loss" signal stays honest (plan-2607-08 W2).
+func (q *QueueConsumer) WithResync(healthy func() bool, handoffs *publisher.OwnerGateHandoffs) {
+	q.resyncHealthy = healthy
+	q.handoffs = handoffs
+}
+
 // resyncAcksOwnerGated reports whether owner_not_anchored outcomes are settled
-// by ack because the resync sweep (plan-2607-07) owns their reconciliation.
+// by ack because the resync sweep (plan-2607-07/-08) owns their
+// reconciliation. Requires the sweep to be configured AND recently healthy —
+// a failing sweep must not silently strand acked checkpoints, so the
+// pre-existing redelivery contract resumes the moment health lapses.
 func (q *QueueConsumer) resyncAcksOwnerGated(status publisher.PublishStatus) bool {
-	return q.cfg.ResyncInterval > 0 && status == publisher.StatusOwnerNotAnchored
+	return q.cfg.ResyncInterval > 0 &&
+		q.resyncHealthy != nil && q.resyncHealthy() &&
+		status == publisher.StatusOwnerNotAnchored
 }
 
 // finish records metrics for a terminal result and acks the message when the
@@ -483,7 +503,14 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 	} else {
 		q.logger.Info("publish result", attrs...)
 	}
-	if res.ShouldAck() || q.resyncAcksOwnerGated(res.Status) {
+	if res.ShouldAck() {
+		q.ackMsg(ctx, msg)
+		return
+	}
+	if q.resyncAcksOwnerGated(res.Status) {
+		if q.handoffs != nil {
+			q.handoffs.Record(key)
+		}
 		q.ackMsg(ctx, msg)
 	}
 }

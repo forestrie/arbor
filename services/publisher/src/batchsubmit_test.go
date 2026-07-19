@@ -400,3 +400,38 @@ func TestChainNonceReconcileRollsBack(t *testing.T) {
 		t.Errorf("after reconcile: next=%d inflight=%d, want 1/1 (rolled back to the failed nonce)", cn.next, cn.inflight)
 	}
 }
+
+// TestSubmitBatchInterleavedSweepShareNonceAuthority (plan-2607-08 W1): a
+// resync-sweep submission interleaved while a consumer batch is still in
+// flight must allocate the NEXT nonce from chainNonce, never re-read
+// PendingNonceAt (which would hand back a duplicate). This is the F1
+// regression test: with the counter bypassed, the interleaved send would
+// carry nonce 5 twice.
+func TestSubmitBatchInterleavedSweepShareNonceAuthority(t *testing.T) {
+	s := newFakeSender(5)
+	s.timeout[5] = true // consumer tx admitted but unresolved: inflight stays 1
+	w := writerWithSender(t, 1, s)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sink := newAckSink()
+	// Consumer batch: one tx that never mines (in flight for ReceiptTimeout).
+	w.SubmitBatch(ctx, []AssembledPublish{sink.req("consumer", 1)})
+
+	// Sweep-shaped interleave while the consumer tx is still unresolved:
+	// SubmitBatch returns once sends are issued, so the first tx is in
+	// flight (timeout keeps it unresolved for ~50ms) when this runs.
+	w.SubmitBatch(ctx, []AssembledPublish{sink.req("sweep", 1)})
+
+	sink.waitAll(t)
+	got := s.sentNonces()
+	if len(got) != 2 || got[0] != 5 || got[1] != 6 {
+		t.Fatalf("nonces = %v, want [5 6] — a duplicate 5 means the sweep bypassed chainNonce", got)
+	}
+	if s.nonceCalls != 1 {
+		t.Fatalf("PendingNonceAt called %d times, want 1 (in-flight allocations must trust the counter)", s.nonceCalls)
+	}
+	if o := sink.result("sweep").Outcome; o != OutcomePublished {
+		t.Fatalf("sweep outcome = %v, want Published", o)
+	}
+}

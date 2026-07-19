@@ -81,18 +81,38 @@ func TestFinishGroupOwnerGatedRedeliversWithoutResync(t *testing.T) {
 	}
 }
 
-// TestFinishGroupOwnerGatedAcksUnderResync: with RESYNC_INTERVAL set the sweep
-// owns reconciliation, so an owner-gated primary and its subsumed siblings are
-// acked instead of marching to the retry cliff (plan-2607-07 R2 / FOR-408).
-func TestFinishGroupOwnerGatedAcksUnderResync(t *testing.T) {
+// TestFinishGroupOwnerGatedAcksUnderHealthyResync: with the sweep configured
+// AND healthy, an owner-gated primary and its subsumed siblings are acked
+// instead of marching to the retry cliff, and the primary's key is recorded
+// as a handoff so the sweep's loss signal stays honest (plan-2607-08 W2).
+func TestFinishGroupOwnerGatedAcksUnderHealthyResync(t *testing.T) {
 	q, acked := ackRecorder(t)
 	q.cfg.ResyncInterval = time.Minute
-	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusOwnerNotAnchored})
+	handoffs := publisher.NewOwnerGateHandoffs()
+	q.WithResync(func() bool { return true }, handoffs)
+	g := group()
+	q.finishGroup(context.Background(), g, publisher.PublishResult{Status: publisher.StatusOwnerNotAnchored})
 	got := acked()
 	for _, lease := range []string{"lease-p", "lease-s0", "lease-s1"} {
 		if !has(got, lease) {
 			t.Fatalf("acked %v, missing %s", got, lease)
 		}
+	}
+	if !handoffs.Recent(g.key, time.Minute) {
+		t.Fatalf("owner-gated ack must record a handoff for %s", g.key)
+	}
+}
+
+// TestFinishGroupOwnerGatedRedeliversWhenResyncUnhealthy: the flag alone is
+// not enough — a configured-but-failing sweep must leave the redelivery
+// contract in force (plan-2607-08 F2).
+func TestFinishGroupOwnerGatedRedeliversWhenResyncUnhealthy(t *testing.T) {
+	q, acked := ackRecorder(t)
+	q.cfg.ResyncInterval = time.Minute
+	q.WithResync(func() bool { return false }, publisher.NewOwnerGateHandoffs())
+	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusOwnerNotAnchored})
+	if got := acked(); len(got) != 0 {
+		t.Fatalf("acked %v, want none while the sweep is unhealthy", got)
 	}
 }
 

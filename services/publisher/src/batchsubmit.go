@@ -56,11 +56,15 @@ func (w *ChainWriter) SubmitBatch(ctx context.Context, reqs []AssembledPublish) 
 // because of a load-bearing invariant: **the publisher EOA is single-writer** —
 // only this process (and, under horizontal scaling, only one process per wallet)
 // ever sends from it, so nothing but our own admissions advances the account
-// nonce. While we have transactions in flight we trust the counter and never hit
-// the RPC; when we are fully drained (inflight == 0) we re-seed from
-// PendingNonceAt, which is then guaranteed to equal the counter (all our sends
-// mined) or, after a rare mempool eviction, the corrected lower value. If two
-// processes ever shared one wallet this counter would silently corrupt.
+// nonce. Within the process, EVERY writer must submit through SubmitBatch so
+// this counter sees the admission: the queue consumer's batches and the
+// resync sweep (plan-2607-08 W1) both do; ChainWriter.Submit bypasses the
+// counter and is reserved for the out-of-process one-shot CLI. While we have
+// transactions in flight we trust the counter and never hit the RPC; when we
+// are fully drained (inflight == 0) we re-seed from PendingNonceAt, which is
+// then guaranteed to equal the counter (all our sends mined) or, after a rare
+// mempool eviction, the corrected lower value. If two processes ever shared
+// one wallet this counter would silently corrupt.
 type chainNonce struct {
 	mu       sync.Mutex
 	next     uint64 // next nonce to hand out

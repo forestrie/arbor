@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 )
@@ -14,39 +16,114 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// fakeSweepPub scripts Publish outcomes per key: each call pops the next
-// status in the key's sequence (the last repeats).
-type fakeSweepPub struct {
-	seq   map[string][]PublishStatus
-	calls []string
+// step scripts one Assemble outcome for a key: either ready (submit) with a
+// scripted SubmitOutcome, or a not-ready status.
+type step struct {
+	ready  bool
+	status PublishStatus // when !ready
+	submit SubmitOutcome // when ready: outcome the fake batch acks with
 }
 
-func (f *fakeSweepPub) Publish(_ context.Context, key string) (PublishResult, error) {
-	f.calls = append(f.calls, key)
-	statuses := f.seq[key]
-	if len(statuses) == 0 {
-		return PublishResult{}, fmt.Errorf("unscripted key %s", key)
-	}
-	st := statuses[0]
-	if len(statuses) > 1 {
-		f.seq[key] = statuses[1:]
-	}
-	res := PublishResult{Key: key, Status: st}
-	return res, nil
+var (
+	stepOwnerGated = step{status: StatusOwnerNotAnchored}
+	stepAnchored   = step{status: StatusAlreadyAnchored}
+	stepPublish    = step{ready: true, submit: OutcomePublished}
+	stepRevert     = step{ready: true, submit: OutcomeReverted}
+)
+
+// fakeCore scripts Assemble per key (popping steps; last repeats) and acks
+// every SubmitBatch request with the step's scripted outcome. All submission
+// flows through SubmitBatch — there is no Submit here, mirroring sweepCore.
+type readyItem struct {
+	key string
+	st  step
 }
 
-// fakeLister serves canned pages.
+type fakeCore struct {
+	mu        sync.Mutex
+	seq       map[string][]step
+	pending   []readyItem // ready assembles awaiting SubmitBatch, FIFO
+	assembles []string
+	submits   []string
+}
+
+func newFakeCore(seq map[string][]step) *fakeCore {
+	return &fakeCore{seq: seq}
+}
+
+func (f *fakeCore) Assemble(_ context.Context, key string) ([]byte, PublishResult, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.assembles = append(f.assembles, key)
+	steps := f.seq[key]
+	if len(steps) == 0 {
+		return nil, PublishResult{}, false, fmt.Errorf("unscripted key %s", key)
+	}
+	st := steps[0]
+	if len(steps) > 1 {
+		f.seq[key] = steps[1:]
+	}
+	res := PublishResult{Key: key, Status: st.status}
+	if st.ready {
+		f.pending = append(f.pending, readyItem{key: key, st: st})
+		return []byte{0x01}, res, true, nil
+	}
+	return nil, res, false, nil
+}
+
+// SubmitBatch acks each request in order; batch order matches the FIFO of
+// ready assembles, which is how the sweep constructs its batches.
+func (f *fakeCore) SubmitBatch(_ context.Context, reqs []AssembledPublish) {
+	for _, r := range reqs {
+		f.mu.Lock()
+		item := f.pending[0]
+		f.pending = f.pending[1:]
+		f.submits = append(f.submits, item.key)
+		f.mu.Unlock()
+		r.Ack(SubmitResult{Outcome: item.st.submit})
+	}
+}
+
+// recordingMetrics pins the R3 acceptance: gap/handoff/sweep counters.
+type recordingMetrics struct {
+	mu       sync.Mutex
+	gaps     int
+	handoffs int
+	sweeps   map[string]int
+}
+
+func newRecordingMetrics() *recordingMetrics {
+	return &recordingMetrics{sweeps: make(map[string]int)}
+}
+func (m *recordingMetrics) RecordResyncGap() { m.mu.Lock(); m.gaps++; m.mu.Unlock() }
+func (m *recordingMetrics) RecordResyncHandoff() {
+	m.mu.Lock()
+	m.handoffs++
+	m.mu.Unlock()
+}
+func (m *recordingMetrics) RecordResyncSweep(result string) {
+	m.mu.Lock()
+	m.sweeps[result]++
+	m.mu.Unlock()
+}
+
+// fakeLister serves pages keyed by continuation token, so token threading is
+// pinned: asking with an unknown token is an error.
 type fakeLister struct {
-	pages []s3.ListResult
-	calls int
+	pages map[string]s3.ListResult
+	calls []string
+	err   error
 }
 
-func (f *fakeLister) ListObjects(_ context.Context, _, _ string, _ int) (s3.ListResult, error) {
-	if f.calls >= len(f.pages) {
-		return s3.ListResult{}, nil
+func (f *fakeLister) ListObjects(_ context.Context, _, token string, _ int) (s3.ListResult, error) {
+	f.calls = append(f.calls, token)
+	if f.err != nil {
+		return s3.ListResult{}, f.err
 	}
-	p := f.pages[f.calls]
-	f.calls++
+	p, ok := f.pages[token]
+	if !ok {
+		return s3.ListResult{}, fmt.Errorf("unexpected continuation token %q", token)
+	}
 	return p, nil
 }
 
@@ -68,118 +145,233 @@ func page(keys ...string) s3.ListResult {
 	return s3.ListResult{Objects: objs}
 }
 
-func newResync(pub oneShotPublisher, lister objectLister) *Resync {
-	return &Resync{pub: pub, lister: lister, pageSize: 500, logger: testLogger(), metrics: noopResyncMetrics{}}
+func onePage(keys ...string) *fakeLister {
+	return &fakeLister{pages: map[string]s3.ListResult{"": page(keys...)}}
+}
+
+func newTestResync(pub sweepCore, lister objectLister, m ResyncMetrics, h *OwnerGateHandoffs) *Resync {
+	if m == nil {
+		m = noopResyncMetrics{}
+	}
+	if h == nil {
+		h = NewOwnerGateHandoffs()
+	}
+	return &Resync{
+		pub: pub, lister: lister, interval: time.Minute, pageSize: 500,
+		logger: testLogger(), metrics: m, handoffs: h,
+	}
 }
 
 // TestSweepReplaysThe20260719Incident: genesis notification lost, children
-// dead-lettered — the sweep must anchor the whole forest root-first in one
-// SweepOnce: genesis in pass 1, robert in pass 2, the child in pass 3.
+// dead-lettered — one sweep anchors the whole forest root-first: genesis in
+// pass 1, robert in pass 2, the child in pass 3. All three count as gaps (no
+// handoffs recorded) and the metrics counter agrees (plan-2607-07 R3 AC).
 func TestSweepReplaysThe20260719Incident(t *testing.T) {
-	pub := &fakeSweepPub{seq: map[string][]PublishStatus{
-		ckpt(genesisLog, 0): {StatusPublished, StatusAlreadyAnchored},
-		ckpt(robertLog, 0):  {StatusOwnerNotAnchored, StatusPublished, StatusAlreadyAnchored},
-		ckpt(childLog, 0):   {StatusOwnerNotAnchored, StatusOwnerNotAnchored, StatusPublished},
-	}}
-	lister := &fakeLister{pages: []s3.ListResult{
-		page(ckpt(genesisLog, 0), ckpt(robertLog, 0), ckpt(childLog, 0)),
-	}}
+	pub := newFakeCore(map[string][]step{
+		ckpt(genesisLog, 0): {stepPublish, stepAnchored},
+		ckpt(robertLog, 0):  {stepOwnerGated, stepPublish, stepAnchored},
+		ckpt(childLog, 0):   {stepOwnerGated, stepOwnerGated, stepPublish},
+	})
+	m := newRecordingMetrics()
+	r := newTestResync(pub, onePage(ckpt(genesisLog, 0), ckpt(robertLog, 0), ckpt(childLog, 0)), m, nil)
 
-	stats, err := newResync(pub, lister).SweepOnce(context.Background())
+	stats, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("SweepOnce: %v", err)
 	}
-	if stats.Gaps != 3 {
-		t.Fatalf("Gaps = %d, want 3 (genesis, robert, child all anchored by the sweep)", stats.Gaps)
+	if stats.Gaps != 3 || stats.Handoffs != 0 || stats.Blocked != 0 || stats.Errors != 0 {
+		t.Fatalf("stats = %+v, want gaps=3 only", stats)
 	}
-	if stats.Blocked != 0 || stats.Errors != 0 {
-		t.Fatalf("Blocked/Errors = %d/%d, want 0/0", stats.Blocked, stats.Errors)
+	if m.gaps != 3 || m.handoffs != 0 {
+		t.Fatalf("metrics gaps/handoffs = %d/%d, want 3/0", m.gaps, m.handoffs)
+	}
+}
+
+// TestSweepClassifiesOwnerGateHandoffs: a key the consumer acked as
+// owner-gated is anchored as a handoff, not a notification loss (W2/F7).
+func TestSweepClassifiesOwnerGateHandoffs(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(genesisLog, 0): {stepPublish},
+		ckpt(childLog, 0):   {stepOwnerGated, stepPublish},
+	})
+	m := newRecordingMetrics()
+	h := NewOwnerGateHandoffs()
+	h.Record(ckpt(childLog, 0))
+	r := newTestResync(pub, onePage(ckpt(genesisLog, 0), ckpt(childLog, 0)), m, h)
+
+	stats, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOnce: %v", err)
+	}
+	if stats.Gaps != 1 || stats.Handoffs != 1 {
+		t.Fatalf("stats = %+v, want gaps=1 handoffs=1", stats)
+	}
+	if m.gaps != 1 || m.handoffs != 1 {
+		t.Fatalf("metrics gaps/handoffs = %d/%d, want 1/1", m.gaps, m.handoffs)
+	}
+}
+
+// TestSweepPoisonTopSealFallsBackToLowerMassif (W3): a reverted highest seal
+// alerts and the publishable lower massif anchors in the same pass.
+func TestSweepPoisonTopSealFallsBackToLowerMassif(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 1): {stepRevert},
+		ckpt(robertLog, 0): {stepPublish},
+	})
+	m := newRecordingMetrics()
+	r := newTestResync(pub, onePage(ckpt(robertLog, 0), ckpt(robertLog, 1)), m, nil)
+
+	stats, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOnce: %v", err)
+	}
+	if stats.Unpublishable != 1 || stats.Gaps != 1 {
+		t.Fatalf("stats = %+v, want unpublishable=1 gaps=1", stats)
+	}
+	if len(pub.submits) != 2 || pub.submits[0] != ckpt(robertLog, 1) || pub.submits[1] != ckpt(robertLog, 0) {
+		t.Fatalf("submits = %v, want poison massif-1 then massif-0", pub.submits)
 	}
 }
 
 // TestSweepHealthySteadyStateIsQuiet: everything already anchored — no gaps,
-// no retries, one Publish per coalesced key.
+// no submissions, one assemble per coalesced log.
 func TestSweepHealthySteadyStateIsQuiet(t *testing.T) {
-	pub := &fakeSweepPub{seq: map[string][]PublishStatus{
-		ckpt(genesisLog, 0): {StatusAlreadyAnchored},
-		ckpt(robertLog, 0):  {StatusAlreadyAnchored},
-	}}
-	lister := &fakeLister{pages: []s3.ListResult{page(ckpt(genesisLog, 0), ckpt(robertLog, 0))}}
+	pub := newFakeCore(map[string][]step{
+		ckpt(genesisLog, 0): {stepAnchored},
+		ckpt(robertLog, 0):  {stepAnchored},
+	})
+	r := newTestResync(pub, onePage(ckpt(genesisLog, 0), ckpt(robertLog, 0)), nil, nil)
 
-	stats, err := newResync(pub, lister).SweepOnce(context.Background())
+	stats, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("SweepOnce: %v", err)
 	}
-	if stats.Gaps != 0 || stats.Covered != 2 || stats.Blocked != 0 {
-		t.Fatalf("stats = %+v, want covered=2 only", stats)
-	}
-	if len(pub.calls) != 2 {
-		t.Fatalf("Publish called %d times, want 2", len(pub.calls))
+	if stats.Gaps != 0 || stats.Covered != 2 || len(pub.submits) != 0 {
+		t.Fatalf("stats = %+v submits=%v, want covered=2 no submits", stats, pub.submits)
 	}
 }
 
 // TestSweepCoalescesToHighestMassif: only the highest massif index per
-// (height, log) is driven — the anchored highest seal subsumes lower massifs.
+// (height, log) is driven in the happy path; non-.sth keys are skipped.
 func TestSweepCoalescesToHighestMassif(t *testing.T) {
-	pub := &fakeSweepPub{seq: map[string][]PublishStatus{
-		ckpt(robertLog, 2): {StatusAlreadyAnchored},
-	}}
-	lister := &fakeLister{pages: []s3.ListResult{
-		page(ckpt(robertLog, 0), ckpt(robertLog, 2), ckpt(robertLog, 1),
-			"v2/merklelog/checkpoints/14/"+robertLog+"/not-a-checkpoint.txt"),
-	}}
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 2): {stepAnchored},
+	})
+	r := newTestResync(pub, onePage(
+		ckpt(robertLog, 0), ckpt(robertLog, 2), ckpt(robertLog, 1),
+		"v2/merklelog/checkpoints/14/"+robertLog+"/not-a-checkpoint.txt",
+	), nil, nil)
 
-	stats, err := newResync(pub, lister).SweepOnce(context.Background())
+	stats, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("SweepOnce: %v", err)
 	}
 	if stats.Listed != 1 {
-		t.Fatalf("Listed = %d, want 1 (coalesced, non-.sth skipped)", stats.Listed)
+		t.Fatalf("Listed = %d, want 1 (one log group)", stats.Listed)
 	}
-	if len(pub.calls) != 1 || pub.calls[0] != ckpt(robertLog, 2) {
-		t.Fatalf("calls = %v, want exactly the index-2 key", pub.calls)
+	if len(pub.assembles) != 1 || pub.assembles[0] != ckpt(robertLog, 2) {
+		t.Fatalf("assembles = %v, want exactly the index-2 key", pub.assembles)
 	}
 }
 
-// TestSweepPaginates: keys split across truncated pages are all collected.
+// TestSweepPaginates: continuation tokens must be threaded — the fake errors
+// on an unexpected token, so a broken implementation cannot pass.
 func TestSweepPaginates(t *testing.T) {
 	p1 := page(ckpt(genesisLog, 0))
 	p1.IsTruncated = true
 	p1.NextContinuationToken = "t1"
-	pub := &fakeSweepPub{seq: map[string][]PublishStatus{
-		ckpt(genesisLog, 0): {StatusAlreadyAnchored},
-		ckpt(robertLog, 0):  {StatusAlreadyAnchored},
-	}}
-	lister := &fakeLister{pages: []s3.ListResult{p1, page(ckpt(robertLog, 0))}}
+	pub := newFakeCore(map[string][]step{
+		ckpt(genesisLog, 0): {stepAnchored},
+		ckpt(robertLog, 0):  {stepAnchored},
+	})
+	lister := &fakeLister{pages: map[string]s3.ListResult{"": p1, "t1": page(ckpt(robertLog, 0))}}
+	r := newTestResync(pub, lister, nil, nil)
 
-	stats, err := newResync(pub, lister).SweepOnce(context.Background())
+	stats, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("SweepOnce: %v", err)
 	}
-	if stats.Listed != 2 || lister.calls != 2 {
-		t.Fatalf("Listed=%d listerCalls=%d, want 2/2", stats.Listed, lister.calls)
+	if stats.Listed != 2 {
+		t.Fatalf("Listed = %d, want 2", stats.Listed)
+	}
+	if len(lister.calls) != 2 || lister.calls[1] != "t1" {
+		t.Fatalf("lister calls = %v, want token t1 threaded on the second call", lister.calls)
+	}
+}
+
+// TestSweepListErrorSurfaces: a list failure is a sweep error (W4).
+func TestSweepListErrorSurfaces(t *testing.T) {
+	r := newTestResync(newFakeCore(nil), &fakeLister{err: fmt.Errorf("boom")}, nil, nil)
+	if _, err := r.SweepOnce(context.Background()); err == nil {
+		t.Fatalf("SweepOnce should surface the list error")
+	}
+}
+
+// TestSweepContextCancellation: a cancelled ctx aborts the sweep with the
+// context error (W4).
+func TestSweepContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := newTestResync(newFakeCore(map[string][]step{ckpt(genesisLog, 0): {stepPublish}}),
+		onePage(ckpt(genesisLog, 0)), nil, nil)
+	if _, err := r.SweepOnce(ctx); err == nil {
+		t.Fatalf("cancelled sweep should return the ctx error")
 	}
 }
 
 // TestSweepUnresolvableOwnerBoundsPasses: an owner that never anchors leaves
 // its child Blocked without spinning extra passes once progress stops.
 func TestSweepUnresolvableOwnerBoundsPasses(t *testing.T) {
-	pub := &fakeSweepPub{seq: map[string][]PublishStatus{
-		ckpt(genesisLog, 0): {StatusPublished, StatusAlreadyAnchored},
-		ckpt(childLog, 0):   {StatusOwnerNotAnchored},
-	}}
-	lister := &fakeLister{pages: []s3.ListResult{page(ckpt(genesisLog, 0), ckpt(childLog, 0))}}
+	pub := newFakeCore(map[string][]step{
+		ckpt(genesisLog, 0): {stepPublish, stepAnchored},
+		ckpt(childLog, 0):   {stepOwnerGated},
+	})
+	r := newTestResync(pub, onePage(ckpt(genesisLog, 0), ckpt(childLog, 0)), nil, nil)
 
-	stats, err := newResync(pub, lister).SweepOnce(context.Background())
+	stats, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("SweepOnce: %v", err)
 	}
 	if stats.Gaps != 1 || stats.Blocked != 1 {
 		t.Fatalf("stats = %+v, want gaps=1 blocked=1", stats)
 	}
-	// pass 1: both keys; pass 2: child only (genesis settled); pass 3 never
-	// runs (no progress in pass 2).
-	if len(pub.calls) != 3 {
-		t.Fatalf("Publish called %d times (%v), want 3", len(pub.calls), pub.calls)
+	// pass 1: both logs assembled; pass 2: child only (genesis settled);
+	// pass 3 never runs (no progress in pass 2).
+	if len(pub.assembles) != 3 {
+		t.Fatalf("assembled %d times (%v), want 3", len(pub.assembles), pub.assembles)
+	}
+}
+
+// TestRunRecordsHealthAndSweepResults (W2/W4): a successful sweep marks the
+// backstop healthy and records sweeps_total{ok}; before any sweep it is
+// unhealthy.
+func TestRunRecordsHealthAndSweepResults(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(genesisLog, 0): {stepAnchored}})
+	m := newRecordingMetrics()
+	r := newTestResync(pub, onePage(ckpt(genesisLog, 0)), m, nil)
+	r.interval = 10 * time.Millisecond
+
+	if r.Healthy() {
+		t.Fatalf("must be unhealthy before the first successful sweep")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	deadline := time.After(2 * time.Second)
+	for !r.Healthy() {
+		select {
+		case <-deadline:
+			t.Fatalf("never became healthy")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	m.mu.Lock()
+	ok := m.sweeps["ok"]
+	m.mu.Unlock()
+	if ok == 0 {
+		t.Fatalf("sweeps_total{ok} not recorded")
 	}
 }

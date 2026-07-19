@@ -1,6 +1,7 @@
 # Plan 2607-08 — resync sweep review remediation (FOR-408)
 
-**Status:** DRAFT
+**Status:** ACTIVE — W1–W5 implemented 2026-07-19 (this branch); F4
+deferred item remains
 **Date:** 2026-07-19
 **Scope:** single-repo — arbor (services/publisher)
 **Related:** [FOR-408](https://linear.app/forestrie/issue/FOR-408),
@@ -93,3 +94,31 @@ W1+W2 one PR (both gate enablement), W3–W5 may ride the same PR or a
 fast follow. Only after they merge: promote wave, set
 `PUBLISHER_RESYNC_INTERVAL` on lane-a, run the confirming lifecycle
 suite, then close FOR-408.
+
+## Outcome (2026-07-19)
+
+- **W1** the sweep submits exclusively through `SubmitBatch`/`chainNonce`
+  (`sweepCore` has no `Submit`); `ChainWriter.Submit` is documented as
+  the out-of-process CLI path only; regression test
+  `TestSubmitBatchInterleavedSweepShareNonceAuthority` pins that an
+  interleaved sweep submission takes the next counter nonce with no
+  `PendingNonceAt` re-read.
+- **W2** owner-gated acks now require `Resync.Healthy()` (last successful
+  sweep within 3× interval; false until the first success), every such
+  ack records an `OwnerGateHandoffs` entry, and the sweep classifies
+  anchored keys as handoff vs genuine loss
+  (`publisher_resync_owner_handoffs_total` vs `_gaps_total`); Resync is
+  constructed before the consumer starts (F6); the rollback hazard is
+  documented on the Config field and in plan-2607-07 R4.
+- **W3** per-log candidate lists (highest first): a Reverted top seal
+  raises the unpublishable ERROR (consumer parity) and the next lower
+  massif is driven in the same pass; assemble-time terminal statuses
+  fall through identically.
+- **W4** tests: metrics assertions, token-checked pagination fake,
+  list-error surface, ctx cancellation, Run/Healthy loop test; the
+  plan-2607-07 R1 acceptance wording corrected.
+- **W5** `PUBLISHER_RESYNC_INTERVAL`/`PUBLISHER_RESYNC_PAGE_SIZE` with
+  strict parsing (set-but-invalid, unit-less, or negative values fail
+  Validate loudly); sealer-name divergence documented.
+- **Deferred:** F4 (pre-filter + sweep-duration histogram + bounded
+  concurrency before fleet growth) stays open on FOR-408.

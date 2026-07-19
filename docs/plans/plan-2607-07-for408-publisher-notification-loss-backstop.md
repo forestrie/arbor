@@ -1,7 +1,8 @@
 # Plan 2607-07 — publisher: notification-loss backstop (FOR-408)
 
-**Status:** ACTIVE — R1–R3 implemented 2026-07-19 (this branch); R4 ops
-follow-ups outstanding
+**Status:** ACTIVE — R1–R3 implemented 2026-07-19 (#73), hardened per
+[plan-2607-08](./plan-2607-08-for408-resync-review-remediation.md) W1–W5;
+R4 ops follow-ups outstanding
 **Date:** 2026-07-19
 **Scope:** single-repo — arbor (services/publisher; ops notes for forest-1)
 **Related:** [FOR-408](https://linear.app/forestrie/issue/FOR-408),
@@ -79,7 +80,9 @@ scout.)
 Add a periodic sweep to the publisher, mirroring the sealer `resync.go`
 pattern (in-process re-drive, never publishing to its own queue):
 
-- Every `RESYNC_INTERVAL` (default 120s; 0 disables): enumerate forests
+- Every `PUBLISHER_RESYNC_INTERVAL` (default off — plan-2607-08 W5 renamed
+  it from the draft's `RESYNC_INTERVAL` to avoid the sealer's identically
+  named, default-on variable): enumerate forests
   via genesis discovery (ADR-0047), list each forest's
   `v2/merklelog/checkpoints/**.sth`, read each seal's `sealedSize`,
   compare with on-chain `logState` size, and run the normal publish core
@@ -90,12 +93,14 @@ pattern (in-process re-drive, never publishing to its own queue):
 - Idempotency is already guaranteed by the publish core
   (`StatusAlreadyAnchored` on the fresh logState read).
 
-**Acceptance:** with queue consumption disabled entirely (test hook /
-empty QUEUE_URL), a fresh forest (genesis + child seals present in R2,
-nothing on-chain) fully anchors within one sweep interval; unit tests
-cover gap detection, root-first ordering, and no-op on fully-anchored
-forests; an integration test replays the 2026-07-19 shape (genesis
-notification dropped, child messages delivered) and ends anchored.
+**Acceptance (amended by plan-2607-08 W4):** a SweepOnce-level integration
+test drives a fresh forest (genesis + child seals listed, nothing
+anchored) to fully anchored with **no queue consumer involved** — the
+original "empty QUEUE_URL" phrasing was unimplementable as written
+(Validate requires QUEUE_URL by design). Unit tests cover gap detection,
+root-first ordering, no-op on fully-anchored forests, pagination token
+threading, and the 2026-07-19 replay; the loss/handoff counters are
+asserted via a recording metrics fake.
 
 ### R2 — stop dead-lettering dependency-blocked messages
 
@@ -120,6 +125,10 @@ message acked on first delivery, DLQ stays empty in the replay test.
 ops runbook note documents the alert and the purge.
 
 ### R4 — ops follow-ups (no code)
+
+> Rollback note (plan-2607-08 W2): disabling PUBLISHER_RESYNC_INTERVAL
+> after a period of enablement is NOT a safe rollback — see the Config
+> field comment and plan-2607-08 F2.
 
 - Pull Cloudflare queue/event-notification metrics for 13:10–14:00Z to
   characterize the delivery incident; attach findings to FOR-408.
