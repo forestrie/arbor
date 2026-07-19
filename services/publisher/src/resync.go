@@ -38,6 +38,12 @@ const CheckpointsPrefix = "v2/merklelog/checkpoints/"
 // than this simply completes over subsequent sweeps.
 const resyncMaxPasses = 4
 
+// resyncMaxSubmitsPerSweep bounds one sweep's transaction burst. The first
+// lane rollout submitted ~90+ txs in one sweep; everything queued behind the
+// burst exceeded ReceiptTimeout and churned as retries. Anything over budget
+// simply waits for the next sweep.
+const resyncMaxSubmitsPerSweep = 16
+
 // resyncHealthyWithin is the freshness multiple for Healthy(): the consumer
 // may ack owner-gated messages only while the last successful sweep is at
 // most this many intervals old (plan-2607-08 W2).
@@ -139,20 +145,35 @@ type SweepStats struct {
 	// Blocked counts logs still owner-gated at sweep end (their owner did not
 	// anchor this sweep; retried next interval).
 	Blocked int
-	// Unpublishable counts seals that mined a revert (poison, FOR-377 shape);
-	// lower massifs of the same log are attempted in their place (W3).
+	// Unpublishable counts seals newly proven unpublishable this sweep (a
+	// mined revert or assemble-terminal status); lower massifs of the same
+	// log are attempted in their place (W3).
 	Unpublishable int
+	// PoisonSkipped counts candidates skipped via the poison cache — seals
+	// already proven unpublishable at their current ETag. No gas, no ERROR.
+	PoisonSkipped int
+	// CapDeferred counts logs left for the next sweep because the per-sweep
+	// submission budget was exhausted (bounds burst-induced receipt
+	// timeouts on the shared EOA).
+	CapDeferred int
 	// Errors counts keys abandoned this sweep on infrastructure errors.
 	Errors int
 }
 
-// logSeals is one log's sealed checkpoint keys, highest massif index first.
+// sealRef is one sealed checkpoint object: its key and the listed ETag (the
+// content identity the poison skip-cache is keyed on).
+type sealRef struct {
+	key  string
+	etag string
+}
+
+// logSeals is one log's sealed checkpoints, highest massif index first.
 // The sweep drives the highest publishable seal; on a poison (reverted) top
 // seal it falls back to the next lower massif (plan-2607-08 W3) so a
 // publishable prefix is never starved.
 type logSeals struct {
-	keys []string
-	next int // index into keys of the candidate to drive
+	seals []sealRef
+	next  int // index into seals of the candidate to drive
 }
 
 // Resync periodically reconciles sealed checkpoints against on-chain state.
@@ -168,6 +189,14 @@ type Resync struct {
 	// lastGood is the unix-nano time of the last successful sweep; Healthy()
 	// gates the consumer's owner-gated acks on it (W2).
 	lastGood atomic.Int64
+
+	// poison maps checkpoint key -> ETag proven unpublishable (mined revert
+	// or assemble-terminal). A poison seal is skipped on later sweeps until
+	// its object changes, so reverts are mined at most ONCE per seal content
+	// rather than re-mined every interval (first-rollout finding, FOR-408:
+	// 85 historical poison seals would otherwise re-revert every sweep).
+	// In-memory only: a restart re-mines each at most once more.
+	poison map[string]string
 }
 
 // NewResync wires the sweep from config. The publish core is shared with the
@@ -200,6 +229,7 @@ func NewResync(cfg Config, pub *Publisher, doer s3.HTTPDoer, logger *slog.Logger
 		logger:   logger,
 		metrics:  m,
 		handoffs: handoffs,
+		poison:   make(map[string]string),
 	}, nil
 }
 
@@ -230,13 +260,15 @@ func (r *Resync) Run(ctx context.Context) {
 		default:
 			r.metrics.RecordResyncSweep("ok")
 			r.lastGood.Store(time.Now().UnixNano())
-			if stats.Gaps > 0 || stats.Blocked > 0 || stats.Errors > 0 || stats.Unpublishable > 0 {
+			if stats.Gaps > 0 || stats.Blocked > 0 || stats.Errors > 0 || stats.Unpublishable > 0 || stats.CapDeferred > 0 {
 				r.logger.Warn("resync sweep",
 					"listed", stats.Listed, "gaps", stats.Gaps, "handoffs", stats.Handoffs,
 					"covered", stats.Covered, "blocked", stats.Blocked,
-					"unpublishable", stats.Unpublishable, "errors", stats.Errors)
+					"unpublishable", stats.Unpublishable, "poisonSkipped", stats.PoisonSkipped,
+					"capDeferred", stats.CapDeferred, "errors", stats.Errors)
 			} else {
-				r.logger.Info("resync sweep clean", "listed", stats.Listed, "handoffs", stats.Handoffs)
+				r.logger.Info("resync sweep clean", "listed", stats.Listed,
+					"handoffs", stats.Handoffs, "poisonSkipped", stats.PoisonSkipped)
 			}
 		}
 		select {
@@ -267,6 +299,7 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 	}
 	stats.Listed = len(groups)
 
+	budget := resyncMaxSubmitsPerSweep
 	pending := groups
 	for pass := 0; pass < resyncMaxPasses && len(pending) > 0; pass++ {
 		var (
@@ -281,6 +314,10 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 		// submittable, blocked, or the group is exhausted (W3 fallback for
 		// assemble-time terminal statuses).
 		for _, g := range pending {
+			if budget <= 0 {
+				stats.CapDeferred++
+				continue
+			}
 			req, outcome, done := r.assembleCandidate(ctx, g, &stats)
 			if ctx.Err() != nil {
 				return stats, ctx.Err()
@@ -291,6 +328,7 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 			case outcome == StatusOwnerNotAnchored:
 				blocked = append(blocked, g)
 			default:
+				budget--
 				g := g
 				key := req.key
 				wg.Add(1)
@@ -334,10 +372,11 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 				stats.Covered++
 			case StatusReverted:
 				stats.Unpublishable++
+				r.markPoison(out.group, out.key)
 				r.logger.Error("unpublishable checkpoint skipped by resync sweep",
 					"key", out.key, "reason", out.res.Reason, "chain", out.res.ChainID,
 					"contract", out.res.Contract.Hex())
-				if r.driveLowerMassifs(ctx, out.group, &stats) {
+				if r.driveLowerMassifs(ctx, out.group, &stats, &budget) {
 					progressed = true
 				}
 			default: // StatusRetry — tx never mined; retry next sweep.
@@ -373,10 +412,18 @@ type assembled struct {
 // sweep (done=true). Assemble-time terminal statuses fall through to lower
 // massifs (W3), mirroring the submit-phase poison fallback.
 func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *SweepStats) (assembled, PublishStatus, bool) {
-	for ; g.next < len(g.keys); g.next++ {
-		key := g.keys[g.next]
+	for ; g.next < len(g.seals); g.next++ {
+		ref := g.seals[g.next]
+		key := ref.key
 		if ctx.Err() != nil {
 			return assembled{}, 0, true
+		}
+		// Poison cache: a seal proven unpublishable at this exact content is
+		// skipped without assembling or (worse) re-mining its revert; a
+		// changed ETag (re-seal) clears it for one fresh adjudication.
+		if etag, known := r.poison[key]; known && etag == ref.etag {
+			stats.PoisonSkipped++
+			continue
 		}
 		calldata, res, ready, err := r.pub.Assemble(ctx, key)
 		if err != nil {
@@ -399,9 +446,10 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 				"status", res.Status.String(), "reason", res.Reason)
 			return assembled{}, 0, true
 		default:
-			// Terminal at assemble (poison-shaped): alert and try the next
-			// lower massif of the same log.
+			// Terminal at assemble (poison-shaped): alert once, cache, and try
+			// the next lower massif of the same log.
 			stats.Unpublishable++
+			r.poison[key] = ref.etag
 			r.logger.Error("unpublishable checkpoint skipped by resync sweep",
 				"key", key, "status", res.Status.String(), "reason", res.Reason)
 		}
@@ -409,13 +457,28 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 	return assembled{}, 0, true // exhausted: every seal for this log is poison
 }
 
+// markPoison caches out-of-band (submit-phase) poison for g's current
+// candidate key at its listed ETag.
+func (r *Resync) markPoison(g *logSeals, key string) {
+	for _, ref := range g.seals {
+		if ref.key == key {
+			r.poison[key] = ref.etag
+			return
+		}
+	}
+}
+
 // driveLowerMassifs synchronously drives g's remaining lower candidates after
 // a submit-phase revert (W3): assemble + single-item batch + wait, until a
 // candidate settles or the group is exhausted. Returns true when a candidate
 // anchored.
-func (r *Resync) driveLowerMassifs(ctx context.Context, g *logSeals, stats *SweepStats) bool {
+func (r *Resync) driveLowerMassifs(ctx context.Context, g *logSeals, stats *SweepStats, budget *int) bool {
 	g.next++
 	for {
+		if *budget <= 0 {
+			stats.CapDeferred++
+			return false
+		}
 		req, outcome, done := r.assembleCandidate(ctx, g, stats)
 		if done {
 			return false
@@ -425,6 +488,7 @@ func (r *Resync) driveLowerMassifs(ctx context.Context, g *logSeals, stats *Swee
 			// leave for the next sweep rather than complicating the pass.
 			return false
 		}
+		*budget--
 		res := r.submitOne(ctx, req)
 		switch res.Status {
 		case StatusPublished:
@@ -435,12 +499,15 @@ func (r *Resync) driveLowerMassifs(ctx context.Context, g *logSeals, stats *Swee
 			return false
 		case StatusReverted:
 			stats.Unpublishable++
+			r.markPoison(g, req.key)
 			r.logger.Error("unpublishable checkpoint skipped by resync sweep",
 				"key", req.key, "reason", res.Reason, "chain", res.ChainID,
 				"contract", res.Contract.Hex())
 			g.next++
 		default:
 			stats.Errors++
+			r.logger.Warn("resync submit did not mine; retrying next sweep",
+				"key", req.key, "reason", res.Reason)
 			return false
 		}
 	}
@@ -490,6 +557,7 @@ func (r *Resync) recordAnchored(key string, res PublishResult, stats *SweepStats
 func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 	type entry struct {
 		key   string
+		etag  string
 		index uint32
 	}
 	byLog := make(map[string][]entry)
@@ -506,7 +574,7 @@ func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 				continue // not a .sth (or malformed) — not sweep material
 			}
 			group := fmt.Sprintf("%d/%s", ck.MassifHeight, ck.LogID)
-			byLog[group] = append(byLog[group], entry{key: obj.Key, index: ck.MassifIndex})
+			byLog[group] = append(byLog[group], entry{key: obj.Key, etag: obj.ETag, index: ck.MassifIndex})
 		}
 		if !page.IsTruncated || page.NextContinuationToken == "" {
 			break
@@ -517,11 +585,11 @@ func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 	groups := make([]*logSeals, 0, len(byLog))
 	for _, entries := range byLog {
 		sort.Slice(entries, func(i, j int) bool { return entries[i].index > entries[j].index })
-		keys := make([]string, len(entries))
+		seals := make([]sealRef, len(entries))
 		for i, e := range entries {
-			keys[i] = e.key
+			seals[i] = sealRef{key: e.key, etag: e.etag}
 		}
-		groups = append(groups, &logSeals{keys: keys})
+		groups = append(groups, &logSeals{seals: seals})
 	}
 	return groups, nil
 }
