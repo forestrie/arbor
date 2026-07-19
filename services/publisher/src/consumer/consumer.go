@@ -498,21 +498,42 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 		"tx", res.TxHash.Hex(), "sealedSize", res.SealedSize,
 		"onchainSize", res.OnchainSize, "reason", res.Reason,
 	}
-	if res.Status == publisher.StatusReverted {
+	switch {
+	case virginLogRevert(res):
+		// A mined revert on a log with NO on-chain state cannot rely on
+		// ADR-0008's next-seal catch-up — a genesis log may never seal again
+		// (FOR-411; the FOR-410 base-drift shape). Never terminally ack:
+		// with the resync sweep healthy, hand it over (aged poison retries);
+		// otherwise leave it to redeliver.
+		q.logger.Error("virgin-log revert deferred, not terminal (FOR-411)", attrs...)
+	case res.Status == publisher.StatusReverted:
 		q.logger.Error("unpublishable checkpoint terminally acked", attrs...)
-	} else {
+	default:
 		q.logger.Info("publish result", attrs...)
 	}
-	if res.ShouldAck() {
+	if res.ShouldAck() && !virginLogRevert(res) {
 		q.ackMsg(ctx, msg)
 		return
 	}
-	if q.resyncAcksOwnerGated(res.Status) {
+	if q.resyncAcksOwnerGated(res.Status) || (virginLogRevert(res) && q.resyncHealthyNow()) {
 		if q.handoffs != nil {
 			q.handoffs.Record(key)
 		}
 		q.ackMsg(ctx, msg)
 	}
+}
+
+// virginLogRevert reports a mined revert against a log with no on-chain
+// state (onchainSize 0): the ADR-0008 terminal-ack contract assumes a later
+// seal re-drives the range, which is unreliable for a genesis log (FOR-411).
+func virginLogRevert(res publisher.PublishResult) bool {
+	return res.Status == publisher.StatusReverted && res.OnchainSize == 0
+}
+
+// resyncHealthyNow reports whether the sweep is configured and recently
+// healthy (the precondition for handing any reconciliation duty to it).
+func (q *QueueConsumer) resyncHealthyNow() bool {
+	return q.cfg.ResyncInterval > 0 && q.resyncHealthy != nil && q.resyncHealthy()
 }
 
 // ackMsg acknowledges a queue message and records the ack metric.

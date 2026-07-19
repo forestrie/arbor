@@ -122,7 +122,9 @@ func TestFinishGroupOwnerGatedRedeliversWhenResyncUnhealthy(t *testing.T) {
 // redeliver and be adjudicated on its own (adr-0008 self-heal, no silent drop).
 func TestFinishGroupUnpublishableDoesNotAckSiblings(t *testing.T) {
 	q, acked := ackRecorder(t)
-	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusReverted})
+	// OnchainSize > 0: an established log where ADR-0008's next-seal
+	// catch-up premise holds — the terminal-ack contract applies.
+	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusReverted, OnchainSize: 3})
 	got := acked()
 	if !has(got, "lease-p") {
 		t.Errorf("unpublishable primary should be acked; acked=%v", got)
@@ -143,5 +145,33 @@ func TestFinishGroupPublishedAcksSiblings(t *testing.T) {
 		if !has(got, lease) {
 			t.Errorf("published primary should ack primary+siblings; missing %s; acked=%v", lease, got)
 		}
+	}
+}
+
+// TestFinishGroupVirginRevertNotTerminal (FOR-411): a mined revert against a
+// log with NO on-chain state must never be terminally acked — a genesis has
+// no next seal to catch up from. With the sweep unhealthy/absent it
+// redelivers; with a healthy sweep it is acked as a recorded handoff so the
+// sweep's aged poison retries own it.
+func TestFinishGroupVirginRevertNotTerminal(t *testing.T) {
+	q, acked := ackRecorder(t)
+	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusReverted, OnchainSize: 0})
+	if got := acked(); len(got) != 0 {
+		t.Fatalf("acked %v, want none (virgin revert must redeliver without a healthy sweep)", got)
+	}
+}
+
+func TestFinishGroupVirginRevertHandsToHealthySweep(t *testing.T) {
+	q, acked := ackRecorder(t)
+	q.cfg.ResyncInterval = time.Minute
+	handoffs := publisher.NewOwnerGateHandoffs()
+	q.WithResync(func() bool { return true }, handoffs)
+	g := group()
+	q.finishGroup(context.Background(), g, publisher.PublishResult{Status: publisher.StatusReverted, OnchainSize: 0})
+	if got := acked(); !has(got, "lease-p") {
+		t.Fatalf("acked %v, want the primary handed to the sweep", got)
+	}
+	if !handoffs.Recent(g.key, time.Minute) {
+		t.Fatalf("virgin-revert handoff must be recorded")
 	}
 }
