@@ -1,13 +1,21 @@
 ---
 id: 2607-09
-status: draft
+status: complete
 created: 2026-07-19
 refs: [FOR-410, FOR-368, ADR-0056, ADR-0046]
 ---
 
 # Plan 2607-09 — FOR-410 boundary-base fix: review remediation
 
-**Status:** DRAFT · **Date:** 2026-07-19
+**Status:** COMPLETE (2026-07-19) · **Date:** 2026-07-19
+
+**Outcome:** R1/R3/R4/R5 delivered in one PR (`sealPlanForMassif` extraction:
+carried cross-massif peak validation with refusal on mismatch; trust-posture
+documented; boundary guard derived from loop index + configured height;
+five integration tests on real in-memory massifs incl. rollover contiguity,
+carried/blob-corruption refusals, and header forgery). R2 recorded on
+ADR-0056/FOR-368; backfill-vs-preprod-reset is
+[FOR-412](https://linear.app/forestrie/issue/FOR-412). R6 no action.
 **Related:** [FOR-410](https://linear.app/forestrie/issue/FOR-410),
 [arbor#79](https://github.com/forestrie/arbor/pull/79) (merged `ea77914`),
 [ADR-0056](https://github.com/forestrie/devdocs/blob/main/adr/adr-0056-checkpoint-base-is-massif-entry-boundary.md),

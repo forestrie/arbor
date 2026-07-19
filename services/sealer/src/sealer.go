@@ -1,6 +1,7 @@
 package sealer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -131,7 +132,12 @@ func CheckpointLog(
 		lastSealedSize = receipt.Proof.TreeSize2
 	}
 
-	// Process each massif from the last checkpoint to head.
+	// Process each massif from the last checkpoint to head. carried holds
+	// the previous iteration's freshly computed accumulator for R1
+	// cross-massif validation (nil on the first iteration: a same-massif
+	// re-seal has no independent prior blob to validate against — see the
+	// trust posture note on sealPlanForMassif).
+	var carried *massifCarry
 	for mi := startMassifIndex; mi <= headMassifIndex; mi++ {
 		mc, err := massifs.GetMassifContext(ctx, store, mi)
 		if err != nil {
@@ -146,42 +152,23 @@ func CheckpointLog(
 			return fmt.Errorf("massif height mismatch: path=%d header=%d", massifHeight, mc.Start.MassifHeight)
 		}
 
-		curSize := mc.RangeCount()
-		decision := decideSeal(
-			mc.Start.FirstIndex,
-			curSize,
+		plan, err := sealPlanForMassif(
+			&mc,
+			massifHeight,
+			mi,
 			lastSealedSize,
 			hasCheckpoint && mi == lastCheckpointIndex,
+			carried,
 		)
-		if decision.skip {
+		if err != nil {
+			return err
+		}
+		if plan.skip {
 			continue
 		}
-
-		baseState := massifs.MMRState{MMRSize: decision.base}
-
-		var newPeaks [][]byte
-		if baseState.MMRSize == 0 {
-			peaks, err := mmr.PeakHashes(&mc, curSize-1)
-			if err != nil {
-				return fmt.Errorf("compute peaks: %w", err)
-			}
-			newPeaks = peaks
-		} else {
-			basePeaks, err := mmr.PeakHashes(&mc, baseState.MMRSize-1)
-			if err != nil {
-				return fmt.Errorf("rehydrate boundary peaks (massif=%d): %w", mi, err)
-			}
-			baseState.Peaks = basePeaks
-			peaks, err := mc.CheckConsistency(baseState)
-			if err != nil {
-				return fmt.Errorf("consistency check (massif=%d): %w", mi, err)
-			}
-			if peaks == nil {
-				// Massif holds no entries past its own boundary.
-				continue
-			}
-			newPeaks = peaks
-		}
+		curSize := plan.curSize
+		baseState := plan.base
+		newPeaks := plan.newPeaks
 
 		// Calculate MMR range for this massif for the delegation
 		// MMR size at start of massif and end of massif
@@ -222,25 +209,15 @@ func CheckpointLog(
 		}
 
 		// Checkpoint format v3 (ADR-0046): emit a draft-bryce consistency
-		// receipt from the massif entry boundary (baseState.MMRSize, ADR-0056)
-		// to this seal (curSize); the sealer signs the detached raw-concat payload with the
-		// delegated key. Peak receipts are pre-signed with the same key so any
-		// holder of the checkpoint and replicated log data can mint inclusion
-		// receipts without the signing key. When the lease carries the
-		// univocity on-chain delegation proof it rides the unprotected header
-		// so the publisher can wire it into the publishCheckpoint calldata.
-		proof, err := massifs.BuildConsistencyProof(&mc, baseState.MMRSize, curSize)
-		if err != nil {
-			return fmt.Errorf("build consistency proof (massif=%d): %w", mi, err)
-		}
-		// ADR-0056 invariant enforcement: never write a checkpoint whose base
-		// is not this massif's entry boundary (the FOR-410 drift class).
-		if proof.TreeSize1 != mc.Start.FirstIndex {
-			return fmt.Errorf(
-				"boundary invariant violated (massif=%d): proof base %d != entry boundary %d (ADR-0056/FOR-410)",
-				mi, proof.TreeSize1, mc.Start.FirstIndex,
-			)
-		}
+		// receipt from the massif entry boundary (plan.proof, ADR-0056) to
+		// this seal (curSize); the sealer signs the detached raw-concat
+		// payload with the delegated key. Peak receipts are pre-signed with
+		// the same key so any holder of the checkpoint and replicated log
+		// data can mint inclusion receipts without the signing key. When the
+		// lease carries the univocity on-chain delegation proof it rides the
+		// unprotected header so the publisher can wire it into the
+		// publishCheckpoint calldata.
+		proof := plan.proof
 		signOpts := []massifs.CheckpointSignOption{massifs.WithPeakReceipts(kid)}
 		extras := map[int64]cbor.RawMessage{}
 		if len(lease.CertBytes) > 0 {
@@ -271,6 +248,11 @@ func CheckpointLog(
 		}
 
 		observeCheckpointLag(svc, logger, &mc)
+
+		// R1 (plan-2607-09): carry this massif's freshly computed
+		// accumulator so the next massif in this run cross-validates its
+		// ancestor peak stack against it.
+		carried = &massifCarry{size: curSize, peaks: newPeaks}
 	}
 
 	return nil
@@ -411,4 +393,139 @@ func decideSeal(
 		return sealDecision{skip: true}
 	}
 	return sealDecision{base: entryBoundary}
+}
+
+// massifCarry carries one massif's freshly computed accumulator across
+// catch-up loop iterations so adjacent massif blobs cross-validate (R1,
+// plan-2607-09): the next massif serves its ancestor peaks from its own
+// peak stack, and those must byte-match the accumulator just computed from
+// the previous massif's node data.
+type massifCarry struct {
+	size  uint64
+	peaks [][]byte
+}
+
+// sealPlan is the computed checkpoint input for one massif.
+type sealPlan struct {
+	curSize  uint64
+	base     massifs.MMRState
+	newPeaks [][]byte
+	proof    massifs.ConsistencyProof
+	skip     bool
+}
+
+// sealPlanForMassif computes the checkpoint inputs for one massif: the
+// skip decision, the entry-boundary base (ADR-0056), R1 cross-massif peak
+// validation, the consistency-checked accumulator, and the boundary-based
+// consistency proof. The boundary invariant is guarded against a value
+// derived from the loop index and configured height — independent of the
+// blob-supplied Start header (R4, plan-2607-09).
+//
+// Trust posture (R3, plan-2607-09): on a same-massif re-seal the boundary
+// peaks are rehydrated from the massif's own ancestor peak stack, so the
+// consistency check validates internal structure, not freshness relative
+// to the previously signed checkpoint. Between-seal tamper evidence is the
+// signed checkpoint chain plus external verifiers (ADR-0046) — never this
+// local check. In catch-up runs, `carried` restores genuine cross-blob
+// validation between adjacent massifs.
+func sealPlanForMassif(
+	mc *massifs.MassifContext,
+	massifHeight uint8,
+	mi uint32,
+	lastSealedSize uint64,
+	isHeadCheckpointMassif bool,
+	carried *massifCarry,
+) (sealPlan, error) {
+	curSize := mc.RangeCount()
+	decision := decideSeal(
+		mc.Start.FirstIndex,
+		curSize,
+		lastSealedSize,
+		isHeadCheckpointMassif,
+	)
+	if decision.skip {
+		return sealPlan{skip: true}, nil
+	}
+
+	// R4: the expected boundary comes from the loop index + configured
+	// height, not from the blob header the massif itself supplied.
+	expectedBoundary := massifs.MassifFirstLeaf(massifHeight, mi)
+	if decision.base != expectedBoundary {
+		return sealPlan{}, fmt.Errorf(
+			"boundary invariant violated (massif=%d): header FirstIndex %d != derived entry boundary %d (ADR-0056/FOR-410)",
+			mi, decision.base, expectedBoundary,
+		)
+	}
+
+	baseState := massifs.MMRState{MMRSize: decision.base}
+	var newPeaks [][]byte
+	if baseState.MMRSize == 0 {
+		peaks, err := mmr.PeakHashes(mc, curSize-1)
+		if err != nil {
+			return sealPlan{}, fmt.Errorf("compute peaks: %w", err)
+		}
+		newPeaks = peaks
+	} else {
+		basePeaks, err := mmr.PeakHashes(mc, baseState.MMRSize-1)
+		if err != nil {
+			return sealPlan{}, fmt.Errorf(
+				"rehydrate boundary peaks (massif=%d): %w", mi, err)
+		}
+		// R1: when the previous massif in this run ended exactly at this
+		// boundary, its just-computed accumulator must byte-match the peak
+		// stack this massif serves — or one of the adjacent blobs is wrong.
+		if carried != nil && carried.size == baseState.MMRSize {
+			if err := requireEqualPeaks(carried.peaks, basePeaks); err != nil {
+				return sealPlan{}, fmt.Errorf(
+					"cross-massif validation failed (massif=%d): %w (R1, plan-2607-09)",
+					mi, err)
+			}
+		}
+		baseState.Peaks = basePeaks
+		peaks, err := mc.CheckConsistency(baseState)
+		if err != nil {
+			return sealPlan{}, fmt.Errorf(
+				"consistency check (massif=%d): %w", mi, err)
+		}
+		if peaks == nil {
+			// Massif holds no entries past its own boundary.
+			return sealPlan{skip: true}, nil
+		}
+		newPeaks = peaks
+	}
+
+	proof, err := massifs.BuildConsistencyProof(mc, baseState.MMRSize, curSize)
+	if err != nil {
+		return sealPlan{}, fmt.Errorf(
+			"build consistency proof (massif=%d): %w", mi, err)
+	}
+	// ADR-0056 invariant enforcement: never emit a checkpoint whose proof
+	// base is not the independently derived entry boundary.
+	if proof.TreeSize1 != expectedBoundary {
+		return sealPlan{}, fmt.Errorf(
+			"boundary invariant violated (massif=%d): proof base %d != entry boundary %d (ADR-0056/FOR-410)",
+			mi, proof.TreeSize1, expectedBoundary,
+		)
+	}
+	return sealPlan{
+		curSize:  curSize,
+		base:     baseState,
+		newPeaks: newPeaks,
+		proof:    proof,
+	}, nil
+}
+
+// requireEqualPeaks compares two accumulators byte-for-byte.
+func requireEqualPeaks(carried, rehydrated [][]byte) error {
+	if len(carried) != len(rehydrated) {
+		return fmt.Errorf(
+			"accumulator length mismatch: carried %d peaks, peak stack serves %d",
+			len(carried), len(rehydrated))
+	}
+	for i := range carried {
+		if !bytes.Equal(carried[i], rehydrated[i]) {
+			return fmt.Errorf("peak %d differs between carried accumulator and peak stack", i)
+		}
+	}
+	return nil
 }
