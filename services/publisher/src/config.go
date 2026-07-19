@@ -78,15 +78,33 @@ type Config struct {
 
 	// ResyncInterval enables the notification-loss backstop (plan-2607-07): a
 	// periodic sweep that lists the checkpoints prefix and re-drives the
-	// one-shot publish for any seal not yet anchored, so a lost R2 event
+	// publish core for any seal not yet anchored, so a lost R2 event
 	// notification can never permanently strand a forest. Zero (the default)
-	// disables the sweep — rollout is inert until GitOps sets RESYNC_INTERVAL
-	// (the sealer's equivalent backstop defaults on; the publisher starts
-	// inert per plan-2607-07 §4). While enabled, owner_not_anchored messages
-	// are acked instead of redelivered to the retry cliff — the sweep is the
-	// reconciliation mechanism. ResyncPageSize bounds each list page.
+	// disables the sweep — rollout is inert until GitOps sets
+	// PUBLISHER_RESYNC_INTERVAL (note the deliberate PUBLISHER_ prefix: the
+	// sealer's own backstop uses bare RESYNC_INTERVAL and defaults ON at 30s
+	// — a copied env block must not silently enable this sweep). While
+	// enabled AND healthy, owner_not_anchored messages are acked instead of
+	// redelivered to the retry cliff — the sweep is the reconciliation
+	// mechanism (plan-2607-08 W2).
+	//
+	// ROLLBACK HAZARD: disabling after a period of enablement is NOT a safe
+	// rollback — owner-gated messages acked while enabled have no queue
+	// message, no DLQ record, and (once disabled) no sweep. Before disabling,
+	// confirm the last sweeps report zero blocked/gap entries, or re-touch
+	// the affected .sth keys to re-emit notifications.
+	//
+	// ResyncPageSize bounds each list page. Both values parse strictly:
+	// an invalid or unit-less PUBLISHER_RESYNC_INTERVAL (e.g. "120") fails
+	// Validate rather than silently disabling the backstop.
 	ResyncInterval time.Duration
 	ResyncPageSize int
+
+	// resyncParseErr carries a strict-parse failure of the resync env vars
+	// from LoadConfig to Validate (the other getters deliberately fall back
+	// silently; the backstop must not — believed-on-actually-off is exactly
+	// the failure mode it exists to prevent).
+	resyncParseErr error
 
 	// Queue poll backoff tuning.
 	BackoffBase time.Duration
@@ -206,6 +224,34 @@ func LoadConfig() Config {
 	// Parse errors are deferred to Validate; a nil map there fails cleanly.
 	rpcURLs, _ := parseRPCURLs(os.Getenv("UNIVOCITY_RPC_URLS"))
 
+	// Strict parsing for the resync backstop (plan-2607-08 W5): a value that
+	// is set but unparsable (including a unit-less "120") must fail Validate
+	// loudly, never silently disable the sweep.
+	var (
+		resyncInterval time.Duration
+		resyncPageSize = 500
+		resyncParseErr error
+	)
+	if raw := strings.TrimSpace(os.Getenv("PUBLISHER_RESYNC_INTERVAL")); raw != "" {
+		d, err := time.ParseDuration(raw)
+		switch {
+		case err != nil:
+			resyncParseErr = fmt.Errorf("PUBLISHER_RESYNC_INTERVAL %q: %w (unit-less values are invalid; use e.g. \"120s\")", raw, err)
+		case d < 0:
+			resyncParseErr = fmt.Errorf("PUBLISHER_RESYNC_INTERVAL %q must not be negative", raw)
+		default:
+			resyncInterval = d
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("PUBLISHER_RESYNC_PAGE_SIZE")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			resyncParseErr = fmt.Errorf("PUBLISHER_RESYNC_PAGE_SIZE %q must be a positive integer", raw)
+		} else {
+			resyncPageSize = n
+		}
+	}
+
 	cfg := Config{
 		Port:            getEnvOrDefault("PORT", "9090"),
 		LogLevel:        getEnvOrDefault("LOG_LEVEL", "info"),
@@ -225,8 +271,9 @@ func LoadConfig() Config {
 		ReceiptPollInterval:     getDuration("PUBLISHER_RECEIPT_POLL_INTERVAL", 200*time.Millisecond),
 		OwnerWait:               getDuration("PUBLISHER_OWNER_WAIT", 20*time.Second),
 		OwnerPoll:               getDuration("PUBLISHER_OWNER_POLL", 2*time.Second),
-		ResyncInterval:          getDuration("RESYNC_INTERVAL", 0),
-		ResyncPageSize:          getInt("RESYNC_PAGE_SIZE", 500),
+		ResyncInterval:          resyncInterval,
+		ResyncPageSize:          resyncPageSize,
+		resyncParseErr:          resyncParseErr,
 		BackoffBase:             getDuration("PUBLISHER_BACKOFF_BASE", 10*time.Millisecond),
 		PollJitter:              getFloat("PUBLISHER_POLL_JITTER", 0.1),
 		RPCURLs:                 rpcURLs,
@@ -299,8 +346,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "PUBLISHER_RECEIPT_TIMEOUT", c.ReceiptTimeout)
 	logConfigValue(logger, "PUBLISHER_OWNER_WAIT", c.OwnerWait)
 	logConfigValue(logger, "PUBLISHER_OWNER_POLL", c.OwnerPoll)
-	logConfigValue(logger, "RESYNC_INTERVAL", c.ResyncInterval)
-	logConfigValue(logger, "RESYNC_PAGE_SIZE", c.ResyncPageSize)
+	logConfigValue(logger, "PUBLISHER_RESYNC_INTERVAL", c.ResyncInterval)
+	logConfigValue(logger, "PUBLISHER_RESYNC_PAGE_SIZE", c.ResyncPageSize)
 	logConfigValue(logger, "PUBLISHER_RECEIPT_POLL_INTERVAL", c.ReceiptPollInterval)
 	logConfigValue(logger, "PUBLISHER_BACKOFF_BASE", c.BackoffBase)
 	logConfigValue(logger, "PUBLISHER_POLL_JITTER", fmt.Sprintf("%g", c.PollJitter))
@@ -330,6 +377,9 @@ func (c Config) Validate() error {
 	}
 	if c.QueueBatchSize > 32 {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
+	}
+	if c.resyncParseErr != nil {
+		return c.resyncParseErr
 	}
 	// A slow-to-mine tx must resolve before the queue redelivers it, else it is
 	// reprocessed as a duplicate while still in flight (R2-4).

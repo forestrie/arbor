@@ -145,20 +145,24 @@ func runDaemon() {
 		}
 	}()
 
-	qc := consumer.NewQueueConsumer(cfg, httpClient, logger, pub, m)
-	go qc.ConsumeQueue(ctx)
-
-	// Notification-loss backstop (plan-2607-07): nil when RESYNC_INTERVAL is
-	// unset — rollout stays inert until GitOps enables it.
-	resync, err := publisher.NewResync(cfg, pub, httpClient, logger, m)
+	// Notification-loss backstop (plan-2607-07/-08): nil when
+	// PUBLISHER_RESYNC_INTERVAL is unset — rollout stays inert until GitOps
+	// enables it. Constructed BEFORE the consumer starts (plan-2607-08 F6)
+	// so the owner-gated ack contract can never be live without its sweep.
+	handoffs := publisher.NewOwnerGateHandoffs()
+	resync, err := publisher.NewResync(cfg, pub, httpClient, logger, m, handoffs)
 	if err != nil {
 		slog.Error("init resync", "error", err)
 		os.Exit(1)
 	}
+
+	qc := consumer.NewQueueConsumer(cfg, httpClient, logger, pub, m)
 	if resync != nil {
 		slog.Warn("resync sweep enabled", "interval", cfg.ResyncInterval.String())
+		qc.WithResync(resync.Healthy, handoffs)
 		go resync.Run(ctx)
 	}
+	go qc.ConsumeQueue(ctx)
 
 	<-ctx.Done()
 	slog.Info("shutdown signal received")

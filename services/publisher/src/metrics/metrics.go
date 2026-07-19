@@ -26,9 +26,10 @@ type Metrics struct {
 	AnchorLag *prometheus.GaugeVec // labels: chain_id, contract — seals ahead of chain
 	KeyBalWei *prometheus.GaugeVec // label: chain_id — publisher EOA balance
 
-	// Resync sweep (plan-2607-07 R3)
-	ResyncGapsTotal   prometheus.Counter     // checkpoints anchored by the sweep (lost notifications)
-	ResyncSweepsTotal *prometheus.CounterVec // label: result (ok, error)
+	// Resync sweep (plan-2607-07 R3 / plan-2607-08 W2)
+	ResyncGapsTotal     prometheus.Counter     // sweep-anchored, NOT owner-gate acked: genuine lost notifications
+	ResyncHandoffsTotal prometheus.Counter     // sweep-anchored after a deliberate owner-gated ack
+	ResyncSweepsTotal   *prometheus.CounterVec // label: result (ok, error)
 }
 
 // NewMetrics creates and registers all metrics with the provided registry.
@@ -79,7 +80,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		}, []string{"chain_id"}),
 		ResyncGapsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "publisher_resync_gaps_total",
-			Help: "Checkpoints anchored by the resync sweep — notifications the queue never delivered (plan-2607-07).",
+			Help: "Checkpoints anchored by the resync sweep with no owner-gate handoff recorded — genuine lost notifications (plan-2607-07/-08).",
+		}),
+		ResyncHandoffsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "publisher_resync_owner_handoffs_total",
+			Help: "Checkpoints anchored by the resync sweep after the consumer deliberately acked them as owner-gated (expected, not a delivery fault).",
 		}),
 		ResyncSweepsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "publisher_resync_sweeps_total",
@@ -92,13 +97,18 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.MessagesPerPoll, m.PollDuration,
 		m.PublishTotal, m.RevertsTotal, m.PublishDuration,
 		m.AnchorLag, m.KeyBalWei,
-		m.ResyncGapsTotal, m.ResyncSweepsTotal,
+		m.ResyncGapsTotal, m.ResyncHandoffsTotal, m.ResyncSweepsTotal,
 	)
 	return m
 }
 
-// RecordResyncGap counts a checkpoint anchored by the resync sweep.
+// RecordResyncGap counts a checkpoint anchored by the resync sweep with no
+// owner-gate handoff recorded (a genuine lost notification).
 func (m *Metrics) RecordResyncGap() { m.ResyncGapsTotal.Inc() }
+
+// RecordResyncHandoff counts a sweep-anchored checkpoint the consumer
+// deliberately acked as owner-gated.
+func (m *Metrics) RecordResyncHandoff() { m.ResyncHandoffsTotal.Inc() }
 
 // RecordResyncSweep counts a completed sweep by result (ok, error).
 func (m *Metrics) RecordResyncSweep(result string) {
