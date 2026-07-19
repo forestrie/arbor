@@ -140,7 +140,7 @@ const (
 func page(keys ...string) s3.ListResult {
 	var objs []s3.ObjectSummary
 	for _, k := range keys {
-		objs = append(objs, s3.ObjectSummary{Key: k})
+		objs = append(objs, s3.ObjectSummary{Key: k, ETag: k + "#v1"})
 	}
 	return s3.ListResult{Objects: objs}
 }
@@ -159,6 +159,7 @@ func newTestResync(pub sweepCore, lister objectLister, m ResyncMetrics, h *Owner
 	return &Resync{
 		pub: pub, lister: lister, interval: time.Minute, pageSize: 500,
 		logger: testLogger(), metrics: m, handoffs: h,
+		poison: make(map[string]string),
 	}
 }
 
@@ -373,5 +374,73 @@ func TestRunRecordsHealthAndSweepResults(t *testing.T) {
 	m.mu.Unlock()
 	if ok == 0 {
 		t.Fatalf("sweeps_total{ok} not recorded")
+	}
+}
+
+// TestSweepPoisonCacheStopsReMining (rollout finding): a seal that mined a
+// revert is cached at its ETag and never resubmitted while unchanged — the
+// second sweep spends no gas and raises no new unpublishable count. A
+// changed ETag (re-seal) clears it for exactly one fresh adjudication.
+func TestSweepPoisonCacheStopsReMining(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {stepRevert, stepPublish},
+	})
+	lister := onePage(ckpt(robertLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.Unpublishable != 1 || len(pub.submits) != 1 {
+		t.Fatalf("sweep1 = %+v submits=%v, want one mined revert", s1, pub.submits)
+	}
+
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if len(pub.submits) != 1 {
+		t.Fatalf("sweep 2 resubmitted the poison seal: submits=%v", pub.submits)
+	}
+	if s2.PoisonSkipped != 1 || s2.Unpublishable != 0 {
+		t.Fatalf("sweep2 = %+v, want poisonSkipped=1 and no new unpublishable", s2)
+	}
+
+	// Re-seal: same key, new ETag — one fresh adjudication (which anchors).
+	lister.pages[""] = s3.ListResult{Objects: []s3.ObjectSummary{{Key: ckpt(robertLog, 0), ETag: "v2"}}}
+	s3res, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if len(pub.submits) != 2 || s3res.Gaps != 1 {
+		t.Fatalf("re-sealed key not re-adjudicated: submits=%v stats=%+v", pub.submits, s3res)
+	}
+}
+
+// TestSweepSubmissionBudgetBoundsBurst (rollout finding): submissions per
+// sweep are capped; over-budget logs are deferred, not submitted, so a large
+// backlog cannot cascade receipt timeouts on the shared EOA.
+func TestSweepSubmissionBudgetBoundsBurst(t *testing.T) {
+	seq := make(map[string][]step)
+	var keys []string
+	for i := 0; i < resyncMaxSubmitsPerSweep+5; i++ {
+		u := fmt.Sprintf("%08d-0000-4000-8000-%012d", i, i)
+		k := ckpt(u, 0)
+		keys = append(keys, k)
+		seq[k] = []step{stepPublish}
+	}
+	pub := newFakeCore(seq)
+	r := newTestResync(pub, onePage(keys...), nil, nil)
+
+	stats, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("SweepOnce: %v", err)
+	}
+	if len(pub.submits) != resyncMaxSubmitsPerSweep {
+		t.Fatalf("submitted %d, want budget %d", len(pub.submits), resyncMaxSubmitsPerSweep)
+	}
+	if stats.CapDeferred == 0 {
+		t.Fatalf("stats = %+v, want CapDeferred > 0", stats)
 	}
 }
