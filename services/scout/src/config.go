@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 )
 
 // Config holds 12-factor configuration for scout.
@@ -96,23 +98,16 @@ func LoadConfig() Config {
 }
 
 // LogConfig logs non-secret configuration values for observability.
-// For secret values, it logs a SHA256 digest to avoid leaking secrets.
+// Secret values are logged as domain-separated fingerprints
+// (logredact.StringFingerprint) — never as a bare sha256, which the derive
+// convention above turns into a live credential (FOR-409).
 func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "PORT", "value", c.Port)
 	logger.Warn("config value", "name", "LOG_LEVEL", "value", c.LogLevel)
 	logger.Warn("config value", "name", "SHUTDOWN_TIMEOUT", "value", c.ShutdownTimeout.String())
 	logger.Warn("config value", "name", "R2_URL", "value", c.R2URL)
-	logger.Warn("config value", "name", "R2_TOKEN", "value", secretDigest(c.R2Token))
-	logger.Warn("config value", "name", "AWS_ACCESS_KEY_ID", "value", c.AWSAccessKeyID)
-	logger.Warn("config value", "name", "AWS_SECRET_ACCESS_KEY", "value", secretDigest(c.AWSSecretAccessKey))
+	logger.Warn("config value", "name", "R2_TOKEN", "value", logredact.StringFingerprint(c.R2Token))
+	logger.Warn("config value", "name", "AWS_ACCESS_KEY_ID", "value", logredact.StringFingerprint(c.AWSAccessKeyID))
+	logger.Warn("config value", "name", "AWS_SECRET_ACCESS_KEY", "value", logredact.StringFingerprint(c.AWSSecretAccessKey))
 	logger.Warn("config value", "name", "AWS_REGION", "value", c.AWSRegion)
-}
-
-func secretDigest(value string) string {
-	if value == "" {
-		return ""
-	}
-	// sha256 is used for display only; do not rely on this for cryptographic purposes.
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
 }
