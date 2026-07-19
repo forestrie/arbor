@@ -11,7 +11,11 @@ refs: [FOR-410, FOR-368, ADR-0056, ADR-0046]
 
 **Outcome:** R1/R3/R4/R5 delivered in one PR (`sealPlanForMassif` extraction:
 carried cross-massif peak validation with refusal on mismatch; trust-posture
-documented; boundary guard derived from loop index + configured height;
+documented; boundary guard reworked per review feedback: header-internal
+consistency (storage position == header MassifIndex; FirstIndex == boundary
+from the header's OWN height+index) — the blob header is the
+replication-safe source and deployment-mutable config never feeds the
+boundary math;
 five integration tests on real in-memory massifs incl. rollover contiguity,
 carried/blob-corruption refusals, and header forgery). R2 recorded on
 ADR-0056/FOR-368; backfill-vs-preprod-reset is

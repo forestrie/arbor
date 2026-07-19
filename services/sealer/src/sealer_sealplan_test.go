@@ -148,7 +148,7 @@ func TestSealPlanResealKeepsBoundaryBaseOnRealMassif(t *testing.T) {
 	appendLeaves(t, store, 1)
 
 	mc := mustContext(t, store, 0)
-	plan, err := sealPlanForMassif(&mc, testHeight, 0, 0, false, nil)
+	plan, err := sealPlanForMassif(&mc, 0, 0, false, nil)
 	require.NoError(t, err)
 	require.False(t, plan.skip)
 	require.Equal(t, uint64(0), plan.proof.TreeSize1)
@@ -158,14 +158,14 @@ func TestSealPlanResealKeepsBoundaryBaseOnRealMassif(t *testing.T) {
 	// never the previous seal (the FOR-410 drift).
 	appendLeaves(t, store, 1)
 	mc = mustContext(t, store, 0)
-	plan, err = sealPlanForMassif(&mc, testHeight, 0, firstSealSize, true, nil)
+	plan, err = sealPlanForMassif(&mc, 0, firstSealSize, true, nil)
 	require.NoError(t, err)
 	require.False(t, plan.skip)
 	require.Equal(t, uint64(0), plan.proof.TreeSize1)
 	require.Greater(t, plan.curSize, firstSealSize)
 
 	// No advance: skip.
-	plan, err = sealPlanForMassif(&mc, testHeight, 0, plan.curSize, true, nil)
+	plan, err = sealPlanForMassif(&mc, 0, plan.curSize, true, nil)
 	require.NoError(t, err)
 	require.True(t, plan.skip)
 }
@@ -175,7 +175,7 @@ func TestSealPlanRolloverCarriedCrossValidation(t *testing.T) {
 	appendLeaves(t, store, 3) // massif 0 full (2 leaves) + massif 1 (1 leaf)
 
 	mc0 := mustContext(t, store, 0)
-	plan0, err := sealPlanForMassif(&mc0, testHeight, 0, 0, false, nil)
+	plan0, err := sealPlanForMassif(&mc0, 0, 0, false, nil)
 	require.NoError(t, err)
 	require.False(t, plan0.skip)
 
@@ -185,7 +185,7 @@ func TestSealPlanRolloverCarriedCrossValidation(t *testing.T) {
 
 	carried := &massifCarry{size: plan0.curSize, peaks: plan0.newPeaks}
 	mc1 := mustContext(t, store, 1)
-	plan1, err := sealPlanForMassif(&mc1, testHeight, 1, 0, false, carried)
+	plan1, err := sealPlanForMassif(&mc1, 1, 0, false, carried)
 	require.NoError(t, err)
 	require.False(t, plan1.skip)
 	require.Equal(t, boundary1, plan1.proof.TreeSize1)
@@ -196,7 +196,7 @@ func TestSealPlanCarriedMismatchRefusesToSeal(t *testing.T) {
 	appendLeaves(t, store, 3)
 
 	mc0 := mustContext(t, store, 0)
-	plan0, err := sealPlanForMassif(&mc0, testHeight, 0, 0, false, nil)
+	plan0, err := sealPlanForMassif(&mc0, 0, 0, false, nil)
 	require.NoError(t, err)
 
 	// Tamper the carried accumulator (equivalently: massif 1's ancestor
@@ -206,7 +206,7 @@ func TestSealPlanCarriedMismatchRefusesToSeal(t *testing.T) {
 	carried.peaks[0][0] ^= 0xff
 
 	mc1 := mustContext(t, store, 1)
-	_, err = sealPlanForMassif(&mc1, testHeight, 1, 0, false, carried)
+	_, err = sealPlanForMassif(&mc1, 1, 0, false, carried)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "cross-massif validation failed")
 }
@@ -216,7 +216,7 @@ func TestSealPlanPeakStackCorruptionRefusesToSeal(t *testing.T) {
 	appendLeaves(t, store, 3)
 
 	mc0 := mustContext(t, store, 0)
-	plan0, err := sealPlanForMassif(&mc0, testHeight, 0, 0, false, nil)
+	plan0, err := sealPlanForMassif(&mc0, 0, 0, false, nil)
 	require.NoError(t, err)
 	carried := &massifCarry{size: plan0.curSize, peaks: plan0.newPeaks}
 
@@ -228,7 +228,7 @@ func TestSealPlanPeakStackCorruptionRefusesToSeal(t *testing.T) {
 	blob[off] ^= 0xff
 
 	mc1 := mustContext(t, store, 1)
-	_, err = sealPlanForMassif(&mc1, testHeight, 1, 0, false, carried)
+	_, err = sealPlanForMassif(&mc1, 1, 0, false, carried)
 	require.Error(t, err)
 }
 
@@ -237,8 +237,20 @@ func TestSealPlanHeaderForgeryRefused(t *testing.T) {
 	appendLeaves(t, store, 3)
 
 	mc1 := mustContext(t, store, 1)
-	mc1.Start.FirstIndex++ // forged header
-	_, err := sealPlanForMassif(&mc1, testHeight, 1, 0, false, nil)
+	mc1.Start.FirstIndex++ // forged header field
+	_, err := sealPlanForMassif(&mc1, 1, 0, false, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "boundary invariant violated")
+}
+
+func TestSealPlanStoragePositionMismatchRefused(t *testing.T) {
+	store := newMemSealStore()
+	appendLeaves(t, store, 3)
+
+	// A blob served at the wrong object index (mis-replication / re-keying)
+	// is refused: header MassifIndex must match the storage position.
+	mc1 := mustContext(t, store, 1)
+	_, err := sealPlanForMassif(&mc1, 0, 0, false, nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "header/storage position mismatch")
 }

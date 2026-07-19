@@ -154,7 +154,6 @@ func CheckpointLog(
 
 		plan, err := sealPlanForMassif(
 			&mc,
-			massifHeight,
 			mi,
 			lastSealedSize,
 			hasCheckpoint && mi == lastCheckpointIndex,
@@ -417,9 +416,12 @@ type sealPlan struct {
 // sealPlanForMassif computes the checkpoint inputs for one massif: the
 // skip decision, the entry-boundary base (ADR-0056), R1 cross-massif peak
 // validation, the consistency-checked accumulator, and the boundary-based
-// consistency proof. The boundary invariant is guarded against a value
-// derived from the loop index and configured height — independent of the
-// blob-supplied Start header (R4, plan-2607-09).
+// consistency proof. The boundary invariant is an internal-consistency
+// guard across independently sourced facts: storage position (mi) must
+// match the header's MassifIndex, and FirstIndex must match the boundary
+// derived from the header's own height + index. The blob header is the
+// replication-safe source; deployment-mutable config never feeds the
+// boundary math (R4, plan-2607-09).
 //
 // Trust posture (R3, plan-2607-09): on a same-massif re-seal the boundary
 // peaks are rehydrated from the massif's own ancestor peak stack, so the
@@ -430,7 +432,6 @@ type sealPlan struct {
 // validation between adjacent massifs.
 func sealPlanForMassif(
 	mc *massifs.MassifContext,
-	massifHeight uint8,
 	mi uint32,
 	lastSealedSize uint64,
 	isHeadCheckpointMassif bool,
@@ -447,13 +448,25 @@ func sealPlanForMassif(
 		return sealPlan{skip: true}, nil
 	}
 
-	// R4: the expected boundary comes from the loop index + configured
-	// height, not from the blob header the massif itself supplied.
-	expectedBoundary := massifs.MassifFirstLeaf(massifHeight, mi)
+	// R4: internal consistency across independently sourced facts. The
+	// blob header is the replication-safe, location-independent record
+	// (config/path heights are deployment-mutable and never feed the
+	// boundary math; the loop's path==header check fails closed on config
+	// drift separately). Here the header must agree with the STORAGE
+	// position (mi, from object enumeration), and FirstIndex must agree
+	// with the boundary derived from the header's own height + index —
+	// a single corrupted or forged field cannot silently move the base.
+	if mc.Start.MassifIndex != mi {
+		return sealPlan{}, fmt.Errorf(
+			"massif header/storage position mismatch: header MassifIndex %d != object index %d (ADR-0056/FOR-410)",
+			mc.Start.MassifIndex, mi,
+		)
+	}
+	expectedBoundary := massifs.MassifFirstLeaf(mc.Start.MassifHeight, mi)
 	if decision.base != expectedBoundary {
 		return sealPlan{}, fmt.Errorf(
-			"boundary invariant violated (massif=%d): header FirstIndex %d != derived entry boundary %d (ADR-0056/FOR-410)",
-			mi, decision.base, expectedBoundary,
+			"boundary invariant violated (massif=%d): header FirstIndex %d != entry boundary %d derived from header height %d (ADR-0056/FOR-410)",
+			mi, decision.base, expectedBoundary, mc.Start.MassifHeight,
 		)
 	}
 
