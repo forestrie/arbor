@@ -148,6 +148,18 @@ func runDaemon() {
 	qc := consumer.NewQueueConsumer(cfg, httpClient, logger, pub, m)
 	go qc.ConsumeQueue(ctx)
 
+	// Notification-loss backstop (plan-2607-07): nil when RESYNC_INTERVAL is
+	// unset — rollout stays inert until GitOps enables it.
+	resync, err := publisher.NewResync(cfg, pub, httpClient, logger, m)
+	if err != nil {
+		slog.Error("init resync", "error", err)
+		os.Exit(1)
+	}
+	if resync != nil {
+		slog.Warn("resync sweep enabled", "interval", cfg.ResyncInterval.String())
+		go resync.Run(ctx)
+	}
+
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)

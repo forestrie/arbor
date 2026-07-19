@@ -2,9 +2,13 @@
 // the checkpoints-prefix queue, turns each R2 PutObject notification into a
 // one-shot publish, and acks only the messages whose outcome is terminal
 // (published / already-anchored / deterministic revert). Transient outcomes
-// (owner-not-anchored, unconfigured chain, infra error) are left unacked so the
-// visibility timeout redelivers them — that redelivery is the reconciliation
-// mechanism (mirrors the sealer's ErrDelegationPending non-ack path).
+// (unconfigured chain, infra error) are left unacked so the visibility
+// timeout redelivers them. owner_not_anchored depends on the resync sweep
+// (plan-2607-07): with RESYNC_INTERVAL set the message is acked after the
+// in-cycle drain and the sweep re-drives it once the owner anchors — queue
+// redelivery would only march it to the retry cliff (dead-lettered children
+// cannot be revived by a late owner, FOR-408 §2.3). With the sweep disabled,
+// the pre-sweep behaviour stands: leave unacked and rely on redelivery.
 package consumer
 
 import (
@@ -430,11 +434,21 @@ func (q *QueueConsumer) releaseDeferred(ctx context.Context, deferred []deferred
 // redeliver with the primary.
 func (q *QueueConsumer) finishGroup(ctx context.Context, g logGroup, res publisher.PublishResult) {
 	q.finish(ctx, g.primary, g.key, res)
-	if res.Status == publisher.StatusPublished || res.Status == publisher.StatusAlreadyAnchored {
+	anchored := res.Status == publisher.StatusPublished || res.Status == publisher.StatusAlreadyAnchored
+	// Under the resync sweep, an owner-gated primary is acked (see finish);
+	// its subsumed lower-massif siblings follow it — the sweep re-drives from
+	// R2 + chain state, not from the queue.
+	if anchored || q.resyncAcksOwnerGated(res.Status) {
 		for _, sib := range g.siblings {
 			q.ackMsg(ctx, sib)
 		}
 	}
+}
+
+// resyncAcksOwnerGated reports whether owner_not_anchored outcomes are settled
+// by ack because the resync sweep (plan-2607-07) owns their reconciliation.
+func (q *QueueConsumer) resyncAcksOwnerGated(status publisher.PublishStatus) bool {
+	return q.cfg.ResyncInterval > 0 && status == publisher.StatusOwnerNotAnchored
 }
 
 // finish records metrics for a terminal result and acks the message when the
@@ -469,7 +483,7 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 	} else {
 		q.logger.Info("publish result", attrs...)
 	}
-	if res.ShouldAck() {
+	if res.ShouldAck() || q.resyncAcksOwnerGated(res.Status) {
 		q.ackMsg(ctx, msg)
 	}
 }

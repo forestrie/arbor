@@ -25,6 +25,10 @@ type Metrics struct {
 	// Per-chain gauges
 	AnchorLag *prometheus.GaugeVec // labels: chain_id, contract — seals ahead of chain
 	KeyBalWei *prometheus.GaugeVec // label: chain_id — publisher EOA balance
+
+	// Resync sweep (plan-2607-07 R3)
+	ResyncGapsTotal   prometheus.Counter     // checkpoints anchored by the sweep (lost notifications)
+	ResyncSweepsTotal *prometheus.CounterVec // label: result (ok, error)
 }
 
 // NewMetrics creates and registers all metrics with the provided registry.
@@ -73,6 +77,14 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "publisher_key_balance_wei",
 			Help: "Publisher EOA balance per chain (wei).",
 		}, []string{"chain_id"}),
+		ResyncGapsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "publisher_resync_gaps_total",
+			Help: "Checkpoints anchored by the resync sweep — notifications the queue never delivered (plan-2607-07).",
+		}),
+		ResyncSweepsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "publisher_resync_sweeps_total",
+			Help: "Resync sweeps by result (ok, error).",
+		}, []string{"result"}),
 	}
 
 	reg.MustRegister(
@@ -80,8 +92,17 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.MessagesPerPoll, m.PollDuration,
 		m.PublishTotal, m.RevertsTotal, m.PublishDuration,
 		m.AnchorLag, m.KeyBalWei,
+		m.ResyncGapsTotal, m.ResyncSweepsTotal,
 	)
 	return m
+}
+
+// RecordResyncGap counts a checkpoint anchored by the resync sweep.
+func (m *Metrics) RecordResyncGap() { m.ResyncGapsTotal.Inc() }
+
+// RecordResyncSweep counts a completed sweep by result (ok, error).
+func (m *Metrics) RecordResyncSweep(result string) {
+	m.ResyncSweepsTotal.WithLabelValues(result).Inc()
 }
 
 func (m *Metrics) RecordPoll(result string) { m.PollsTotal.WithLabelValues(result).Inc() }

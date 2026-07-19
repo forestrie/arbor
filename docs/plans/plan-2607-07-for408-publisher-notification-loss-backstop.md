@@ -1,6 +1,7 @@
 # Plan 2607-07 — publisher: notification-loss backstop (FOR-408)
 
-**Status:** DRAFT
+**Status:** ACTIVE — R1–R3 implemented 2026-07-19 (this branch); R4 ops
+follow-ups outstanding
 **Date:** 2026-07-19
 **Scope:** single-repo — arbor (services/publisher; ops notes for forest-1)
 **Related:** [FOR-408](https://linear.app/forestrie/issue/FOR-408),
