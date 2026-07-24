@@ -108,7 +108,9 @@ func (r *Replacer) PutWithETag(
 		return PutResult{}, fmt.Errorf("failed to derive object path: %w", err)
 	}
 
-	opts := PutOptions{}
+	// Every published log object states its cache policy explicitly; an object
+	// that is not provably complete is no-store (ADR-0057).
+	opts := PutOptions{CacheControl: CacheControlForObject(ty, data, r.massifHeight)}
 	switch {
 	case failIfExists:
 		// Create-only
@@ -126,7 +128,8 @@ func (r *Replacer) PutWithETag(
 		return PutResult{}, fmt.Errorf("failed to write object %s: %w", objectPath, err)
 	}
 
-	r.logger.Info("put", "path", objectPath, "etag", result.ETag, "failIfExists", failIfExists, "hasIfMatch", etag != "")
+	r.logger.Info("put", "path", objectPath, "etag", result.ETag, "failIfExists", failIfExists,
+		"hasIfMatch", etag != "", "cacheControl", opts.CacheControl)
 
 	return result, nil
 }
