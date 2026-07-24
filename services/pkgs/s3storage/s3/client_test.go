@@ -418,3 +418,70 @@ func TestClientGetObjectError(t *testing.T) {
 		t.Fatalf("expected ErrDoesNotExist, got %v", err)
 	}
 }
+
+// PutObject must put the caller's cache directive on the wire. The policy in
+// merklelog.CacheControlForObject is only load-bearing if the header actually
+// reaches the object store (FOR-302, ADR-0057): a massif published without one
+// is left to the CDN's heuristic caching, which is the defect that policy
+// exists to close.
+func TestClientPutObjectSendsCacheControl(t *testing.T) {
+	tests := []struct {
+		name         string
+		cacheControl string
+		want         string
+	}{
+		{
+			name:         "complete massif publishes as immutable",
+			cacheControl: "public, max-age=31536000, immutable",
+			want:         "public, max-age=31536000, immutable",
+		},
+		{
+			name:         "head massif and checkpoints publish as no-store",
+			cacheControl: "no-store",
+			want:         "no-store",
+		},
+		{
+			name:         "unset sends no header rather than an empty one",
+			cacheControl: "",
+			want:         "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.Copy(io.Discard, r.Body)
+				defer r.Body.Close()
+				got = r.Header.Get("Cache-Control")
+				w.Header().Set("ETag", `"etag-value"`)
+				w.WriteHeader(http.StatusCreated)
+			}))
+			defer server.Close()
+
+			client, err := NewClient(
+				server.URL+"/bucket",
+				"token-123",
+				&testDoer{client: server.Client()},
+				newTestLogger(),
+			)
+			if err != nil {
+				t.Fatalf("NewClient: %v", err)
+			}
+
+			_, err = client.PutObject(
+				context.Background(),
+				"v2/merklelog/massifs/14/log/0000000000000000.log",
+				[]byte("payload"),
+				PutOptions{CacheControl: tc.cacheControl},
+			)
+			if err != nil {
+				t.Fatalf("PutObject: %v", err)
+			}
+
+			if got != tc.want {
+				t.Fatalf("Cache-Control on the wire = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
