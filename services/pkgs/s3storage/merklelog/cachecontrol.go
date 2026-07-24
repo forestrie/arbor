@@ -62,6 +62,14 @@ func MassifDataComplete(data []byte, massifHeight uint8) bool {
 
 // CacheControlForObject returns the Cache-Control directive to publish an
 // object with. Anything not provably immutable is no-store.
+//
+// ObjectMassifStart resolves to the SAME object key as ObjectMassifData
+// (massifs/storage.ObjectPath falls through), and is always no-store here
+// because a start-header payload is shorter than the peak-stack end, so
+// completeness cannot be proven from it. Writing a start header over a
+// completed massif would therefore downgrade it from immutable — the safe
+// direction (coverage is lost, stale bytes are never served), and such a write
+// would be a larger problem than its cache policy in any case.
 func CacheControlForObject(ty massifstorage.ObjectType, data []byte, massifHeight uint8) string {
 	if ty == massifstorage.ObjectMassifData && MassifDataComplete(data, massifHeight) {
 		return CacheControlImmutable

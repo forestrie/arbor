@@ -129,12 +129,6 @@ func (c *Client) PutObject(
 		req.Header.Set("Content-Type", "application/octet-stream")
 	}
 
-	// Published objects state their own cache policy; without this the CDN
-	// applies heuristic caching to objects that mutate in place (ADR-0057).
-	if options.CacheControl != "" {
-		req.Header.Set("Cache-Control", options.CacheControl)
-	}
-
 	if options.IfMatch != "" {
 		req.Header.Set("If-Match", options.IfMatch)
 	}
