@@ -28,7 +28,7 @@ func StartDelegateKeysWithRetry(
 	leaseMgr *DelegationLeaseManager,
 ) {
 	if cfg.DelegateKeyEpoch == 0 {
-		logger.Info("delegation-in-advance disabled (DELEGATE_KEY_EPOCH=0)")
+		logger.Info("delegation-in-advance explicitly disabled (DELEGATE_KEY_EPOCH=0)")
 		return
 	}
 	load := func() (*DelegateKeySet, error) {
@@ -93,7 +93,7 @@ func loadDelegateKeysWithRetry(
 // touches the per-seal path.
 func StartDelegateKeySchedule(ctx context.Context, httpClient *HTTPClient, logger *slog.Logger, cfg Config) (*DelegateKeySet, error) {
 	if cfg.DelegateKeyEpoch == 0 {
-		logger.Info("delegation-in-advance disabled (DELEGATE_KEY_EPOCH=0)")
+		logger.Info("delegation-in-advance explicitly disabled (DELEGATE_KEY_EPOCH=0)")
 		return nil, nil
 	}
 	provider, err := NewSeedProvider(cfg, httpClient)
