@@ -78,8 +78,16 @@ type Config struct {
 	// current key to the coordinator. No private material is ever at rest:
 	// the seed is re-derived each boot from KMS (via the custodian) or, for
 	// self-hosted sealers, from a locally-held DELEGATE_SEED.
-	SealerID         string
-	DelegateKeyEpoch uint32
+	//
+	// DELEGATE_KEY_EPOCH has no default: 0 (feature off) and >= 1 (feature on)
+	// are both meaningful operational states, so an unset variable is a
+	// deployment that never stated which one it wanted. Validate rejects it
+	// and the sealer refuses to start (FOR-390). DelegateKeyEpochRaw carries
+	// the verbatim environment value so Validate can tell "absent" from an
+	// explicit "0".
+	SealerID            string
+	DelegateKeyEpoch    uint32
+	DelegateKeyEpochRaw string
 
 	// DelegateKeyTTL bounds how long the coordinator keeps a registered
 	// standing delegate key (notAfter = registration time + TTL). It must
@@ -252,8 +260,12 @@ func LoadConfig() Config {
 		AWSSecretAccessKey:  awsSecretAccessKey,
 		AWSRegion:           getEnvOrDefault("AWS_REGION", "auto"),
 
-		SealerID:                   getEnvOrDefault("SEALER_ID", "sealer-default"),
+		SealerID: getEnvOrDefault("SEALER_ID", "sealer-default"),
+		// No default — Validate rejects an unset/unparseable value (FOR-390).
+		// The 0 here is only the parse fallback for a value Validate will
+		// reject anyway; it is never a silent "delegation-in-advance off".
 		DelegateKeyEpoch:           uint32(getUint64("DELEGATE_KEY_EPOCH", 0)),
+		DelegateKeyEpochRaw:        strings.TrimSpace(os.Getenv("DELEGATE_KEY_EPOCH")),
 		DelegateKeyTTL:             getDuration("DELEGATE_KEY_TTL", 720*time.Hour),
 		DelegateSeedCustodianURL:   os.Getenv("DELEGATE_SEED_CUSTODIAN_URL"),
 		DelegateSeedCustodianToken: os.Getenv("DELEGATE_SEED_CUSTODIAN_TOKEN"),
@@ -403,6 +415,19 @@ func (c Config) Validate() error {
 		return fmt.Errorf("DELEGATION_KEY_CURVE is invalid: %w", err)
 	} else if curve != delegationcert.Secp256r1 {
 		return fmt.Errorf("DELEGATION_KEY_CURVE must be secp256r1 (ES256)")
+	}
+
+	// Delegation-in-advance is fail-closed on configuration, not on value: an
+	// operator must say 0 (off) or >= 1 (on) rather than inherit a default
+	// nobody chose (FOR-390 / ADR-0050).
+	if c.DelegateKeyEpochRaw == "" {
+		return fmt.Errorf(
+			"DELEGATE_KEY_EPOCH is required and has no default " +
+				"(set 0 to disable delegation-in-advance, or >= 1 to enable it)",
+		)
+	}
+	if _, err := strconv.ParseUint(c.DelegateKeyEpochRaw, 10, 32); err != nil {
+		return fmt.Errorf("DELEGATE_KEY_EPOCH is invalid: %w", err)
 	}
 
 	if c.R2URL == "" {

@@ -114,8 +114,9 @@ func main() {
 		}
 	}()
 
-	// Delegation-in-advance (ADR-0050 / plan-2607-20). Off unless
-	// DELEGATE_KEY_EPOCH >= 1. When enabled, derive the standing delegate keys
+	// Delegation-in-advance (ADR-0050 / plan-2607-20). DELEGATE_KEY_EPOCH is
+	// required and has no default (Validate rejects it unset, FOR-390): 0 is
+	// an explicit off, >= 1 an explicit on. When enabled, derive the standing delegate keys
 	// (epoch N and N-1) at boot from the custodian-gated seed and route lease
 	// issuance through them (Phase D). The custodian is required at boot (no
 	// on-demand degrade); StartDelegateKeysWithRetry retries in the background if
