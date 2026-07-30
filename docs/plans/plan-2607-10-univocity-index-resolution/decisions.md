@@ -35,9 +35,13 @@ discovery, not verification; it is never trusted. Degenerate case
 
 Rationale: a write-ordering invariant makes it unnecessary.
 `handlePostGrant` runs `IndexCreate` **before** `PutGrant` and aborts on
-conflict, so **a stored grant implies an existing index entry**. The only
-unindexed subject logs are ones that never went through `POST /api/grants`
-— i.e. registered while canopy's grant validator was unarmed. Those 404
+conflict, so **a stored grant implies an existing index entry** — and
+this holds for *all* eras: the index was born in the same commit as the
+grant store itself (`889ad3d`, plan-0008) with claim-first ordering from
+day one, and only the store writes grant objects (review-verified
+2026-07-30). The only unindexed subject logs are ones that never went
+through `POST /api/grants` — i.e. registered while canopy's grant
+validator was unarmed. Those 404
 loudly at a named logId and are repaired individually by an idempotent
 grant re-post (the 200 path recreates the index entry). A one-time
 read-only LIST comparing grant objects to index entries in the prod bucket
@@ -60,14 +64,21 @@ Rejected alternatives, for the record:
   hand; logId-only + index stays. Scoped routes remain the *preferred*
   path for binding-holding callers.
 
-## D4 — Genesis self-index becomes mandatory
+## D4 — Genesis self-index becomes mandatory, and **claim-first** (amended, review R2)
 
-`handlePostGenesis` currently treats the R→R self-index as best-effort
-(warn on failure). With the fallback gone this is the one write-path hole;
-the request must fail (5xx, retryable — `PutGenesisIfAbsent` and
-`IndexCreate` are both idempotent) rather than warn. Note the R case also
-has the derived-key genesis GET fallback at read time, so this is
-belt-and-braces, not load-bearing alone.
+`handlePostGenesis` currently creates the genesis object first
+(`handlers_write.go:70`) and self-indexes best-effort afterwards (`:76`)
+— the opposite of the grant path. Making the self-index merely
+*mandatory* in that order would still leave partial state on failure
+(object exists, identity unclaimed) and lets a logId that is already a
+*subject* in another forest acquire a genesis object, after which the
+index and the R-case read fallback disagree about the same id.
+
+Amended decision: mirror the grant path — `IndexCreate(R → R)` **first**
+(cross-forest conflict → 409, nothing written), `PutGenesisIfAbsent`
+second (failure → 5xx, idempotent retry; the claim is already safe to
+re-run). The R case also has the derived-key genesis GET fallback at
+read time, so this is belt-and-braces, not load-bearing alone.
 
 ## D5 — 404 contract (was 503)
 
@@ -85,6 +96,27 @@ The probe could resolve a log that is initialized on-chain but has no
 grant object and no index entry. On the armed paths this set is empty
 (logs are initialized via flows that post the grant first); legacy
 exceptions surface as named 404s with the D3 repair path. Accepted.
+
+## D7 — Dangling locators resolve as misses, never 5xx (added, review R1)
+
+An index entry whose forest genesis is absent is a stale *locator*, not
+an unavailable service: resolution treats it as a miss (fall through to
+the R case, then 404) with a best-effort index self-heal delete. Only
+transport/store failures are 503. This matters because the delete paths
+manufacture exactly this state today (`handleDeleteForest` leaves the
+forest's subject grants + indexes; `handleDeleteGrant`'s index delete is
+warn-only), and the dev-pruning follow-on would do so at scale. The
+delete-side fix (forest-scoped sweep) is a pre-requisite of the pruning
+follow-on, recorded in slice 04.
+
+## Review record
+
+review-changes run 2026-07-30 (forestrie-agents command) on the draft:
+3 Medium (R1 → D7 + slice 02/04, R2 → D4 amendment, R3 → slice 04
+caller-classification rewrite), 3 Low (R4 → slice 01 readyz-on-success,
+R5 → slice 02 cache rules, R6 → plans README tidy). All folded into
+these documents 2026-07-30; none altered D1–D3, D5, D6. Findings also
+on FOR-510.
 
 ## Open questions
 

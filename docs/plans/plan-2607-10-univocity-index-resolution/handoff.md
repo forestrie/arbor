@@ -10,8 +10,11 @@
 **Locked decisions:** keep the write-time index (D1: uniqueness claim +
 locator, never trust-bearing); hints verified O(1), never trusted (D2);
 **no backfill/reconciler machinery** — 404 + individual repair (D3, Robin
-explicit); genesis self-index mandatory (D4); unresolved = 404 not 503
-(D5). Do not reopen these in-slice; reopen via decisions.md.
+explicit; invariant verified since `889ad3d`); genesis self-index
+mandatory and **claim-first** (D4 as amended); unresolved = 404 not 503
+(D5); dangling locators are misses, never 5xx (D7). Review R1–R6 folded
+in 2026-07-30 (see decisions.md "Review record"). Do not reopen these
+in-slice; reopen via decisions.md.
 
 **Next slice:** 01 (bind-before-scan). 02 is the semantic core; 03 pure
 deletion after 02; 04 caller alignment + rollout, with the OQ1 prod
