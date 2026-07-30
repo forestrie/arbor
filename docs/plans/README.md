@@ -18,6 +18,7 @@ optional); date-cohort plans live in this directory.
 | [plan-2607-06](plan-2607-06-publisher-owner-wait.md) | Publisher: bounded in-delivery wait for `owner_not_anchored` — a child waits 90s for lease expiry, not for its owner (FOR-395; FOR-394 deferred) | draft |
 | [plan-2607-07](plan-2607-07-for408-publisher-notification-loss-backstop.md) | Publisher: reconciliation sweep so a lost R2 event notification cannot permanently strand a fresh forest; ack dependency-blocked messages instead of dead-lettering (FOR-408) | draft |
 | [plan-2607-08](plan-2607-08-for408-resync-review-remediation.md) | Resync sweep review remediation: nonce split-brain (W1) + health-gated acks/safe rollback (W2) gate enablement; poison-top-seal fallback, test gaps, config hygiene (FOR-408) | draft |
+| [plan-2607-10](plan-2607-10-univocity-index-resolution/README.md) | Univocity: index+hint resolution — delete the registry scan / inline rescan / on-chain probe; 404 + verified `rootLogId` hint, no backfill machinery (FOR-510; outage band-aid arbor-flux#52) | draft |
 
 ## Legacy plans (frozen ids)
 
