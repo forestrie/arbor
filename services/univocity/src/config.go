@@ -27,8 +27,14 @@ type Config struct {
 	AWSSecretAccessKey string
 	AWSRegion          string
 
-	GenesisScanMinInterval time.Duration
-	LogForestCacheSize     int
+	// LogForestNegTTL bounds how long an unknown logId stays negatively
+	// cached (and therefore how stale a 404 can be after registration).
+	LogForestNegTTL    time.Duration
+	LogForestCacheSize int
+	// DeprecatedScanIntervalSet records that GENESIS_SCAN_MIN_INTERVAL was
+	// present in the environment; the registry scan it governed is deleted
+	// (plan-2607-10) and the value is ignored. Warn once at startup.
+	DeprecatedScanIntervalSet bool
 
 	// APIToken authenticates canopy->univocity write/authorize calls.
 	APIToken string
@@ -98,24 +104,25 @@ func LoadConfig() (Config, error) {
 		)
 	}
 
-	scanInterval := getDurationSeconds("GENESIS_SCAN_MIN_INTERVAL", 60)
+	negTTL := getDurationSeconds("LOG_FOREST_NEG_TTL", 60)
 	cacheSize := getIntPositive("LOG_FOREST_CACHE_SIZE", 10000)
 
 	return Config{
-		Port:                   getEnvOrDefault("PORT", "9091"),
-		LogLevel:               getEnvOrDefault("LOG_LEVEL", "info"),
-		ShutdownTimeout:        getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
-		RPCURLs:                rpcURLs,
-		GenesisR2URL:           genesisURL,
-		GenesisR2Token:         r2Token,
-		AWSAccessKeyID:         awsAccessKey,
-		AWSSecretAccessKey:     awsSecret,
-		AWSRegion:              getEnvOrDefault("AWS_REGION", "auto"),
-		GenesisScanMinInterval: scanInterval,
-		LogForestCacheSize:     cacheSize,
-		APIToken:               strings.TrimSpace(os.Getenv("UNIVOCITY_API_TOKEN")),
-		AdminToken:             strings.TrimSpace(os.Getenv("UNIVOCITY_ADMIN_TOKEN")),
-		AllowUnanchoredGenesis: getBool("UNIVOCITY_ALLOW_UNANCHORED_GENESIS", false),
+		Port:                      getEnvOrDefault("PORT", "9091"),
+		LogLevel:                  getEnvOrDefault("LOG_LEVEL", "info"),
+		ShutdownTimeout:           getDuration("SHUTDOWN_TIMEOUT", 30*time.Second),
+		RPCURLs:                   rpcURLs,
+		GenesisR2URL:              genesisURL,
+		GenesisR2Token:            r2Token,
+		AWSAccessKeyID:            awsAccessKey,
+		AWSSecretAccessKey:        awsSecret,
+		AWSRegion:                 getEnvOrDefault("AWS_REGION", "auto"),
+		LogForestNegTTL:           negTTL,
+		LogForestCacheSize:        cacheSize,
+		DeprecatedScanIntervalSet: strings.TrimSpace(os.Getenv("GENESIS_SCAN_MIN_INTERVAL")) != "",
+		APIToken:                  strings.TrimSpace(os.Getenv("UNIVOCITY_API_TOKEN")),
+		AdminToken:                strings.TrimSpace(os.Getenv("UNIVOCITY_ADMIN_TOKEN")),
+		AllowUnanchoredGenesis:    getBool("UNIVOCITY_ALLOW_UNANCHORED_GENESIS", false),
 	}, nil
 }
 
@@ -168,7 +175,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 		"SHUTDOWN_TIMEOUT", c.ShutdownTimeout,
 		"RPC_CHAIN_IDS", chainIDs,
 		"GENESIS_R2_URL", nonSecret(c.GenesisR2URL),
-		"GENESIS_SCAN_MIN_INTERVAL", c.GenesisScanMinInterval,
+		"LOG_FOREST_NEG_TTL", c.LogForestNegTTL,
 		"LOG_FOREST_CACHE_SIZE", c.LogForestCacheSize,
 		"UNIVOCITY_API_TOKEN", nonSecret(c.APIToken),
 		"UNIVOCITY_ADMIN_TOKEN", nonSecret(c.AdminToken),

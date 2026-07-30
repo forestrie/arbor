@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -198,6 +199,8 @@ type fakeStore struct {
 	genesis map[string][]byte
 	grants  map[string][]byte
 	index   map[string]logid.UUID
+	// listCalls pins the plan-2607-10 contract: resolution never enumerates.
+	listCalls int
 }
 
 func newFakeStore() *fakeStore {
@@ -274,6 +277,7 @@ func (s *fakeStore) DeleteIndex(_ context.Context, subject logid.UUID) error {
 }
 
 func (s *fakeStore) ListForests(_ context.Context) ([]logid.UUID, error) {
+	s.listCalls++
 	out := make([]logid.UUID, 0, len(s.genesis))
 	for k := range s.genesis {
 		id, err := logid.ParseUUIDString(k)
@@ -285,11 +289,9 @@ func (s *fakeStore) ListForests(_ context.Context) ([]logid.UUID, error) {
 	return out, nil
 }
 
-var errStoreMiss = &storeMissError{}
-
-type storeMissError struct{}
-
-func (*storeMissError) Error() string { return "not found" }
+// errStoreMiss is the real store sentinel so isStoreMiss (resolve.go)
+// classifies fake-store misses exactly like production misses.
+var errStoreMiss = massifstorage.ErrDoesNotExist
 
 // --- tests ---
 
@@ -576,7 +578,7 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 
 	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
 
-	res, err := api.resolveAuthority(context.Background(), A)
+	res, err := api.resolveAuthority(context.Background(), A, logid.UUID{})
 	if err != nil {
 		t.Fatalf("resolve authority failed: %v", err)
 	}
@@ -588,7 +590,7 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 	}
 
 	unknown := testLogID(99)
-	if _, err := api.resolveAuthority(context.Background(), unknown); err == nil {
+	if _, err := api.resolveAuthority(context.Background(), unknown, logid.UUID{}); err == nil {
 		t.Fatal("expected unknown log to fail authority resolution")
 	}
 }
@@ -651,7 +653,7 @@ func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
 		AllowUnanchoredGenesis: true,
 	}
 
-	res, err := api.resolveAuthority(context.Background(), A)
+	res, err := api.resolveAuthority(context.Background(), A, logid.UUID{})
 	if err != nil {
 		t.Fatalf("resolve authority failed: %v", err)
 	}
@@ -828,11 +830,13 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		t.Fatal("authority key does not match child grantData")
 	}
 
+	// Unknown = 404 with remediation, never 503 (plan-2607-10 D5): unknown
+	// and unavailable must not be conflated.
 	unknown := testLogID(77)
 	unkReq := httptest.NewRequest(http.MethodGet, "/api/logs/"+unknown.String()+"/authority", nil)
 	unkRec := httptest.NewRecorder()
 	mux.ServeHTTP(unkRec, unkReq)
-	if unkRec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unknown authority want 503 got %d", unkRec.Code)
+	if unkRec.Code != http.StatusNotFound {
+		t.Fatalf("unknown authority want 404 got %d", unkRec.Code)
 	}
 }

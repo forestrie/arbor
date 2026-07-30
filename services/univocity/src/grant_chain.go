@@ -282,15 +282,16 @@ func (a API) logRootKey(
 }
 
 // resolveAuthority resolves the authoritative root key + chain binding for a
-// logId via the hybrid path (index -> forest, then chain logRootKey or the
-// chain-valid stored grant chain). It performs no certificate verification: the
-// sealer verifies the (untrusted) delegation certificate locally against the
-// returned key.
+// logId via point lookups (index -> forest, or a verified rootLogId hint;
+// then chain logRootKey or the chain-valid stored grant chain). It performs
+// no certificate verification: the sealer verifies the (untrusted) delegation
+// certificate locally against the returned key.
 func (a API) resolveAuthority(
 	ctx context.Context,
 	logID logid.UUID,
+	hint logid.UUID,
 ) (AuthorityResult, error) {
-	forest, reader, err := a.resolveForestForLog(ctx, logID)
+	forest, reader, err := a.resolveForestForLog(ctx, logID, hint)
 	if err != nil {
 		return AuthorityResult{}, err
 	}
@@ -309,39 +310,6 @@ func (a API) resolveAuthority(
 		Contract:  forest.Contract,
 		Source:    source,
 	}, nil
-}
-
-// resolveForestForLog finds the forest for a subject log: index->R (owned store)
-// first, then the genesis-identity + on-chain-probe resolver as a fallback.
-func (a API) resolveForestForLog(
-	ctx context.Context,
-	logID logid.UUID,
-) (ForestEntry, ChainReader, error) {
-	if a.Store != nil {
-		if r, found, err := a.Store.IndexGet(ctx, logID); err == nil && found {
-			forest, err := a.loadForest(ctx, r)
-			if err != nil {
-				return ForestEntry{}, nil, fmt.Errorf("load forest for index: %w", err)
-			}
-			reader, err := a.Pool.Reader(forest.ChainID, forest.Contract)
-			if err != nil {
-				return ForestEntry{}, nil, err
-			}
-			return forest, reader, nil
-		}
-	}
-	if a.Resolver != nil {
-		forest, err := a.Resolver.Resolve(ctx, logID)
-		if err != nil {
-			return ForestEntry{}, nil, err
-		}
-		reader, err := a.Pool.Reader(forest.ChainID, forest.Contract)
-		if err != nil {
-			return ForestEntry{}, nil, err
-		}
-		return forest, reader, nil
-	}
-	return ForestEntry{}, nil, ErrLogNotResolved
 }
 
 // loadForest reads and parses a forest genesis document from the owned store.

@@ -7,9 +7,13 @@ import (
 
 // API provides the HTTP API for the univocity trust-root service.
 type API struct {
-	Logger   *slog.Logger
-	Pool     ChainResolver
-	Resolver *ForestResolver
+	Logger *slog.Logger
+	Pool   ChainResolver
+
+	// Forests is the optional bounded resolution cache (positive entries are
+	// verified mappings; negative entries bound repeated unknown lookups).
+	// Resolution itself is pure point lookup — see resolve.go (plan-2607-10).
+	Forests *ForestCache
 
 	// Store is the univocity-owned genesis + grant + index store. When nil the
 	// write/authorize endpoints are unavailable.

@@ -7,13 +7,11 @@ import (
 	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
-type forestCacheEntry struct {
-	entry   ForestEntry
-	expires time.Time
-}
-
-// forestLRUCache maps logId uuid string -> forest with optional negative TTL.
-type forestLRUCache struct {
+// ForestCache maps logId uuid string -> forest with optional negative TTL.
+// Positive entries are written only after an existence check has passed
+// (index+genesis, R-case genesis, or hint+grant — plan-2607-10 slice 02);
+// negative entries bound repeated lookups of unknown logIds.
+type ForestCache struct {
 	mu       sync.Mutex
 	positive map[string]ForestEntry
 	negative map[string]time.Time
@@ -22,11 +20,12 @@ type forestLRUCache struct {
 	order    []string
 }
 
-func newForestLRUCache(maxSize int, negTTL time.Duration) *forestLRUCache {
+// NewForestCache builds a bounded resolution cache with a negative-entry TTL.
+func NewForestCache(maxSize int, negTTL time.Duration) *ForestCache {
 	if maxSize < 1 {
 		maxSize = 1
 	}
-	return &forestLRUCache{
+	return &ForestCache{
 		positive: make(map[string]ForestEntry),
 		negative: make(map[string]time.Time),
 		maxSize:  maxSize,
@@ -34,14 +33,14 @@ func newForestLRUCache(maxSize int, negTTL time.Duration) *forestLRUCache {
 	}
 }
 
-func (c *forestLRUCache) Clear() {
+func (c *ForestCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.positive = make(map[string]ForestEntry)
 	c.order = nil
 }
 
-func (c *forestLRUCache) Get(logID logid.UUID) (ForestEntry, bool, bool) {
+func (c *ForestCache) Get(logID logid.UUID) (ForestEntry, bool, bool) {
 	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -55,7 +54,7 @@ func (c *forestLRUCache) Get(logID logid.UUID) (ForestEntry, bool, bool) {
 	return e, ok, false
 }
 
-func (c *forestLRUCache) PutPositive(logID logid.UUID, e ForestEntry) {
+func (c *ForestCache) PutPositive(logID logid.UUID, e ForestEntry) {
 	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -71,7 +70,7 @@ func (c *forestLRUCache) PutPositive(logID logid.UUID, e ForestEntry) {
 	}
 }
 
-func (c *forestLRUCache) PutNegative(logID logid.UUID) {
+func (c *ForestCache) PutNegative(logID logid.UUID) {
 	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()

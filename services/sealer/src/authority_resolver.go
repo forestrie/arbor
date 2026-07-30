@@ -3,6 +3,7 @@ package sealer
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,27 @@ type authorityResponse struct {
 	ChainID   string `cbor:"chainId,omitempty"`
 	Contract  string `cbor:"contract,omitempty"`
 	Source    string `cbor:"source,omitempty"`
+}
+
+// AuthorityStatusError reports a non-200 authority response with its HTTP
+// status so callers can classify a 404 — the univocity instance has no
+// locator for the log, permanent until repaired — apart from transient 5xx
+// (plan-2607-10 slice 04).
+type AuthorityStatusError struct {
+	StatusCode int
+	LogIdHex   string
+}
+
+func (e *AuthorityStatusError) Error() string {
+	return fmt.Sprintf("authority returned status=%d for log %s", e.StatusCode, e.LogIdHex)
+}
+
+// IsAuthorityNotFound reports whether err is an authority 404: retrying
+// without repair (idempotent grant re-post, or a rootLogId hint) cannot
+// succeed.
+func IsAuthorityNotFound(err error) bool {
+	var se *AuthorityStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
 }
 
 // HTTPAuthorityResolver calls univocity GET {BaseURL}/api/logs/{logId}/authority.
@@ -91,9 +113,10 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 		return AuthorityBinding{}, fmt.Errorf("read authority response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return AuthorityBinding{}, fmt.Errorf(
-			"authority returned status=%d for log %s", resp.StatusCode, logIdHex,
-		)
+		return AuthorityBinding{}, &AuthorityStatusError{
+			StatusCode: resp.StatusCode,
+			LogIdHex:   logIdHex,
+		}
 	}
 
 	signingKey, err := LogSigningKeyFromTrustRootCBOR(body)

@@ -16,9 +16,9 @@ mandatory and **claim-first** (D4 as amended); unresolved = 404 not 503
 in 2026-07-30 (see decisions.md "Review record"). Do not reopen these
 in-slice; reopen via decisions.md.
 
-**Next slice:** 01 (bind-before-scan). 02 is the semantic core; 03 pure
-deletion after 02; 04 caller alignment + rollout, with the OQ1 prod
-assessment before flipping 02+03 on.
+**Next slice:** none — all slices IMPLEMENTED on arbor#85 (2026-07-30, 01
+folded into 03). Remaining: OQ1 read-only prod LIST assessment before
+deploy, then merge.
 
 **Resume prompt:**
 

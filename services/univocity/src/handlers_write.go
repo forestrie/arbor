@@ -67,14 +67,27 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 			"anchor verification failed", err.Error())
 		return
 	}
+	// Claim-first (plan-2607-10 D4): the R->R self-index is the atomic
+	// global-uniqueness claim and must precede the genesis object, mirroring
+	// handlePostGrant — a logId already bound as another forest's subject
+	// must not acquire a genesis document. Both writes are idempotent, so a
+	// crash between them is repaired by retry.
+	claimed, existing, err := a.Store.IndexCreate(r.Context(), doc.Forest.R, doc.Forest.R)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
+			"index create failed", err.Error())
+		return
+	}
+	if !claimed && existing != doc.Forest.R {
+		a.writeProblem(w, r, http.StatusConflict, "about:blank",
+			"logId belongs to another forest",
+			"global logId->R uniqueness violated")
+		return
+	}
 	created, err := a.Store.PutGenesisIfAbsent(r.Context(), doc.Forest.R, body)
 	if err != nil {
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "store genesis failed", err.Error())
 		return
-	}
-	// Root self-index: R -> R. Best effort; conflict means already present.
-	if _, _, err := a.Store.IndexCreate(r.Context(), doc.Forest.R, doc.Forest.R); err != nil {
-		a.Logger.Warn("genesis self-index failed", "R", doc.Forest.R.String(), "error", err)
 	}
 	if !created {
 		a.writeProblem(w, r, http.StatusConflict, "about:blank",

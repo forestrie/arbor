@@ -111,7 +111,17 @@ func (p *ParentResolver) fetchRootLogID(ctx context.Context, parentUUID logid.UU
 		slog.Warn("univocity root lookup transient", "parentLogId", parentUUID.String())
 		return logid.Zero
 	}
+	// 404 = univocity has no locator for the parent; retrying cannot succeed
+	// until the mapping is repaired — never silent (plan-2607-10 slice 04).
+	if resp.StatusCode == http.StatusNotFound {
+		slog.Warn("univocity root lookup: parent log not resolved; permanent until repaired",
+			"parentLogId", parentUUID.String(),
+			"remedy", "idempotent grant re-post or rootLogId hint")
+		return logid.Zero
+	}
 	if resp.StatusCode != http.StatusOK {
+		slog.Warn("univocity root lookup failed",
+			"parentLogId", parentUUID.String(), "status", resp.StatusCode)
 		return logid.Zero
 	}
 	var out struct {

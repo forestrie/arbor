@@ -1,13 +1,33 @@
 ---
 id: 2607-10
-status: draft
+status: active
 created: 2026-07-30
 refs: [FOR-510]
 ---
 
 # Plan 2607-10 — univocity index+hint resolution (delete the registry scan)
 
-**Status:** DRAFT · **Created:** 2026-07-30
+**Status:** IMPLEMENTED on arbor#85 (2026-07-30, pending merge) · **Created:** 2026-07-30
+
+Implementation deviations (all within the locked decisions):
+
+- Slice 01 was folded into 03 as this README anticipated — everything lands
+  as one deploy, so no interim scan-goroutine/readyz gate shipped; startup
+  simply binds immediately with no scan at all.
+- readyz is **unconditional** (the "decide in review" point in slice 03):
+  the service holds no warm state and a store probe would add R2 calls per
+  probe period for nothing; store outages surface as per-request 503s.
+- The chain allow-list check is satisfied by `Pool.Reader` returning
+  `ErrChainNotConfigured` (503) at resolution time — no separate
+  `loadForest` check was needed.
+- Sealer "long backoff" is realised as classification
+  (`AuthorityStatusError` / `IsAuthorityNotFound`, preserved through the
+  lease error wrap) + loud warn with remedy; retry cadence is already
+  per-sealing-attempt, not a tight ladder. Dedicated suppression can ride
+  later if a legacy 404 ever bites.
+
+Outstanding before deploy: the OQ1 one-time read-only prod LIST assessment
+(slice 04 rollout order).
 
 Replace the univocity trust-root service's forest-registry scan with pure
 point-lookup resolution, and delete the scan, the inline rescan, and the
@@ -69,10 +89,10 @@ immediately. Memory is O(LRU cache). No background jobs are introduced.
 
 | Doc | Slice | Status |
 |-----|-------|--------|
-| [01-bind-before-scan.md](01-bind-before-scan.md) | Bind HTTP before the startup scan; honest readyz | draft |
-| [02-resolver-rewrite.md](02-resolver-rewrite.md) | Index-first resolution, R-case fallback, 404 contract, verified `rootLogId` hint | draft |
-| [03-delete-registry.md](03-delete-registry.md) | Delete ForestRegistry / probe / rescan; config + test cleanup | draft |
-| [04-callers-and-rollout.md](04-callers-and-rollout.md) | Sealer/signer 404 vs 503 semantics; rollout, metrics, legacy repair playbook | draft |
+| [01-bind-before-scan.md](01-bind-before-scan.md) | Bind HTTP before the startup scan; honest readyz | folded into 03 |
+| [02-resolver-rewrite.md](02-resolver-rewrite.md) | Index-first resolution, R-case fallback, 404 contract, verified `rootLogId` hint | implemented |
+| [03-delete-registry.md](03-delete-registry.md) | Delete ForestRegistry / probe / rescan; config + test cleanup | implemented |
+| [04-callers-and-rollout.md](04-callers-and-rollout.md) | Sealer/signer 404 vs 503 semantics; rollout, metrics, legacy repair playbook | implemented (OQ1 assessment outstanding) |
 
 Slices 01 and 02 are independently shippable; 03 depends on 02; 04 rides
 or follows 03. If sequencing pressure appears, 01 can be folded into 03
