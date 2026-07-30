@@ -53,6 +53,11 @@ func main() {
 	)
 	logger.Info("resolved log level", "input", cfg.LogLevel, "level", level.String())
 	cfg.LogConfig(logger)
+	if cfg.DeprecatedScanIntervalSet {
+		logger.Warn("GENESIS_SCAN_MIN_INTERVAL is deprecated and ignored: " +
+			"the forest registry scan is removed (plan-2607-10); " +
+			"use LOG_FOREST_NEG_TTL for the negative resolution cache")
+	}
 
 	pool, err := univocity.NewContractClients(cfg.RPCURLs)
 	if err != nil {
@@ -76,9 +81,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	registry := univocity.NewForestRegistry(
-		logger, s3Client, cfg.RPCURLs, cfg.GenesisScanMinInterval,
-	)
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -87,26 +89,15 @@ func main() {
 	)
 	defer stop()
 
-	if err := registry.Scan(ctx); err != nil {
-		slog.Error("startup genesis registry scan failed", "error", err)
-		os.Exit(1)
-	}
-
-	forestResolver := univocity.NewForestResolver(
-		logger,
-		registry,
-		pool,
-		cfg.LogForestCacheSize,
-		cfg.GenesisScanMinInterval,
-	)
-
+	// Resolution is pure point lookup (plan-2607-10): no startup scan, the
+	// port binds immediately and readiness needs no warm state.
 	mux := http.NewServeMux()
 	setupHealthChecks(mux)
 
 	api := univocity.API{
 		Logger:                 logger,
 		Pool:                   pool,
-		Resolver:               forestResolver,
+		Forests:                univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
 		Store:                  univocity.NewS3Store(s3Client),
 		APIToken:               cfg.APIToken,
 		AdminToken:             cfg.AdminToken,

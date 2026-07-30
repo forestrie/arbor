@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -113,6 +114,15 @@ func requestLogDelegationLeaseWithKeyPair(
 	if resolver != nil {
 		binding, err = resolver.ResolveAuthority(ctx, logIdHex)
 		if err != nil {
+			// 404 = the log has no locator at univocity; re-attempting
+			// cannot succeed until the mapping is repaired (idempotent
+			// grant re-post or rootLogId hint) — do not treat as transient
+			// (plan-2607-10 slice 04).
+			if IsAuthorityNotFound(err) {
+				slog.Warn("log authority unknown to univocity; permanent until repaired",
+					"logId", logIdHex,
+					"remedy", "idempotent grant re-post or rootLogId hint")
+			}
 			return nil, fmt.Errorf("resolve authority: %w", err)
 		}
 		rootKey = binding.SigningKey

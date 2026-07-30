@@ -1,11 +1,14 @@
 package univocity
 
 import (
-	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,23 +70,24 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 	}
 	pool := &mockPool{chain: chain}
 
-	registry := NewForestRegistry(logger, nil, map[uint64]string{84532: "http://example"}, time.Minute)
-	registry.mu.Lock()
-	registry.forests = []ForestEntry{{
-		R:        rootID,
-		ChainID:  84532,
-		Contract: common.HexToAddress("0x0000000000000000000000000000000000000001"),
-	}}
-	registry.lastScan = time.Now()
-	registry.mu.Unlock()
+	contract := "0x0000000000000000000000000000000000000001"
 
-	resolver := NewForestResolver(logger, registry, pool, 100, time.Minute)
+	boot, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	store := newFakeStore()
+	store.genesis[rootUUID] = buildGenesisDoc(t, rootID, boot, 84532, common.HexToAddress(contract))
+	store.index[logUUID] = rootID
 
-	api := API{Logger: logger, Pool: pool, Resolver: resolver}
+	api := API{
+		Logger:  logger,
+		Pool:    pool,
+		Store:   store,
+		Forests: NewForestCache(100, time.Minute),
+	}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
-
-	contract := "0x0000000000000000000000000000000000000001"
 
 	t.Run("scoped root", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/84532/"+contract+"/root", nil)
@@ -140,14 +144,8 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 		var freshRoot logid.UUID
 		freshRoot[0] = 9
 		freshUUID := freshRoot.String()
-		registry.mu.Lock()
-		registry.forests = append(registry.forests, ForestEntry{
-			R:        freshRoot,
-			ChainID:  84532,
-			Contract: common.HexToAddress(contract),
-		})
-		registry.mu.Unlock()
-		resolver.OnRegistryScan()
+		store.genesis[freshUUID] = buildGenesisDoc(
+			t, freshRoot, boot, 84532, common.HexToAddress(contract))
 
 		chain.logInitialized = false
 		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+freshUUID+"/root", nil)
@@ -166,42 +164,22 @@ func TestAPI_ScopedAndLogIdShapes(t *testing.T) {
 		}
 	})
 
-	t.Run("logId unresolved 503", func(t *testing.T) {
+	t.Run("logId unresolved 404 with remedies", func(t *testing.T) {
 		unknown, _ := logid.ParseUUIDString("00000000-0000-0000-0000-0000000000ab")
 		req := httptest.NewRequest(http.MethodGet, "/api/logs/"+unknown.String()+"/root", nil)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Fatalf("expected 503, got %d", rec.Code)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d body=%s", rec.Code, rec.Body.String())
+		}
+		body, _ := io.ReadAll(rec.Body)
+		if !strings.Contains(string(body), "rootLogId") {
+			t.Fatalf("404 body must name the rootLogId remedy: %s", body)
 		}
 	})
 }
 
-func TestResolver_AmbiguousForest(t *testing.T) {
-	logger, _ := NewLogger(0)
-	logID := testLogID(1)
-	chain := &mockChain{logInitialized: true}
-	pool := &mockPool{chain: chain}
-	registry := NewForestRegistry(logger, nil, map[uint64]string{84532: "x"}, time.Minute)
-	registry.mu.Lock()
-	var r1, r2 logid.UUID
-	r1[0] = 1
-	r2[0] = 2
-	registry.forests = []ForestEntry{
-		{R: r1, ChainID: 84532, Contract: common.HexToAddress("0x1")},
-		{R: r2, ChainID: 84532, Contract: common.HexToAddress("0x2")},
-	}
-	registry.lastScan = time.Now()
-	registry.mu.Unlock()
-
-	resolver := NewForestResolver(logger, registry, pool, 10, time.Minute)
-	_, err := resolver.Resolve(context.Background(), logID)
-	if err == nil || err != ErrAmbiguousForest {
-		t.Fatalf("expected ErrAmbiguousForest, got %v", err)
-	}
-}
-
-func TestHandleLogIDPublicRoot_UnavailableWithoutResolver(t *testing.T) {
+func TestHandleLogIDPublicRoot_UnavailableWithoutStore(t *testing.T) {
 	logger, _ := NewLogger(0)
 	api := API{Logger: logger, Pool: &mockPool{chain: &mockChain{logInitialized: true}}}
 	mux := http.NewServeMux()

@@ -51,38 +51,68 @@ func (a API) resolveScoped(
 	return reader, contract, true
 }
 
+// notResolvedRemedy is appended to every 404 "log not resolved" response
+// (plan-2607-10 D5): resolution is point-lookup only, so the caller supplies
+// the locator when this instance has none.
+const notResolvedRemedy = "; supply ?rootLogId={forest R} or use " +
+	"/api/{chainId}/{contract}/logs/{logId}/…; recently registered logs may " +
+	"take up to a minute to resolve"
+
+// rootLogIdHint parses the optional ?rootLogId= locator hint (plan-2607-10
+// D2). Returns (zero, true) when absent, (id, true) when valid.
+func rootLogIdHint(r *http.Request) (logid.UUID, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("rootLogId"))
+	if raw == "" {
+		return logid.UUID{}, true
+	}
+	return logIDFromPathValue(raw)
+}
+
 func (a API) resolveForest(
 	w http.ResponseWriter,
 	r *http.Request,
 	logID logid.UUID,
 ) (ForestEntry, ChainReader, bool) {
-	if a.Resolver == nil && a.Store == nil {
+	if a.Store == nil {
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
-			"forest resolver unavailable", "")
+			"forest resolver unavailable", "grant store not configured")
 		return ForestEntry{}, nil, false
 	}
-	// Index (owned store) first, then genesis-identity + on-chain probe resolver.
-	entry, reader, err := a.resolveForestForLog(r.Context(), logID)
+	hint, ok := rootLogIdHint(r)
+	if !ok {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank",
+			"invalid rootLogId", "expect canonical UUID")
+		return ForestEntry{}, nil, false
+	}
+	entry, reader, err := a.resolveForestForLog(r.Context(), logID, hint)
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrAmbiguousForest):
-			a.Logger.Error("ambiguous forest resolution", "logId", logID.String())
-			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
-				"ambiguous log forest", err.Error())
-		case errors.Is(err, ErrLogNotResolved):
-			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
-				"log not resolved", "forest unknown or log not yet on-chain")
-		case errors.Is(err, ErrChainNotConfigured):
-			a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
-				"chain not configured", err.Error())
-		default:
-			a.Logger.Error("resolve failed", "error", err, "logId", logID.String())
-			a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
-				"resolve failed", err.Error())
-		}
+		a.writeResolveError(w, r, logID, err)
 		return ForestEntry{}, nil, false
 	}
 	return entry, reader, true
+}
+
+// writeResolveError maps resolution failures onto the plan-2607-10 taxonomy:
+// unknown locator = 404 with remedies, unavailable dependency = 503, anything
+// else = 502. Unknown and unavailable must never be conflated.
+func (a API) writeResolveError(
+	w http.ResponseWriter,
+	r *http.Request,
+	logID logid.UUID,
+	err error,
+) {
+	switch {
+	case errors.Is(err, ErrLogNotResolved):
+		a.writeProblem(w, r, http.StatusNotFound, "about:blank",
+			"log not resolved", err.Error()+notResolvedRemedy)
+	case errors.Is(err, ErrChainNotConfigured), errors.Is(err, ErrStoreNotConfigured):
+		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
+			"chain not configured", err.Error())
+	default:
+		a.Logger.Error("resolve failed", "error", err, "logId", logID.String())
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
+			"resolve failed", err.Error())
+	}
 }
 
 func (a API) handleScopedRoot(w http.ResponseWriter, r *http.Request) {
@@ -219,7 +249,13 @@ func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 			"expect canonical UUID")
 		return
 	}
-	res, err := a.resolveAuthority(r.Context(), logID)
+	hint, ok := rootLogIdHint(r)
+	if !ok {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank",
+			"invalid rootLogId", "expect canonical UUID")
+		return
+	}
+	res, err := a.resolveAuthority(r.Context(), logID, hint)
 	if err != nil {
 		a.writeAuthorityError(w, r, err)
 		return
@@ -246,9 +282,12 @@ func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 
 func (a API) writeAuthorityError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, ErrLogNotResolved), errors.Is(err, ErrAmbiguousForest):
+	case errors.Is(err, ErrLogNotResolved):
+		a.writeProblem(w, r, http.StatusNotFound, "about:blank",
+			"log not resolved", err.Error()+notResolvedRemedy)
+	case errors.Is(err, ErrChainNotConfigured), errors.Is(err, ErrStoreNotConfigured):
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
-			"log not resolved", err.Error())
+			"chain not configured", err.Error())
 	default:
 		a.Logger.Info("authority resolution failed", "logId", logID(r).String(), "error", err)
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
