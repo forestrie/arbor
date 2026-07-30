@@ -81,6 +81,70 @@ func TestResolve_DanglingLocatorIs404AndSelfHeals(t *testing.T) {
 	}
 }
 
+// A self-claim without genesis is the claim-first crash window between
+// IndexCreate(R,R) and PutGenesisIfAbsent: it must 404 like any miss but the
+// claim must SURVIVE — deleting it would forfeit the in-flight genesis's
+// uniqueness reservation (plan-2607-11 R2).
+func TestResolve_SelfClaimWithoutGenesisSurvives(t *testing.T) {
+	f := newResolveFixture(t, time.Minute)
+	r := testLogID(30)
+	f.store.index[r.String()] = r
+
+	rec := f.getRoot(t, "/api/logs/"+r.String()+"/root")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("self-claim without genesis want 404 got %d", rec.Code)
+	}
+	if got, ok := f.store.index[r.String()]; !ok || got != r {
+		t.Fatal("self-claim must survive resolution (mid-genesis crash window)")
+	}
+}
+
+func TestForestCache_NegativeBounded(t *testing.T) {
+	c := NewForestCache(8, time.Minute)
+	for i := 0; i < 40; i++ {
+		var id logid.UUID
+		id[14] = byte(i >> 8)
+		id[15] = byte(i)
+		c.PutNegative(id)
+	}
+	c.mu.Lock()
+	n := len(c.negative)
+	c.mu.Unlock()
+	if n > 8 {
+		t.Fatalf("negative cache must be bounded by maxSize: got %d entries", n)
+	}
+	// The newest entry must still be present (evict-oldest, not evict-newest).
+	var last logid.UUID
+	last[15] = 39
+	if _, _, neg := c.Get(last); !neg {
+		t.Fatal("newest negative entry must survive eviction")
+	}
+}
+
+// The ?rootLogId= hint must be wired on the /authority route too, not just
+// /root (plan-2607-11 R4). A wrong hint names both ids; a malformed hint is
+// a 400.
+func TestAuthority_HintWiring(t *testing.T) {
+	f := newResolveFixture(t, time.Minute)
+	root := testLogID(31)
+	orphan := testLogID(32)
+	f.addForest(t, root)
+
+	rec := f.getRoot(t, "/api/logs/"+orphan.String()+"/authority?rootLogId="+root.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("wrong hint on authority want 404 got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, orphan.String()) || !strings.Contains(body, root.String()) {
+		t.Fatalf("authority 404 must name the log and the hinted forest: %s", body)
+	}
+
+	rec = f.getRoot(t, "/api/logs/"+orphan.String()+"/authority?rootLogId=nope")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed hint on authority want 400 got %d", rec.Code)
+	}
+}
+
 func TestResolve_HintPaths(t *testing.T) {
 	f := newResolveFixture(t, time.Minute)
 	root := testLogID(4)
@@ -202,8 +266,11 @@ func TestPostGenesis_ClaimFirstRejectsBoundLogId(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("claim-first want 409 got %d body=%s", rec.Code, rec.Body.String())
+	// 422, NOT 409: canopy's genesis-forward maps every 409 to idempotent
+	// "exists"/success, which would swallow a real uniqueness violation
+	// (plan-2607-11 R1).
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("claim-first conflict want 422 got %d body=%s", rec.Code, rec.Body.String())
 	}
 	if len(store.genesis) != 0 {
 		t.Fatal("conflicting genesis must not be written (claim-first ordering)")

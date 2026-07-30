@@ -78,8 +78,13 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 			"index create failed", err.Error())
 		return
 	}
+	// Cross-forest conflict is 422, NOT 409: canopy's genesis-forward maps
+	// every 409 to idempotent "exists" (univocity-genesis-client.ts), so a
+	// 409 here would report onboarding success with no genesis stored. 409
+	// stays reserved for the same-R "genesis exists" retry signal below
+	// (plan-2607-11 R1).
 	if !claimed && existing != doc.Forest.R {
-		a.writeProblem(w, r, http.StatusConflict, "about:blank",
+		a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
 			"logId belongs to another forest",
 			"global logId->R uniqueness violated")
 		return

@@ -1,17 +1,18 @@
 ---
 id: 2607-11
-status: draft
+status: complete
 created: 2026-07-30
 refs: [FOR-510]
 ---
 
 # Plan 2607-11 — plan-2607-10 implementation review remediation
 
-**Status:** DRAFT · **Related:** [plan-2607-10](plan-2607-10-univocity-index-resolution/README.md), arbor#85 (`3a7bd02`), FOR-510
+**Status:** IMPLEMENTED (2026-07-30, on arbor#85) · **Related:** [plan-2607-10](plan-2607-10-univocity-index-resolution/README.md), arbor#85 (`3a7bd02`), FOR-510
 
 review-changes run on the plan-2607-10 implementation (2026-07-30).
-Worst = **1 High + 2 Medium**; all items are PR-local fixes on arbor#85,
-none reopens the plan's locked decisions.
+Worst = **1 High + 2 Medium**; all items were PR-local fixes on arbor#85,
+none reopened the plan's locked decisions. All R1-R6 remediated (R5 =
+accepted note in the plan-2607-10 README).
 
 ## R1 High — cross-forest genesis conflict is swallowed as success by canopy
 

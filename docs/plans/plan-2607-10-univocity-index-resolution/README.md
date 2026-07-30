@@ -26,8 +26,19 @@ Implementation deviations (all within the locked decisions):
   per-sealing-attempt, not a tight ladder. Dedicated suppression can ride
   later if a legacy 404 ever bites.
 
+Accepted trade-off (plan-2607-11 R5): the deleted in-RAM registry
+incidentally served its cached forests through an R2 outage; now uncached
+resolutions 503 during one. The positive `ForestCache` covers hot logs and
+503-on-unavailable is the honest taxonomy — no warm-standby state is
+reintroduced for this.
+
 Outstanding before deploy: the OQ1 one-time read-only prod LIST assessment
 (slice 04 rollout order).
+
+Implementation review: [plan-2607-11](../plan-2607-11-univocity-index-resolution-review-remediation.md)
+(1 High + 2 Medium, all remediated on arbor#85 — notably the cross-forest
+genesis claim conflict is **422**, because canopy's genesis-forward maps
+every 409 to idempotent "exists").
 
 Replace the univocity trust-root service's forest-registry scan with pure
 point-lookup resolution, and delete the scan, the inline rescan, and the

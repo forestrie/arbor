@@ -18,6 +18,7 @@ type ForestCache struct {
 	maxSize  int
 	negTTL   time.Duration
 	order    []string
+	negOrder []string
 }
 
 // NewForestCache builds a bounded resolution cache with a negative-entry TTL.
@@ -31,13 +32,6 @@ func NewForestCache(maxSize int, negTTL time.Duration) *ForestCache {
 		maxSize:  maxSize,
 		negTTL:   negTTL,
 	}
-}
-
-func (c *ForestCache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.positive = make(map[string]ForestEntry)
-	c.order = nil
 }
 
 func (c *ForestCache) Get(logID logid.UUID) (ForestEntry, bool, bool) {
@@ -70,9 +64,23 @@ func (c *ForestCache) PutPositive(logID logid.UUID, e ForestEntry) {
 	}
 }
 
+// PutNegative records an unknown logId, bounded by maxSize with evict-oldest —
+// the 404 path is public, so an unbounded map would be a memory-exhaustion
+// vector via random-logId spray (plan-2607-11 R3).
 func (c *ForestCache) PutNegative(logID logid.UUID) {
 	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, exists := c.negative[key]; !exists {
+		c.negOrder = append(c.negOrder, key)
+	}
 	c.negative[key] = time.Now().Add(c.negTTL)
+	// negOrder may hold stale keys (reaped by Get on expiry) or duplicates
+	// (re-add after reap); popping those is harmless and the loop terminates
+	// because negOrder is always at least as long as negative.
+	for len(c.negative) > c.maxSize && len(c.negOrder) > 0 {
+		oldest := c.negOrder[0]
+		c.negOrder = c.negOrder[1:]
+		delete(c.negative, oldest)
+	}
 }

@@ -74,7 +74,14 @@ func (a API) resolveForestForLog(
 		// Dangling locator (plan-2607-10 D7): the index names a forest whose
 		// genesis is gone (delete paths, pruning). Self-heal and continue as
 		// a miss — stale locators must never surface as availability errors.
-		if derr := a.Store.DeleteIndex(ctx, logID); derr != nil {
+		// EXCEPT a self-claim (r == logID): that is the claim-first genesis
+		// crash window (IndexCreate before PutGenesisIfAbsent) and deleting
+		// it would forfeit the in-flight genesis's uniqueness reservation
+		// (plan-2607-11 R2). Leave it; the miss below still yields 404.
+		if r == logID {
+			a.Logger.Warn("self-claim without genesis (mid-genesis crash window); leaving claim",
+				"R", logID.String())
+		} else if derr := a.Store.DeleteIndex(ctx, logID); derr != nil {
 			a.Logger.Warn("dangling index self-heal failed",
 				"logId", logID.String(), "R", r.String(), "error", derr)
 		} else {

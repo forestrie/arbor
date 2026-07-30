@@ -22,7 +22,7 @@ optional); date-cohort plans live in this directory.
 | [plan-2607-08](plan-2607-08-for408-resync-review-remediation.md) | Resync sweep review remediation: nonce split-brain (W1) + health-gated acks/safe rollback (W2) gate enablement; poison-top-seal fallback, test gaps, config hygiene (FOR-408) | draft |
 | [plan-2607-09](plan-2607-09-for410-review-remediation.md) | FOR-410 boundary-base fix: review remediation | draft |
 | [plan-2607-10](plan-2607-10-univocity-index-resolution/README.md) | Univocity: index+hint resolution — delete the registry scan / inline rescan / on-chain probe; 404 + verified `rootLogId` hint, no backfill machinery (FOR-510; outage band-aid arbor-flux#52) | implemented (#85) |
-| [plan-2607-11](plan-2607-11-univocity-index-resolution-review-remediation.md) | plan-2607-10 implementation review remediation: 409-vs-exists genesis contract (R1 High), self-claim reaping, negative-cache bound (FOR-510) | draft |
+| [plan-2607-11](plan-2607-11-univocity-index-resolution-review-remediation.md) | plan-2607-10 implementation review remediation: 409-vs-exists genesis contract (R1 High), self-claim reaping, negative-cache bound (FOR-510) | implemented (#85) |
 
 ## Legacy plans (frozen ids)
 
