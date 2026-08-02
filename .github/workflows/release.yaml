@@ -30,6 +30,9 @@ permissions:
 
 jobs:
   build:
+    # secret-egress-ok: exports only `version`, a semver tag parsed from the ref
+    # secrets.GITHUB_TOKEN is a setup-task repo-token and never reaches an
+    # output. See devdocs plan-2608-04.
     name: Build Release
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -118,6 +121,9 @@ jobs:
           done
 
   orchestrator-release:
+    # secret-egress-ok: exports only `version`, a semver tag computed from tags
+    # The GITHUB_TOKEN and the forestrie-cd app key serve dependency clones
+    # only; neither reaches an output. See devdocs plan-2608-04.
     name: Orchestrator release (main)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
