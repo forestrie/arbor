@@ -527,7 +527,17 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 // state (onchainSize 0): the ADR-0008 terminal-ack contract assumes a later
 // seal re-drives the range, which is unreliable for a genesis log (FOR-411).
 func virginLogRevert(res publisher.PublishResult) bool {
-	return res.Status == publisher.StatusReverted && res.OnchainSize == 0
+	if res.Status != publisher.StatusReverted || res.OnchainSize != 0 {
+		return false
+	}
+	// A calldata-invalid revert is terminal even on a virgin log. FOR-411 keeps
+	// virgin reverts non-terminal because a genesis log has no next seal to
+	// self-heal through (ADR-0008) — but that reasoning only holds where the
+	// seal COULD become publishable. When the contract rejected the bytes
+	// themselves, no amount of redelivery changes the outcome: the identical
+	// calldata fails identically forever, and only a re-seal (new content) can
+	// help. Deferring those was retaining work that can never succeed.
+	return !publisher.RevertIsCalldataInvalid(res.Reason)
 }
 
 // resyncHealthyNow reports whether the sweep is configured and recently

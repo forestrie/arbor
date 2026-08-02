@@ -497,6 +497,69 @@ func (w *ChainWriter) classifyRevert(err error) (string, bool) {
 
 // knownRevertNames is the set of decodable IUnivocity error names, used to bound
 // the revert metric label (RevertLabel).
+// calldataInvalidReverts are revert reasons that are properties of the
+// SUBMITTED BYTES, not of chain or account state. Identical calldata will fail
+// identically forever, so re-driving one is pure waste: malformed CBOR/COSE, a
+// signature that does not verify, a length or algorithm the contract rejects,
+// an id that does not match. The only thing that can fix these is a NEW seal,
+// which arrives as a changed ETag and clears the poison entry on its own.
+//
+// Everything NOT in this set is treated as possibly-resolvable and aged within
+// the sweep horizon, because external action can make the same bytes valid
+// later. InvalidPaymentReceipt is the instructive case and is deliberately
+// ABSENT here: funding or registering the instance makes the identical
+// checkpoint publishable, so it is retryable-in-principle and the horizon —
+// not this table — is what bounds it. Likewise MissingDelegationCert and
+// CheckpointIndexOutOfDelegationRange, which a later certificate satisfies,
+// and LogNotFound/NotInitialized, which owner ordering resolves.
+//
+// Unknown reasons (a contract error added after this table) fall through to
+// the retry branch by design: the horizon still bounds them, and silently
+// dropping an unrecognised revert would be the worse failure.
+var calldataInvalidReverts = map[string]struct{}{
+	// Structure / encoding of the submitted checkpoint.
+	"InvalidCheckpointCose":        {},
+	"InvalidCoseCborStructure":     {},
+	"UnexpectedMajorType":          {},
+	"ClaimNotFound":                {},
+	"ProofPayloadExceedsMaxHeight": {},
+	"InvalidAccumulatorLength":     {},
+	// Signatures and keys that do not verify against what was sent.
+	"SignatureVerificationFailed":        {},
+	"ConsistencyReceiptSignatureInvalid": {},
+	"DelegationSignatureInvalid":         {},
+	"InvalidSignatureLength":             {},
+	"InvalidDelegationSignatureLength":   {},
+	"InvalidDelegationKeyLength":         {},
+	"InvalidRootKeyLength":               {},
+	"InvalidRecoveryId":                  {},
+	"RecoveryIdDuplicate":                {},
+	"DuplicateRootKeyInDelegation":       {},
+	"RecoveredKeyMismatchIncludedKey":    {},
+	"InvalidSignatureChain":              {},
+	// Identity mismatches between the payload and its target.
+	"ReceiptLogIdMismatch":        {},
+	"DelegationLogIdMismatch":     {},
+	"GrantDataMustMatchBootstrap": {},
+	// Algorithm / shape the contract will never accept for this log.
+	"UnsupportedAlgorithm":         {},
+	"DelegationUnsupportedForAlg":  {},
+	"InconsistentReceiptSignature": {},
+	"InvalidReceiptInclusionProof": {},
+	"FirstCheckpointSizeTooSmall":  {},
+}
+
+// RevertIsCalldataInvalid reports whether a decoded revert reason can never be
+// resolved by re-submitting the same calldata. Callers use it to settle a seal
+// immediately (with an alert) instead of retrying it to the sweep horizon.
+func RevertIsCalldataInvalid(reason string) bool {
+	if reason == "" {
+		return false
+	}
+	_, ok := calldataInvalidReverts[reason]
+	return ok
+}
+
 var knownRevertNames = func() map[string]struct{} {
 	parsed, err := abi.JSON(strings.NewReader(univocityErrorsABI))
 	if err != nil {

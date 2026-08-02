@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,29 @@ const resyncMaxPasses = 4
 // burst exceeded ReceiptTimeout and churned as retries. Anything over budget
 // simply waits for the next sweep.
 const resyncMaxSubmitsPerSweep = 16
+
+// resyncHorizon bounds how far back the sweep looks. Beyond it a sealed
+// checkpoint is no longer a sweep candidate.
+//
+// The sweep exists to cover a LOST R2 NOTIFICATION (FOR-408): a notification is
+// lost, or not, at the moment the object is written, and the sweep runs every
+// interval — so a candidate that has been visible for hours has already been
+// re-driven many times. Anything still unanchored by then is not waiting on a
+// lost notification; it is waiting on a fix. Continuing to re-drive it forever
+// made per-sweep work grow with TOTAL HISTORY rather than with outstanding
+// work (709 objects listed to find 15 blocked), which is unbounded by
+// construction for a backstop that is meant to be cheap.
+//
+// Stateless by design: the bound comes from the object's own LastModified,
+// which the listing already returns, so nothing has to be remembered, written,
+// or reconciled — and a restart cannot reset it.
+//
+// The cost is a real one and is why aged-out candidates ALERT rather than
+// disappearing: an infrastructure outage longer than the horizon would age out
+// checkpoints that were never successfully driven, which is precisely the
+// strand FOR-408 exists to prevent. Recovery is the operator re-drive ("poke")
+// path the terminal-ack comment already anticipates.
+const resyncHorizon = 12 * time.Hour
 
 // resyncHealthyWithin is the freshness multiple for Healthy(): the consumer
 // may ack owner-gated messages only while the last successful sweep is at
@@ -149,6 +173,10 @@ type SweepStats struct {
 	// mined revert or assemble-terminal status); lower massifs of the same
 	// log are attempted in their place (W3).
 	Unpublishable int
+	// AgedOut counts candidates skipped for being older than resyncHorizon.
+	// Each one is also logged at ERROR: a seal that aged out while still
+	// unanchored is the FOR-408 strand shape and needs an operator re-drive.
+	AgedOut int
 	// PoisonSkipped counts candidates skipped via the poison cache — seals
 	// already proven unpublishable at their current ETag. No gas, no ERROR.
 	PoisonSkipped int
@@ -160,11 +188,40 @@ type SweepStats struct {
 	Errors int
 }
 
+// parseListedTime decodes the listing's LastModified. An unparseable value
+// yields the zero time, which agedOut treats as in-window: a backend that
+// formats timestamps unexpectedly must not cause candidates to be dropped
+// silently.
+func parseListedTime(v string) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, http.TimeFormat} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // sealRef is one sealed checkpoint object: its key and the listed ETag (the
 // content identity the poison skip-cache is keyed on).
 type sealRef struct {
 	key  string
 	etag string
+	// lastModified is the object's own write time, straight from the listing.
+	// It is what makes the horizon stateless — see resyncHorizon. Zero when the
+	// backend returned an unparseable timestamp, which is treated as "in
+	// window" so a formatting quirk can never silently drop a candidate.
+	lastModified time.Time
+}
+
+// agedOut reports whether this seal is past the sweep horizon.
+func (s sealRef) agedOut(now time.Time) bool {
+	if s.lastModified.IsZero() {
+		return false
+	}
+	return now.Sub(s.lastModified) > resyncHorizon
 }
 
 // logSeals is one log's sealed checkpoints, highest massif index first.
@@ -205,6 +262,12 @@ type poisonEntry struct {
 	etag  string
 	at    time.Time
 	tries int
+	// calldataInvalid marks a revert that can never be resolved by
+	// re-submitting the same bytes (RevertIsCalldataInvalid). Such an entry is
+	// not re-adjudicated on backoff at all — only a re-seal, which arrives as
+	// a changed ETag, clears it. Ageing it would burn gas re-proving a fact
+	// the contract already settled.
+	calldataInvalid bool
 }
 
 const (
@@ -398,10 +461,11 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 				stats.Covered++
 			case StatusReverted:
 				stats.Unpublishable++
-				r.markPoison(out.group, out.key)
+				r.markPoison(out.group, out.key, out.res.Reason)
 				r.logger.Error("unpublishable checkpoint skipped by resync sweep",
 					"key", out.key, "reason", out.res.Reason, "chain", out.res.ChainID,
-					"contract", out.res.Contract.Hex())
+					"contract", out.res.Contract.Hex(),
+					"calldataInvalid", RevertIsCalldataInvalid(out.res.Reason))
 				if r.driveLowerMassifs(ctx, out.group, &stats, &budget) {
 					progressed = true
 				}
@@ -444,12 +508,29 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 		if ctx.Err() != nil {
 			return assembled{}, 0, true
 		}
+		// Horizon: past it, this seal is no longer sweep material. See
+		// resyncHorizon — the notification-loss window closed hours ago, and
+		// re-driving forever is what made sweep cost track total history.
+		if ref.agedOut(time.Now()) {
+			stats.AgedOut++
+			// Loud, once per sweep per key. An aged-out seal that never
+			// anchored is exactly the FOR-408 strand this sweep exists to
+			// prevent, so it must be visible and operator-actionable rather
+			// than silently dropped. Recovery is the re-drive ("poke") path.
+			r.logger.Error("checkpoint aged out of resync horizon, still unanchored",
+				"key", key, "lastModified", ref.lastModified.UTC().Format(time.RFC3339),
+				"horizon", resyncHorizon.String())
+			continue
+		}
 		// Poison cache: a seal proven unpublishable at this exact content is
 		// skipped without assembling or (worse) re-mining its revert. A
 		// changed ETag (re-seal) or an elapsed backoff (FOR-411 ageing)
 		// clears it for one fresh adjudication.
+		//
+		// A calldata-invalid revert never ages back in: the same bytes cannot
+		// become valid, so only a re-seal (new ETag) can clear it.
 		if e, known := r.poison[key]; known && e.etag == ref.etag &&
-			time.Since(e.at) < poisonBackoff(e.tries) {
+			(e.calldataInvalid || time.Since(e.at) < poisonBackoff(e.tries)) {
 			stats.PoisonSkipped++
 			continue
 		}
@@ -477,9 +558,10 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 			// Terminal at assemble (poison-shaped): alert once, cache, and try
 			// the next lower massif of the same log.
 			stats.Unpublishable++
-			r.cachePoison(key, ref.etag)
+			r.cachePoison(key, ref.etag, res.Reason)
 			r.logger.Error("unpublishable checkpoint skipped by resync sweep",
-				"key", key, "status", res.Status.String(), "reason", res.Reason)
+				"key", key, "status", res.Status.String(), "reason", res.Reason,
+				"calldataInvalid", RevertIsCalldataInvalid(res.Reason))
 		}
 	}
 	return assembled{}, 0, true // exhausted: every seal for this log is poison
@@ -487,23 +569,27 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 
 // markPoison caches out-of-band (submit-phase) poison for g's current
 // candidate key at its listed ETag.
-func (r *Resync) markPoison(g *logSeals, key string) {
+func (r *Resync) markPoison(g *logSeals, key, reason string) {
 	for _, ref := range g.seals {
 		if ref.key == key {
-			r.cachePoison(key, ref.etag)
+			r.cachePoison(key, ref.etag, reason)
 			return
 		}
 	}
 }
 
 // cachePoison records (or re-arms with backoff) a poison entry.
-func (r *Resync) cachePoison(key, etag string) {
+func (r *Resync) cachePoison(key, etag, reason string) {
+	invalid := RevertIsCalldataInvalid(reason)
 	if e, ok := r.poison[key]; ok && e.etag == etag {
 		e.tries++
 		e.at = time.Now()
+		// Latch: once these bytes are known invalid, a later adjudication that
+		// reported a vaguer reason must not re-arm the backoff.
+		e.calldataInvalid = e.calldataInvalid || invalid
 		return
 	}
-	r.poison[key] = &poisonEntry{etag: etag, at: time.Now()}
+	r.poison[key] = &poisonEntry{etag: etag, at: time.Now(), calldataInvalid: invalid}
 }
 
 // driveLowerMassifs synchronously drives g's remaining lower candidates after
@@ -537,10 +623,11 @@ func (r *Resync) driveLowerMassifs(ctx context.Context, g *logSeals, stats *Swee
 			return false
 		case StatusReverted:
 			stats.Unpublishable++
-			r.markPoison(g, req.key)
+			r.markPoison(g, req.key, res.Reason)
 			r.logger.Error("unpublishable checkpoint skipped by resync sweep",
 				"key", req.key, "reason", res.Reason, "chain", res.ChainID,
-				"contract", res.Contract.Hex())
+				"contract", res.Contract.Hex(),
+				"calldataInvalid", RevertIsCalldataInvalid(res.Reason))
 			g.next++
 		default:
 			stats.Errors++
@@ -594,9 +681,10 @@ func (r *Resync) recordAnchored(key string, res PublishResult, stats *SweepStats
 // (height, log), keys ordered highest massif index first.
 func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 	type entry struct {
-		key   string
-		etag  string
-		index uint32
+		key          string
+		etag         string
+		index        uint32
+		lastModified time.Time
 	}
 	byLog := make(map[string][]entry)
 
@@ -612,7 +700,12 @@ func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 				continue // not a .sth (or malformed) — not sweep material
 			}
 			group := fmt.Sprintf("%d/%s", ck.MassifHeight, ck.LogID)
-			byLog[group] = append(byLog[group], entry{key: obj.Key, etag: obj.ETag, index: ck.MassifIndex})
+			byLog[group] = append(byLog[group], entry{
+				key:          obj.Key,
+				etag:         obj.ETag,
+				index:        ck.MassifIndex,
+				lastModified: parseListedTime(obj.LastModified),
+			})
 		}
 		if !page.IsTruncated || page.NextContinuationToken == "" {
 			break
@@ -625,7 +718,7 @@ func (r *Resync) listLogSeals(ctx context.Context) ([]*logSeals, error) {
 		sort.Slice(entries, func(i, j int) bool { return entries[i].index > entries[j].index })
 		seals := make([]sealRef, len(entries))
 		for i, e := range entries {
-			seals[i] = sealRef{key: e.key, etag: e.etag}
+			seals[i] = sealRef{key: e.key, etag: e.etag, lastModified: e.lastModified}
 		}
 		groups = append(groups, &logSeals{seals: seals})
 	}
