@@ -1,0 +1,25 @@
+# PR gate for the secret-egress class (devdocs plan-2608-04): no job may export
+# secret-derived data through `outputs:`. GitHub drops such outputs silently,
+# so the consumer receives an empty string and the failure surfaces far from its
+# cause — the shape that had canopy's T3 tier broken from the day it was built.
+#
+# Jobs triaged benign during the 2026-08-02 estate sweep carry
+# `# secret-egress-ok: <reason>` in place; the reason is echoed in the report.
+name: Workflow lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secret-egress:
+    name: Secret egress lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: forestrie/.github/actions/secret-egress-lint@main
