@@ -120,6 +120,57 @@ jobs:
             task release:build-push SERVICE="$service"
           done
 
+  # FOR-532. The frontier resolver reads GitHub *Releases*, not git tags:
+  # `fetchLatestReleaseTag` and `fetchSemverReleaseTags` both call
+  # `GET /repos/{owner}/{repo}/releases` and match `tag_name`
+  # (release-orchestrator/packages/resolver/src/github-releases.ts). Release
+  # creation used to live only in `orchestrator-release` below, which is gated
+  # to `workflow_dispatch` — so once auto-tag started cutting tags on merge
+  # (plan 2608-06 Phase 2) the tags appeared, this workflow ran, and the
+  # frontier never advanced, because no Release was ever attached. v0.1.26 was
+  # the first tag to land in that hole.
+  #
+  # arbor attaches no assets: its release carries the service ref and docker tag
+  # only, and `config/repos.jsonc` declares `"kits": []`. The tag_name is the
+  # whole payload.
+  publish-github-release:
+    name: Publish GitHub Release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # Job-level permissions replace the workflow-level block, so this names
+    # everything it needs and nothing more: no id-token here.
+    permissions:
+      contents: write
+    steps:
+      # No checkout and no tag creation. The tag already exists — auto-tag
+      # pushed it — and two cutters on one namespace is its own defect.
+      - name: Publish GitHub Release for the pushed tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          : "${TAG:?build job produced no version}"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "GitHub Release ${TAG} already exists — nothing to do"
+          else
+            gh release create "$TAG" --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes "Released from tag ${TAG}, cut by auto-tag on merge to main."
+            echo "created GitHub Release ${TAG}"
+          fi
+          # The assertion that catches the silence: a tag whose Release is
+          # missing is invisible to qualification, so prove it is readable the
+          # way the resolver will read it rather than trusting the create.
+          got=$(gh api "/repos/${{ github.repository }}/releases?per_page=100" \
+                  --jq "[.[] | select(.tag_name == \"${TAG}\")] | length")
+          if [ "$got" != "1" ]; then
+            echo "::error::Release ${TAG} is not listed by /releases (found ${got}) — the frontier resolver would not see this release" >&2
+            exit 1
+          fi
+          echo "verified: ${TAG} is listed by /releases"
+
   orchestrator-release:
     # secret-egress-ok: exports only `version`, a semver tag computed from tags
     # The GITHUB_TOKEN and the forestrie-cd app key serve dependency clones
