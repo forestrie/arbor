@@ -10,12 +10,8 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
     inputs:
-      orchestrator_run_id:
-        description: Correlation id from release-orchestrator release.yml
-        required: true
-        type: string
       skip_cross_repo_tests:
-        description: Accepted for ADR-0043 contract; unused in arbor release
+        description: Accepted for the ADR-0043 contract; unused in arbor release
         required: false
         default: true
         type: boolean
@@ -293,7 +289,7 @@ jobs:
       - name: Write release fragment
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          ORCH_RUN_ID: ${{ github.event.inputs.orchestrator_run_id }}
+          ORCH_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
           mkdir -p release-metadata
@@ -345,5 +341,5 @@ jobs:
           else
             gh release create "$TAG" \
               --title "$TAG" \
-              --notes "Orchestrator-driven release (run ${{ github.event.inputs.orchestrator_run_id }})."
+              --notes "Manually dispatched release (run ${{ github.run_id }})."
           fi
