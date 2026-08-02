@@ -22,7 +22,12 @@ type step struct {
 	ready  bool
 	status PublishStatus // when !ready
 	submit SubmitOutcome // when ready: outcome the fake batch acks with
+	reason string        // when submit==OutcomeReverted: decoded revert name
 }
+
+// stepRevertInvalid reverts with a calldata-invalid reason: the same bytes can
+// never succeed, so the sweep must settle it rather than age it.
+var stepRevertInvalid = step{ready: true, submit: OutcomeReverted, reason: "InvalidCheckpointCose"}
 
 var (
 	stepOwnerGated = step{status: StatusOwnerNotAnchored}
@@ -80,7 +85,7 @@ func (f *fakeCore) SubmitBatch(_ context.Context, reqs []AssembledPublish) {
 		f.pending = f.pending[1:]
 		f.submits = append(f.submits, item.key)
 		f.mu.Unlock()
-		r.Ack(SubmitResult{Outcome: item.st.submit})
+		r.Ack(SubmitResult{Outcome: item.st.submit, Reason: item.st.reason})
 	}
 }
 
@@ -143,6 +148,24 @@ func page(keys ...string) s3.ListResult {
 		objs = append(objs, s3.ObjectSummary{Key: k, ETag: k + "#v1"})
 	}
 	return s3.ListResult{Objects: objs}
+}
+
+// pageAged builds a listing whose objects were written `age` ago, so the sweep
+// horizon can be exercised without waiting.
+func pageAged(age time.Duration, keys ...string) s3.ListResult {
+	var objs []s3.ObjectSummary
+	for _, k := range keys {
+		objs = append(objs, s3.ObjectSummary{
+			Key:          k,
+			ETag:         k + "#v1",
+			LastModified: time.Now().Add(-age).UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return s3.ListResult{Objects: objs}
+}
+
+func onePageAged(age time.Duration, keys ...string) *fakeLister {
+	return &fakeLister{pages: map[string]s3.ListResult{"": pageAged(age, keys...)}}
 }
 
 func onePage(keys ...string) *fakeLister {
@@ -497,5 +520,135 @@ func TestPoisonCacheAgeing(t *testing.T) {
 	// Third adjudication publishes (transient revert resolved).
 	if len(pub.submits) != 3 {
 		t.Fatalf("expired doubled backoff must re-adjudicate; submits=%v", pub.submits)
+	}
+}
+
+// TestResyncHorizonSkipsAgedCandidates pins the bound that makes this backstop
+// cheap: per-sweep work must track OUTSTANDING work, not total history. Before
+// the horizon, a seal that could never publish stayed a candidate forever, so
+// sweep cost grew with every checkpoint the platform had ever written.
+func TestResyncHorizonSkipsAgedCandidates(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {stepPublish},
+	})
+	lister := onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+
+	stats, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if stats.AgedOut != 1 {
+		t.Fatalf("aged candidate must be counted, not silently dropped; stats=%+v", stats)
+	}
+	// The point of the horizon: no assemble, no gas, no chain call.
+	if len(pub.submits) != 0 || len(pub.assembles) != 0 {
+		t.Fatalf("aged candidate must not be driven; assembles=%v submits=%v",
+			pub.assembles, pub.submits)
+	}
+}
+
+// TestResyncHorizonKeepsFreshCandidates guards the other direction: the
+// horizon must not weaken the notification-loss guarantee for anything still
+// inside the window.
+func TestResyncHorizonKeepsFreshCandidates(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {stepPublish},
+	})
+	lister := onePageAged(resyncHorizon-time.Hour, ckpt(robertLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+
+	stats, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if stats.AgedOut != 0 {
+		t.Fatalf("in-window candidate must not age out; stats=%+v", stats)
+	}
+	if len(pub.submits) != 1 {
+		t.Fatalf("in-window candidate must still be driven; submits=%v", pub.submits)
+	}
+}
+
+// TestUnparseableTimestampIsNotAgedOut: a backend whose LastModified we cannot
+// parse must not cause candidates to vanish. Failing open here costs a little
+// wasted work; failing closed would silently strand logs, which is the exact
+// FOR-408 harm the sweep exists to prevent.
+func TestUnparseableTimestampIsNotAgedOut(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(robertLog, 0): {stepPublish}})
+	lister := &fakeLister{pages: map[string]s3.ListResult{"": {
+		Objects: []s3.ObjectSummary{{
+			Key: ckpt(robertLog, 0), ETag: "e#v1", LastModified: "not-a-timestamp",
+		}},
+	}}}
+	r := newTestResync(pub, lister, nil, nil)
+
+	stats, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if stats.AgedOut != 0 || len(pub.submits) != 1 {
+		t.Fatalf("unparseable timestamp must fail OPEN; stats=%+v submits=%v", stats, pub.submits)
+	}
+}
+
+// TestCalldataInvalidPoisonNeverAges: TestPoisonCacheAgeing proves a poison
+// entry is re-adjudicated once its backoff elapses. That is right for a seal
+// that might become publishable — and wrong for one the contract rejected on
+// its bytes, where re-mining only burns gas to re-prove a settled fact.
+func TestCalldataInvalidPoisonNeverAges(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {stepRevertInvalid, stepPublish},
+	})
+	r := newTestResync(pub, onePage(ckpt(robertLog, 0)), nil, nil)
+
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if len(pub.submits) != 1 {
+		t.Fatalf("sweep 1 mines the revert once; submits=%v", pub.submits)
+	}
+	if e := r.poison[ckpt(robertLog, 0)]; e == nil || !e.calldataInvalid {
+		t.Fatalf("revert reason must latch calldataInvalid; entry=%+v", e)
+	}
+
+	// Age it far past any backoff. An ageing entry would re-adjudicate here.
+	r.poison[ckpt(robertLog, 0)].at = time.Now().Add(-100 * poisonRetryMax)
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.PoisonSkipped != 1 || len(pub.submits) != 1 {
+		t.Fatalf("calldata-invalid poison must never re-adjudicate; stats=%+v submits=%v",
+			s2, pub.submits)
+	}
+}
+
+// TestRevertClassification pins the split. The membership that matters most is
+// the NEGATIVE one: InvalidPaymentReceipt is retryable-in-principle, because
+// funding or registering the instance makes the identical checkpoint valid.
+// Classifying it as permanently invalid would settle accounts that are one
+// operator action away from working.
+func TestRevertClassification(t *testing.T) {
+	for _, name := range []string{
+		"InvalidCheckpointCose", "SignatureVerificationFailed",
+		"DelegationSignatureInvalid", "ReceiptLogIdMismatch", "UnsupportedAlgorithm",
+	} {
+		if !RevertIsCalldataInvalid(name) {
+			t.Errorf("%s is a property of the submitted bytes; must be calldata-invalid", name)
+		}
+	}
+	for _, name := range []string{
+		"InvalidPaymentReceipt",               // funding the instance fixes it
+		"MissingDelegationCert",               // a later certificate fixes it
+		"CheckpointIndexOutOfDelegationRange", // a wider certificate fixes it
+		"LogNotFound", "NotInitialized",       // owner ordering fixes it
+		"InvalidConsistencyProof",   // a re-seal on the moved base fixes it
+		"",                          // unknown/empty: never settle on ignorance
+		"SomeErrorAddedNextQuarter", // unrecognised: fall through to retry
+	} {
+		if RevertIsCalldataInvalid(name) {
+			t.Errorf("%q can resolve without new calldata; must NOT be calldata-invalid", name)
+		}
 	}
 }
