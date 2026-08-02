@@ -1,0 +1,77 @@
+# Push the release tag this merge implies, so no human has to remember to
+# (devdocs plan-2608-06 Phase 2; action built in Phase 1a, FOR-517/FOR-520).
+#
+# Every merge to main cuts the next arbor `vX.Y.Z`. `release.yaml` already
+# triggers on `v*.*.*`, so it needs no change — it just stops waiting to be
+# dispatched. Tags are cheap CANDIDATES; qualification is the quality gate
+# (plan 2608-01 Q4). Suppress with `[no-release]` in the merge commit message.
+#
+# SERVICE MODE ONLY. arbor publishes no npm packages, so there is no
+# `.github/auto-tag-packages.json` here and no `mode: packages` step — unlike
+# canopy, mandate and univocity-tools, which run both. If arbor ever gains a
+# published package, add the config and the second step together; the action
+# hard-fails on a declared package it cannot find, so a half-adoption is loud.
+#
+# This repo is the reason the phase exists in the order it does. arbor stopped
+# being "ahead" the moment v0.1.25 was cut, so every later capture carried
+# forward from the last qualified release and regressed the pin to July's
+# v0.1.24 — a green release with a backwards pin, twice, in production. Tags
+# that appear on their own are what let the frontier resolver see the truth.
+name: Auto tag
+
+on:
+  push:
+    branches: [main]
+
+# The tag ref is created with a GitHub App token, never GITHUB_TOKEN, so
+# nothing in this workflow needs write. See the mint step below.
+permissions:
+  contents: read
+
+# Never cancel in progress: a cancelled run is a release tag that silently
+# never happened, which is the failure mode this workflow exists to remove.
+concurrency:
+  group: auto-tag-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  auto-tag:
+    name: Push the tag this merge implies
+    runs-on: ubuntu-latest
+    # No checkout: service mode resolves the tag frontier over the API and
+    # reads nothing from the working tree.
+    steps:
+      # The App credentials are load-bearing and their absence is otherwise a
+      # confusing failure inside a third-party action. Name the cause here.
+      - name: Assert the GitHub App credentials are configured
+        env:
+          GITAPP_ID: ${{ vars.GITAPP_ID }}
+          GITAPP_PRIVATE_KEY: ${{ secrets.GITAPP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${GITAPP_ID}" ] || missing+=("vars.GITAPP_ID")
+          [ -n "${GITAPP_PRIVATE_KEY}" ] || missing+=("secrets.GITAPP_PRIVATE_KEY")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::auto-tag cannot mint a GitHub App token — missing: ${missing[*]}."
+            echo "::error::Release tags MUST be created by an App token. A ref created with GITHUB_TOKEN triggers no workflow runs, so the tag would appear and nothing would release, with no error anywhere. Configure the credentials rather than adding a fallback."
+            exit 1
+          fi
+          echo "OK: App credentials present."
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GITAPP_ID }}
+          private_key: ${{ secrets.GITAPP_PRIVATE_KEY }}
+
+      # ⚠️ `token` MUST be the App token. A ref created with the default
+      # GITHUB_TOKEN triggers NO workflow runs: the tag appears, looks entirely
+      # normal, and `release.yaml` never runs. There is no error and no warning
+      # anywhere. Do NOT add a `|| secrets.GITHUB_TOKEN` fallback.
+      - name: Service release tag
+        uses: forestrie/.github/actions/auto-tag@main
+        with:
+          mode: service
+          token: ${{ steps.app-token.outputs.token }}
