@@ -22,7 +22,7 @@ ADR-0056/FOR-368; backfill-vs-preprod-reset is
 [FOR-412](https://linear.app/forestrie/issue/FOR-412). R6 no action.
 **Related:** [FOR-410](https://linear.app/forestrie/issue/FOR-410),
 [arbor#79](https://github.com/forestrie/arbor/pull/79) (merged `ea77914`),
-[ADR-0056](https://github.com/forestrie/devdocs/blob/main/adr/adr-0056-checkpoint-base-is-massif-entry-boundary.md),
+[ADR-0056](https://github.com/forestrie/devdocs/blob/main/archive/2607/adr/adr-0056-checkpoint-base-is-massif-entry-boundary.md),
 devdocs [plan-2607-29](https://github.com/forestrie/devdocs/blob/main/plans/plan-2607-29-for368-buried-peak-verify.md)
 
 Review of the merged FOR-410 sealer change (`226d265..ea77914`) per

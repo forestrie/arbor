@@ -1,6 +1,6 @@
 # Custodian
 
-Key custody and KMS signing service for Forestrie. See [ADR-0033](https://github.com/forestrie/devdocs/blob/main/adr/adr-0033-custodian-key-service.md), [ADR-0005](../../docs/adr/adr-0005-custodian-kms-ensure-and-e2e-software-keys.md), and [Plan 0013](https://github.com/forestrie/devdocs/blob/main/plans/plan-0013-custodian-implementation.md).
+Key custody and KMS signing service for Forestrie. See [ADR-0033](https://github.com/forestrie/devdocs/blob/main/archive/2603/adr/adr-0033-custodian-key-service.md), [ADR-0005](../../docs/adr/adr-0005-custodian-kms-ensure-and-e2e-software-keys.md), and [Plan 0013](https://github.com/forestrie/devdocs/blob/main/plans/plan-0013-custodian-implementation.md).
 
 ## Wire format
 

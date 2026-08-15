@@ -3,7 +3,7 @@
 **Status:** Accepted  
 **Date:** 2026-06-23  
 **Linear:** FOR-123  
-**Related:** [ARC-0022 BYOK user-log delegation](https://github.com/forestrie/devdocs/blob/main/arc/arc-0022-byok-user-log-delegation-and-operator-hosted-sealing.md),
+**Related:** [ARC-0022 BYOK user-log delegation](https://github.com/forestrie/devdocs/blob/main/archive/2606/arc/arc-0022-byok-user-log-delegation-and-operator-hosted-sealing.md),
 [ADR-0002 univocity owned grant store](adr-0002-univocity-owned-grant-store-and-authority-correspondence.md)
 
 ## Context
