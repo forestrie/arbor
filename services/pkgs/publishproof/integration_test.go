@@ -288,7 +288,7 @@ func deployUnivocity(t *testing.T, client *ethclient.Client, signer common.Addre
 
 func deployUnivocityKey(t *testing.T, client *ethclient.Client, bootstrapAlg int64, bootstrapKey []byte) *chainHarness {
 	ctx := t.Context()
-	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.1.6.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.2.0.json"))
 	require.NoError(t, err)
 	var manifest deployManifest
 	require.NoError(t, json.Unmarshal(raw, &manifest))
@@ -411,7 +411,7 @@ func idTimestamp(n uint64) [8]byte {
 }
 
 func emptyDelegation() DelegationProof {
-	return DelegationProof{ProtectedHeader: []byte{}, DelegationKey: []byte{}, Signature: []byte{}}
+	return DelegationProof{ProtectedHeader: []byte{}, DelegationKey: []byte{}, Signature: []byte{}, AlgData: [][]byte{}}
 }
 
 // TestTracerBulletPublishFromR2Fixtures is the FOR-315 vertical slice: R2

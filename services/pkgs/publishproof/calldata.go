@@ -18,13 +18,16 @@ type ConsistencyProof struct {
 }
 
 // DelegationProof mirrors the univocity DelegationProof calldata tuple
-// (ADR-0006). Zero value means no delegation.
+// (ADR-0006, ADR-0008). Zero value means no delegation. AlgData is
+// alg-specific; ES256/KS256 require it empty — the contract reverts
+// UnexpectedDelegationAlgData on any element it does not consume.
 type DelegationProof struct {
 	ProtectedHeader []byte
 	DelegationKey   []byte
 	MmrStart        uint64
 	MmrEnd          uint64
 	Signature       []byte
+	AlgData         [][]byte
 }
 
 // ConsistencyReceipt mirrors the univocity ConsistencyReceipt calldata tuple:
@@ -63,7 +66,8 @@ const publishABI = `[
 				{"name":"delegationKey","type":"bytes"},
 				{"name":"mmrStart","type":"uint64"},
 				{"name":"mmrEnd","type":"uint64"},
-				{"name":"signature","type":"bytes"}
+				{"name":"signature","type":"bytes"},
+				{"name":"algData","type":"bytes[]"}
 			]}
 		]},
 		{"name":"grantInclusionProof","type":"tuple","components":[
