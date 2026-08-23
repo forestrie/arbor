@@ -173,6 +173,13 @@ func NewChainWriter(rpcURLs map[uint64]string, keyHex string, wc WriteConfig) (*
 		wc.ReceiptPollInterval = 200 * time.Millisecond
 	}
 	if wc.GasLimit == 0 {
+		// Must cover the worst publishCheckpoint the publisher submits with
+		// no RIP-7212 P-256 precompile (the Solidity-fallback ceiling): a
+		// WebAuthn-delegated publish — two in-EVM P-256 verifies (receipt +
+		// assertion) plus the assertion calldata — measures ~1.05M
+		// (TestWebAuthnRootDelegatedPublishFromSealedCheckpoints pins it
+		// under this limit). On Base Sepolia the precompile is live and
+		// actual usage is far lower; the headroom is deliberate.
 		wc.GasLimit = 3_000_000
 	}
 	return &ChainWriter{
@@ -338,9 +345,10 @@ func (w *ChainWriter) Close() {
 // in-daemon writer using it would break the counter's single-writer invariant
 // (plan-2607-08 F1). Every in-daemon writer — the queue consumer and the
 // resync sweep — must submit through SubmitBatch. Gas for publishCheckpoint
-// is predictable, so it uses a configured gas limit rather than EstimateGas
-// (P13); a would-revert therefore mines as a revert and is classified from
-// the receipt.
+// is predictable — the WebAuthn-delegated worst case included (see the
+// WriteConfig.GasLimit default) — so it uses a configured gas limit rather
+// than EstimateGas (P13); a would-revert therefore mines as a revert and is
+// classified from the receipt.
 func (w *ChainWriter) Submit(
 	ctx context.Context, chainID uint64, contract common.Address, logID [32]byte, sealedSize uint64, calldata []byte,
 ) (SubmitResult, error) {
@@ -549,13 +557,20 @@ var calldataInvalidReverts = map[string]struct{}{
 	"FirstCheckpointSizeTooSmall":  {},
 	// ADR-0008: algData elements or policy flag bits the presented algorithm
 	// does not consume are properties of the submitted bytes; only a new seal
-	// changes them. The WebAuthn ceremony-verification reverts
-	// (InvalidWebAuthnAssertion etc.) are deliberately ABSENT: this publisher
-	// never submits WebAuthn proofs (basic compat), so hitting one means an
-	// encoder/contract mismatch better surfaced by horizon-bounded retry noise
-	// than silently settled. Classification is backoff/metrics, not security.
+	// changes them.
 	"UnexpectedDelegationAlgData":      {},
 	"UnsupportedDelegationPolicyFlags": {},
+	// ADR-0063: the WebAuthn ceremony-verification reverts are pure functions
+	// of the submitted assertion bytes against the grant policy and stored
+	// root carried in the same calldata — a malformed assertion, an unbound
+	// challenge, a wrong rpIdHash, or a missing UP/UV flag fails identically
+	// forever. Only a new ceremony, which arrives as a new seal, changes
+	// them. Classification is backoff/metrics, not security.
+	"InvalidWebAuthnAssertion":           {},
+	"DelegationChallengeMismatch":        {},
+	"DelegationRpIdMismatch":             {},
+	"DelegationUserPresenceRequired":     {},
+	"DelegationUserVerificationRequired": {},
 }
 
 // RevertIsCalldataInvalid reports whether a decoded revert reason can never be

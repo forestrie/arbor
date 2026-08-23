@@ -50,4 +50,13 @@ type OnchainDelegationProof struct {
 	MMRStart        uint64 `cbor:"mmrStart"`
 	MMREnd          uint64 `cbor:"mmrEnd"`
 	Signature       []byte `cbor:"signature"`
+	// AlgData carries the WebAuthn assertion parts when the root signed via
+	// a passkey (protected alg ALG_ES256_WEBAUTHN -65800, ADR-0008/ADR-0063):
+	// [authenticatorData, clientDataJSON, 16 bytes of packed big-endian
+	// challengeIndex||typeIndex], exactly as decodeWebAuthnDelegationAlgData
+	// consumes them. Empty for plain ES256/KS256 roots; omitempty keeps
+	// their wire encoding byte-identical to the historical 5-field form
+	// (the v0.2.0 contract reverts UnexpectedDelegationAlgData on any
+	// element a plain alg does not consume).
+	AlgData [][]byte `cbor:"algData,omitempty"`
 }

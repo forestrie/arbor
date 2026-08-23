@@ -52,22 +52,27 @@ func TestRevertLabelInconsistentReceiptSignature(t *testing.T) {
 	}
 }
 
-// The ADR-0008 (univocity v0.2.0) reverts must classify: the two
-// calldata-shaped ones settle immediately instead of retrying to the
-// horizon, and all seven stay bounded metric labels. Classification is
+// The ADR-0008 (univocity v0.2.0) reverts must classify: all seven are
+// calldata-shaped — since this publisher submits WebAuthn proofs
+// (plan-2608-13 phase 3), a failed ceremony verification is a property of
+// the submitted bytes and settles immediately instead of retrying to the
+// horizon — and all seven stay bounded metric labels. Classification is
 // for backoff/metrics only — a revert selector is not an authenticated
 // diagnosis.
 func TestRevertClassificationWebAuthnAlg(t *testing.T) {
 	for _, name := range []string{
 		"UnexpectedDelegationAlgData",
 		"UnsupportedDelegationPolicyFlags",
+		"InvalidWebAuthnAssertion",
+		"DelegationChallengeMismatch",
+		"DelegationRpIdMismatch",
+		"DelegationUserPresenceRequired",
+		"DelegationUserVerificationRequired",
 	} {
 		if !RevertIsCalldataInvalid(name) {
 			t.Errorf("RevertIsCalldataInvalid(%q) = false, want true (permanent-failure shaped)", name)
 		}
 	}
-	// The ceremony-verification reverts stay horizon-bounded (not calldata
-	// invalid) but must not degrade to "unrecognized" in metrics.
 	for _, name := range []string{
 		"UnexpectedDelegationAlgData",
 		"UnsupportedDelegationPolicyFlags",
