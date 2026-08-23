@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -361,18 +362,20 @@ func (h *chainHarness) revertReason(tx *types.Transaction, block *big.Int) strin
 	return err.Error()
 }
 
-// publishCheckpoint submits the calldata and asserts CheckpointPublished.
-func (h *chainHarness) publishCheckpoint(calldata []byte, what string) {
+// publishCheckpoint submits the calldata and asserts CheckpointPublished,
+// returning the receipt so callers can bound gas consumption.
+func (h *chainHarness) publishCheckpoint(calldata []byte, what string) *types.Receipt {
 	tx := types.NewTransaction(h.nonce(), h.contract, big.NewInt(0), 4_000_000, h.gasPrice(), calldata)
 	receipt := h.sendAndRequireSuccess(tx, what)
 
 	topic := h.abi.Events["CheckpointPublished"].ID
 	for _, lg := range receipt.Logs {
 		if len(lg.Topics) > 0 && lg.Topics[0] == topic {
-			return
+			return receipt
 		}
 	}
 	h.t.Fatalf("%s: CheckpointPublished not emitted", what)
+	return nil
 }
 
 // signReceiptKS256 signs the contract's Sig_structure over the raw-concat
@@ -392,6 +395,9 @@ const (
 	gfExtend  = uint64(1) << 33
 	gfAuthLog = uint64(1)
 	gfDataLog = uint64(2)
+	// GF_REQUIRES_USER_VERIFICATION: alg-flag band (ADR-0008), consumed only
+	// by ALG_ES256_WEBAUTHN delegations.
+	gfRequiresUV = uint64(1) << 40
 )
 
 var (
@@ -897,6 +903,217 @@ func TestES256RootDelegatedPublishFromSealedCheckpoints(t *testing.T) {
 	extendSize := target.addLeaves(dataLeaves[3:]...)
 	target.commitAndSeal()
 	sealedState = publishSealed(target, grantInclusion, idt1, gTarget, "delegated extend target checkpoint (ES256 root)")
+	require.Equal(t, extendSize, sealedState.MMRSize)
+
+	state, err = ReadLogState(ctx, client, harness.contract, targetLogId32)
+	require.NoError(t, err)
+	require.Equal(t, extendSize, state.Size)
+	require.Equal(t, sealedState.Accumulator, state.Accumulator)
+}
+
+// protectedES256WebAuthn is the canonical CBOR protected header {1: -65800}
+// (ALG_ES256_WEBAUTHN, ADR-0063): a P-256 root whose signature arrives as a
+// WebAuthn assertion.
+var protectedES256WebAuthn = []byte{0xa1, 0x01, 0x3a, 0x00, 0x01, 0x01, 0x07}
+
+// syntheticWebauthnDelegationProof produces the on-chain delegation proof for
+// a passkey root, forge-style: the authenticator signs
+// authenticatorData || sha256(clientDataJSON), and the delegation payload is
+// bound via clientDataJSON.challenge = base64url(sha256(Sig_structure)) —
+// exactly what verifyDelegationProofES256WebAuthn rebuilds and checks. The
+// assertion parts travel as the 3-element algData
+// [authenticatorData, clientDataJSON, challengeIndex||typeIndex].
+func syntheticWebauthnDelegationProof(
+	t *testing.T, rootKey *ecdsa.PrivateKey, logID [32]byte,
+	mmrStart, mmrEnd uint64, delegated *ecdsa.PublicKey,
+) *delegationcert.OnchainDelegationProof {
+	x := make([]byte, 32)
+	y := make([]byte, 32)
+	delegated.X.FillBytes(x)
+	delegated.Y.FillBytes(y)
+
+	payload := []byte(delegationcert.OnchainDelegationDomain)
+	payload = append(payload, logID[:]...)
+	payload = binary.BigEndian.AppendUint64(payload, mmrStart)
+	payload = binary.BigEndian.AppendUint64(payload, mmrEnd)
+	payload = append(payload, x...)
+	payload = append(payload, y...)
+
+	challenge := sha256.Sum256(SigStructure(protectedES256WebAuthn, payload))
+	clientDataJSON := fmt.Sprintf(
+		`{"type":"webauthn.get","challenge":"%s","origin":"https://publishproof.test","crossOrigin":false}`,
+		base64.RawURLEncoding.EncodeToString(challenge[:]))
+	typeIndex := strings.Index(clientDataJSON, `"type":"webauthn.get"`)
+	challengeIndex := strings.Index(clientDataJSON, `"challenge":"`)
+	require.GreaterOrEqual(t, typeIndex, 0)
+	require.GreaterOrEqual(t, challengeIndex, 0)
+	indices := make([]byte, 16)
+	binary.BigEndian.PutUint64(indices[:8], uint64(challengeIndex))
+	binary.BigEndian.PutUint64(indices[8:], uint64(typeIndex))
+
+	rpIdHash := sha256.Sum256([]byte("publishproof.test"))
+	authenticatorData := make([]byte, 37)
+	copy(authenticatorData[:32], rpIdHash[:])
+	authenticatorData[32] = 0x05 // UP | UV
+
+	clientDataHash := sha256.Sum256([]byte(clientDataJSON))
+	digest := sha256.Sum256(append(append([]byte{}, authenticatorData...), clientDataHash[:]...))
+	sr, ss, err := ecdsa.Sign(rand.Reader, rootKey, digest[:])
+	require.NoError(t, err)
+	rawSig := make([]byte, 64)
+	sr.FillBytes(rawSig[:32])
+	ss.FillBytes(rawSig[32:])
+
+	return &delegationcert.OnchainDelegationProof{
+		ProtectedHeader: protectedES256WebAuthn,
+		DelegationKey:   append(x, y...),
+		MMRStart:        mmrStart,
+		MMREnd:          mmrEnd,
+		Signature:       delegationcert.NormalizeES256SignatureLowS(rawSig),
+		AlgData: [][]byte{
+			authenticatorData,
+			[]byte(clientDataJSON),
+			indices,
+		},
+	}
+}
+
+// TestWebAuthnRootDelegatedPublishFromSealedCheckpoints is the plan-2608-13
+// phase-3 end-to-end: a passkey-rooted (ALG_ES256_WEBAUTHN) user log's
+// checkpoint publishes against the v0.2.0 bytecode. The operator's ES256
+// authority root bootstraps the contract and seals the authority log; the
+// user's P-256 "passkey" signs the on-chain delegation as a synthetic
+// WebAuthn assertion authorizing a delegated ES256 sealing key; the sealed
+// checkpoint carries the proof — 3-element algData included — in its
+// unprotected header, and the publisher's decode of the stored object is the
+// exact calldata the contract accepts. The target grant sets the UV policy
+// flag, so the contract's user-verification check is exercised, not skipped.
+func TestWebAuthnRootDelegatedPublishFromSealedCheckpoints(t *testing.T) {
+	ctx := t.Context()
+	client := startAnvil(t)
+
+	// Operator authority root (plain ES256), user passkey root, and the
+	// delegated sealing key — three distinct keys, as in production.
+	authorityRoot := newFixtureSealer(t)
+	webauthnKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	delegate := newFixtureSealer(t)
+
+	authorityPub := make([]byte, 64)
+	authorityRoot.key.PublicKey.X.FillBytes(authorityPub[:32])
+	authorityRoot.key.PublicKey.Y.FillBytes(authorityPub[32:])
+	webauthnPub := make([]byte, 64)
+	webauthnKey.PublicKey.X.FillBytes(webauthnPub[:32])
+	webauthnKey.PublicKey.Y.FillBytes(webauthnPub[32:])
+
+	harness := deployUnivocityKey(t, client, algES256, authorityPub)
+
+	rootLogID := mustHex(t, "606162636465666768696a6b6c6d6e6f")
+	targetLogID := mustHex(t, "707172737475767778797a7b7c7d7e7f")
+	rootLogId32 := bytes32FromLow(t, hex.EncodeToString(rootLogID))
+	targetLogId32 := bytes32FromLow(t, hex.EncodeToString(targetLogID))
+
+	g0 := PublishGrant{
+		LogId:      rootLogId32,
+		Grant:      new(big.Int).SetUint64(gfCreate | gfExtend | gfAuthLog),
+		Request:    gcAuthLog,
+		MaxHeight:  1000,
+		MinGrowth:  0,
+		OwnerLogId: [32]byte{},
+		GrantData:  authorityPub,
+	}
+	idt0 := idTimestamp(1)
+	leafG0, err := g0.LeafCommitment(idt0)
+	require.NoError(t, err)
+
+	gTarget := PublishGrant{
+		LogId:      targetLogId32,
+		Grant:      new(big.Int).SetUint64(gfCreate | gfExtend | gfDataLog | gfRequiresUV),
+		Request:    gcDataLog,
+		MaxHeight:  1000,
+		MinGrowth:  0,
+		OwnerLogId: rootLogId32,
+		GrantData:  webauthnPub,
+	}
+	idt1 := idTimestamp(2)
+	leafGT, err := gTarget.LeafCommitment(idt1)
+	require.NoError(t, err)
+
+	objects := newMemObjectClient()
+
+	publishSealed := func(f *fixtureLog, inclusion InclusionProof, idt [8]byte, grant PublishGrant, what string) (SealedState, uint64) {
+		cp, err := massifs.GetCheckpoint(ctx, f.reader(), 0)
+		require.NoError(t, err)
+		receipt, err := DecodeCheckpointReceipt(cp.Raw)
+		require.NoError(t, err)
+		calldata, err := EncodePublishCheckpoint(receipt, inclusion, idt, grant)
+		require.NoError(t, err)
+		rcpt := harness.publishCheckpoint(calldata, what)
+
+		state, err := ReadSealedState(ctx, f.reader(), 0)
+		require.NoError(t, err)
+		return state, rcpt.GasUsed
+	}
+	noInclusion := InclusionProof{Index: 0, Path: [][32]byte{}}
+
+	// Authority log: operator-root-signed seals published directly.
+	authority := newFixtureLog(t, objects, rootLogID, authorityRoot)
+	authority.addLeaves(leafG0)
+	authority.commitAndSeal()
+	publishSealed(authority, noInclusion, idt0, g0, "bootstrap root log (ES256 direct)")
+
+	authoritySize := authority.addLeaves(leafGT)
+	authority.commitAndSeal()
+	publishSealed(authority, noInclusion, idt0, g0, "extend authority with target grant")
+
+	authorityMC, err := massifs.GetMassifContext(ctx, authority.reader(), 0)
+	require.NoError(t, err)
+	grantInclusion, err := BuildInclusionProof(&authorityMC, authoritySize, 1)
+	require.NoError(t, err)
+
+	// The passkey root authorizes the delegate via a WebAuthn assertion.
+	target := newFixtureLog(t, objects, targetLogID, delegate)
+	target.onchainProof = syntheticWebauthnDelegationProof(
+		t, webauthnKey, targetLogId32, 0, uint64(1)<<40, &delegate.key.PublicKey)
+
+	var dataLeaves [][32]byte
+	for i := range 5 {
+		dataLeaves = append(dataLeaves, bytes32FromLow(t, fmt.Sprintf("%02x", 0xa0+i)))
+	}
+
+	// The sealed object must round-trip the assertion material: the lift is
+	// what puts algData on the wire.
+	firstSize := target.addLeaves(dataLeaves[:3]...)
+	target.commitAndSeal()
+	cp, err := massifs.GetCheckpoint(ctx, target.reader(), 0)
+	require.NoError(t, err)
+	decoded, err := DecodeCheckpointReceipt(cp.Raw)
+	require.NoError(t, err)
+	require.Len(t, decoded.DelegationProof.AlgData, 3,
+		"the sealed checkpoint must carry the WebAuthn assertion algData")
+
+	sealedState, gasUsed := publishSealed(target, grantInclusion, idt1, gTarget,
+		"webauthn-delegated first target checkpoint")
+	require.Equal(t, firstSize, sealedState.MMRSize)
+	// Anvil has no RIP-7212 P-256 precompile, so this measures the
+	// Solidity-fallback worst case (two in-EVM P-256 verifies: receipt +
+	// assertion). The publisher submits with a fixed configured limit
+	// (WriteConfig.GasLimit, default 3_000_000) and no EstimateGas; that
+	// default must keep covering this ceiling.
+	require.Less(t, gasUsed, uint64(3_000_000),
+		"webauthn-delegated publish must fit the publisher's default fixed gas limit")
+	t.Logf("webauthn-delegated publish gas used (solidity-fallback P-256): %d", gasUsed)
+
+	state, err := ReadLogState(ctx, client, harness.contract, targetLogId32)
+	require.NoError(t, err)
+	require.Equal(t, firstSize, state.Size)
+	require.Equal(t, sealedState.Accumulator, state.Accumulator)
+
+	// Extend and publish the next seal under the same standing delegation.
+	extendSize := target.addLeaves(dataLeaves[3:]...)
+	target.commitAndSeal()
+	sealedState, _ = publishSealed(target, grantInclusion, idt1, gTarget,
+		"webauthn-delegated extend target checkpoint")
 	require.Equal(t, extendSize, sealedState.MMRSize)
 
 	state, err = ReadLogState(ctx, client, harness.contract, targetLogId32)

@@ -61,15 +61,21 @@ func DecodeCheckpointReceipt(data []byte) (ConsistencyReceipt, error) {
 		if err := cbor.Unmarshal(raw, &onchain); err != nil {
 			return ConsistencyReceipt{}, fmt.Errorf("decode onchain delegation proof: %w", err)
 		}
-		// The CBOR OnchainDelegationProof carries no algData; ES256/KS256
-		// calldata requires it empty (ADR-0008 fail-closed).
+		// Lift algData (WebAuthn assertion parts, ADR-0008/ADR-0063) from
+		// the CBOR proof into the calldata. Plain ES256/KS256 proofs omit
+		// the field, decoding to nil — normalize to empty, which those algs
+		// require (the contract fails closed on stray elements).
+		algData := onchain.AlgData
+		if algData == nil {
+			algData = [][]byte{}
+		}
 		delegation = DelegationProof{
 			ProtectedHeader: onchain.ProtectedHeader,
 			DelegationKey:   onchain.DelegationKey,
 			MmrStart:        onchain.MMRStart,
 			MmrEnd:          onchain.MMREnd,
 			Signature:       onchain.Signature,
-			AlgData:         [][]byte{},
+			AlgData:         algData,
 		}
 	}
 	return ConsistencyReceipt{

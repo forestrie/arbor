@@ -5,6 +5,9 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/forestrie/arbor/services/pkgs/delegationcert"
+	"github.com/forestrie/go-merklelog/massifs"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,6 +106,72 @@ func TestDecodedReceiptEncodesEmptyAlgData(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, [][]byte{}, gotReceipt.DelegationProof.AlgData)
 	require.Equal(t, receipt, gotReceipt)
+}
+
+// A checkpoint whose embedded OnchainDelegationProof carries the 3-element
+// WebAuthn algData (ADR-0063) must lift it into the calldata DelegationProof
+// and survive the calldata round-trip; a proof that omits the field must
+// still normalize to the empty algData plain algs require.
+func TestDecodedReceiptLiftsWebauthnAlgData(t *testing.T) {
+	sealer := newFixtureSealer(t)
+
+	proof := ConsistencyProof{
+		TreeSize1:  0,
+		TreeSize2:  1,
+		Paths:      [][][32]byte{},
+		RightPeaks: [][32]byte{bytes32FromLow(t, "11")},
+	}
+	authenticatorData := make([]byte, 37)
+	authenticatorData[32] = 0x05 // UP | UV
+	algData := [][]byte{
+		authenticatorData,
+		[]byte(`{"type":"webauthn.get","challenge":"x"}`),
+		make([]byte, 16),
+	}
+	onchain := &delegationcert.OnchainDelegationProof{
+		ProtectedHeader: mustHex(t, "a1013a00010107"), // {1: -65800}
+		DelegationKey:   make([]byte, 64),
+		MMRStart:        0,
+		MMREnd:          1 << 40,
+		Signature:       make([]byte, 64),
+		AlgData:         algData,
+	}
+	raw, err := cbor.Marshal(onchain)
+	require.NoError(t, err)
+
+	encoded, err := massifs.SignCheckpointReceipt(
+		sealer.coseSigner, toProfileProof(proof), [][]byte{make([]byte, 32)},
+		massifs.WithUnprotectedExtras(
+			map[int64]cbor.RawMessage{massifs.SealDelegationProofLabel: raw}))
+	require.NoError(t, err)
+
+	receipt, err := DecodeCheckpointReceipt(encoded)
+	require.NoError(t, err)
+	require.Equal(t, algData, receipt.DelegationProof.AlgData)
+
+	calldata, err := EncodePublishCheckpoint(
+		receipt,
+		InclusionProof{Index: 0, Path: [][32]byte{}},
+		[8]byte{},
+		PublishGrant{Grant: big.NewInt(1), Request: big.NewInt(1), GrantData: []byte{}},
+	)
+	require.NoError(t, err)
+	gotReceipt, _, _, _, err := DecodePublishCheckpoint(calldata)
+	require.NoError(t, err)
+	require.Equal(t, receipt, gotReceipt)
+
+	// Legacy 5-field proof (no algData key): lift normalizes to empty.
+	onchain.AlgData = nil
+	raw, err = cbor.Marshal(onchain)
+	require.NoError(t, err)
+	encoded, err = massifs.SignCheckpointReceipt(
+		sealer.coseSigner, toProfileProof(proof), [][]byte{make([]byte, 32)},
+		massifs.WithUnprotectedExtras(
+			map[int64]cbor.RawMessage{massifs.SealDelegationProofLabel: raw}))
+	require.NoError(t, err)
+	receipt, err = DecodeCheckpointReceipt(encoded)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{}, receipt.DelegationProof.AlgData)
 }
 
 // The vertical slice: a format-v3 checkpoint object encoded by publishproof
