@@ -8,10 +8,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Selector pinned from the v0.1.5 release artifact methodIdentifiers:
+// Selector pinned from the v0.2.0 release artifact ABI (ADR-0008 adds
+// bytes[] algData as the 6th DelegationProof component):
 //
-//	87ce4c61 publishCheckpoint((bytes,bytes,(uint64,uint64,bytes32[][],bytes32[])[],(bytes,bytes,uint64,uint64,bytes)),(uint64,bytes32[]),bytes8,(bytes32,uint256,uint256,uint64,uint64,bytes32,bytes))
-const publishCheckpointSelectorHex = "87ce4c61"
+//	295e6ade publishCheckpoint((bytes,bytes,(uint64,uint64,bytes32[][],bytes32[])[],(bytes,bytes,uint64,uint64,bytes,bytes[])),(uint64,bytes32[]),bytes8,(bytes32,uint256,uint256,uint64,uint64,bytes32,bytes))
+const publishCheckpointSelectorHex = "295e6ade"
 
 // The FOR-314 spike pins the multi-seal composition a publisher must produce
 // for on-chain size 0 -> 2: one proof per sealed step.
@@ -27,10 +28,12 @@ func TestEncodePublishCheckpointRoundTripsPinnedProofChain(t *testing.T) {
 			{TreeSize1: 1, TreeSize2: 2, Paths: [][][32]byte{{leaf2}}, RightPeaks: [][32]byte{leaf2}},
 		},
 		// ABI bytes have no nil; an absent delegation is empty fields.
+		// ES256/KS256 MUST carry an empty algData (ADR-0008 fail-closed).
 		DelegationProof: DelegationProof{
 			ProtectedHeader: []byte{},
 			DelegationKey:   []byte{},
 			Signature:       []byte{},
+			AlgData:         [][]byte{},
 		},
 	}
 	inclusion := InclusionProof{Index: 1, Path: [][32]byte{leaf1}}

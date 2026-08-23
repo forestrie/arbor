@@ -66,6 +66,43 @@ func TestCheckpointReceiptRoundTrip(t *testing.T) {
 	require.Equal(t, proof, got.ConsistencyProofs[0])
 	// Detached payload: nothing carried in the object itself.
 	require.Equal(t, []byte{}, got.DelegationProof.Signature)
+	// ES256/KS256 require an empty algData (ADR-0008 fail-closed).
+	require.Equal(t, [][]byte{}, got.DelegationProof.AlgData)
+}
+
+// A decoded checkpoint receipt on the plain-signing (ES256/KS256) path must
+// produce calldata with an EMPTY algData — the v0.2.0 contract reverts
+// UnexpectedDelegationAlgData on any element — and survive the calldata
+// round-trip unchanged.
+func TestDecodedReceiptEncodesEmptyAlgData(t *testing.T) {
+	leaf1 := bytes32FromLow(t, "11")
+	proof := ConsistencyProof{
+		TreeSize1:  0,
+		TreeSize2:  1,
+		Paths:      [][][32]byte{},
+		RightPeaks: [][32]byte{leaf1},
+	}
+	encoded, err := EncodeCheckpointReceipt(mustHex(t, "a1013a00010106"), proof, make([]byte, 65))
+	require.NoError(t, err)
+	receipt, err := DecodeCheckpointReceipt(encoded)
+	require.NoError(t, err)
+
+	calldata, err := EncodePublishCheckpoint(
+		receipt,
+		InclusionProof{Index: 0, Path: [][32]byte{}},
+		[8]byte{},
+		PublishGrant{
+			Grant:     big.NewInt(1),
+			Request:   big.NewInt(1),
+			GrantData: []byte{},
+		},
+	)
+	require.NoError(t, err)
+
+	gotReceipt, _, _, _, err := DecodePublishCheckpoint(calldata)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{}, gotReceipt.DelegationProof.AlgData)
+	require.Equal(t, receipt, gotReceipt)
 }
 
 // The vertical slice: a format-v3 checkpoint object encoded by publishproof

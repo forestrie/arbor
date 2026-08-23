@@ -547,6 +547,15 @@ var calldataInvalidReverts = map[string]struct{}{
 	"InconsistentReceiptSignature": {},
 	"InvalidReceiptInclusionProof": {},
 	"FirstCheckpointSizeTooSmall":  {},
+	// ADR-0008: algData elements or policy flag bits the presented algorithm
+	// does not consume are properties of the submitted bytes; only a new seal
+	// changes them. The WebAuthn ceremony-verification reverts
+	// (InvalidWebAuthnAssertion etc.) are deliberately ABSENT: this publisher
+	// never submits WebAuthn proofs (basic compat), so hitting one means an
+	// encoder/contract mismatch better surfaced by horizon-bounded retry noise
+	// than silently settled. Classification is backoff/metrics, not security.
+	"UnexpectedDelegationAlgData":      {},
+	"UnsupportedDelegationPolicyFlags": {},
 }
 
 // RevertIsCalldataInvalid reports whether a decoded revert reason can never be
@@ -616,5 +625,12 @@ const univocityErrorsABI = `[
   {"type":"error","name":"AlreadyInitialized","inputs":[]},
   {"type":"error","name":"FirstCheckpointSizeTooSmall","inputs":[]},
   {"type":"error","name":"GrantDataMustMatchBootstrap","inputs":[]},
-  {"type":"error","name":"InvalidSignatureChain","inputs":[]}
+  {"type":"error","name":"InvalidSignatureChain","inputs":[]},
+  {"type":"error","name":"UnexpectedDelegationAlgData","inputs":[{"name":"count","type":"uint256"}]},
+  {"type":"error","name":"UnsupportedDelegationPolicyFlags","inputs":[{"name":"unsupported","type":"uint256"}]},
+  {"type":"error","name":"InvalidWebAuthnAssertion","inputs":[]},
+  {"type":"error","name":"DelegationChallengeMismatch","inputs":[]},
+  {"type":"error","name":"DelegationUserPresenceRequired","inputs":[]},
+  {"type":"error","name":"DelegationUserVerificationRequired","inputs":[]},
+  {"type":"error","name":"DelegationRpIdMismatch","inputs":[]}
 ]`

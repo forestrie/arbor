@@ -54,18 +54,22 @@ func DecodeCheckpointReceipt(data []byte) (ConsistencyReceipt, error) {
 		ProtectedHeader: []byte{},
 		DelegationKey:   []byte{},
 		Signature:       []byte{},
+		AlgData:         [][]byte{},
 	}
 	if raw, ok := r.Extras[massifs.SealDelegationProofLabel]; ok {
 		var onchain delegationcert.OnchainDelegationProof
 		if err := cbor.Unmarshal(raw, &onchain); err != nil {
 			return ConsistencyReceipt{}, fmt.Errorf("decode onchain delegation proof: %w", err)
 		}
+		// The CBOR OnchainDelegationProof carries no algData; ES256/KS256
+		// calldata requires it empty (ADR-0008 fail-closed).
 		delegation = DelegationProof{
 			ProtectedHeader: onchain.ProtectedHeader,
 			DelegationKey:   onchain.DelegationKey,
 			MmrStart:        onchain.MMRStart,
 			MmrEnd:          onchain.MMREnd,
 			Signature:       onchain.Signature,
+			AlgData:         [][]byte{},
 		}
 	}
 	return ConsistencyReceipt{
