@@ -23,6 +23,25 @@ When work merges to `main`, remove the worktree:
 `git worktree remove ../.worktrees/<name>`. Do **not** use
 `~/Dev/personal/forestrie-wt/` (retired).
 
+**A fresh worktree or clone does not build until `_deps` and `go.work` exist.**
+Both are gitignored and nothing creates them: `services/_deps/` is a set of
+hand-cloned sibling repos (go-merklelog, go-merklelog-{azure,datatrails,fs,
+provider-testing}, go-datatrails-{common,serialization,simplehash}, go-sigv4,
+go-univocity, taskfiles) and `services/{sealer,ranger,publisher}/go.work` are
+per-service workspace files that `use` them. Without them a service fails on
+missing `go.sum` entries, which looks like a broken dependency. In a worktree,
+borrow them from the home clone (nothing is committed):
+
+```bash
+ln -s ~/Dev/personal/forestrie/arbor/services/_deps services/_deps
+for s in sealer ranger publisher; do
+  cp ~/Dev/personal/forestrie/arbor/services/$s/go.work* services/$s/
+done
+```
+
+For a brand-new machine, clone each repo listed above into `services/_deps/`
+and copy the `go.work` files from an existing checkout.
+
 ## Services
 
 | Service | Role |
