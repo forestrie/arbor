@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/fxamacker/cbor/v2"
 )
 
 // ERC1271Verifier supports KS256 contract-wallet signature checks (Safe, etc.).
@@ -30,27 +29,31 @@ func VerifyCertificateSignatureKS256(
 		return fmt.Errorf("KS256 root signer must be 20 bytes, got %d", len(rootSigner))
 	}
 
-	protectedBytes, payloadBytes, signature, err := decodeCoseSign1Parts(certBytes)
+	parts, err := decodeCertificate(certBytes)
 	if err != nil {
 		return err
 	}
-	alg, err := ks256AlgFromProtectedHeader(protectedBytes)
+	alg, err := algFromParts(parts)
 	if err != nil {
 		return err
 	}
 	if alg != CoseAlgKS256 {
 		return fmt.Errorf("delegation cert alg %d is not KS256", alg)
 	}
-
-	sigStructure := []any{
-		"Signature1",
-		protectedBytes,
-		[]byte{},
-		payloadBytes,
+	// KS256 defines no alg-specific material, so a WebAuthn envelope here
+	// is confusion and must be rejected BEFORE any signature work. This
+	// entry point is separate from VerifyCertificateSignature, so the
+	// guard is repeated rather than inherited — that separation is
+	// exactly how the envelope previously rode through this path
+	// untouched.
+	if err := rejectStrayWebAuthnEnvelope(alg, parts); err != nil {
+		return err
 	}
-	sigStructureBytes, err := cbor.Marshal(sigStructure)
+
+	signature := parts.Signature
+	sigStructureBytes, err := buildSigStructure(parts)
 	if err != nil {
-		return fmt.Errorf("encode sig structure: %w", err)
+		return err
 	}
 	hash := crypto.Keccak256(sigStructureBytes)
 
@@ -79,39 +82,4 @@ func VerifyCertificateSignatureKS256(
 		return fmt.Errorf("delegation cert signer != KS256 root")
 	}
 	return nil
-}
-
-func decodeCoseSign1Parts(certBytes []byte) (protected, payload, signature []byte, err error) {
-	var coseArr []any
-	if err := cbor.Unmarshal(certBytes, &coseArr); err != nil {
-		return nil, nil, nil, fmt.Errorf("decode COSE Sign1: %w", err)
-	}
-	if len(coseArr) != 4 {
-		return nil, nil, nil, fmt.Errorf("unexpected COSE Sign1 array length: %d", len(coseArr))
-	}
-	protectedBytes, ok := asBstr(coseArr[0])
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("COSE protected header is not bstr")
-	}
-	payloadBytes, ok := asBstr(coseArr[2])
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("COSE payload is not bstr")
-	}
-	sigBytes, ok := asBstr(coseArr[3])
-	if !ok {
-		return nil, nil, nil, fmt.Errorf("COSE signature is not bstr")
-	}
-	return protectedBytes, payloadBytes, sigBytes, nil
-}
-
-func ks256AlgFromProtectedHeader(protected []byte) (int64, error) {
-	protectedMap, err := decodeIntKeyedMap(protected)
-	if err != nil {
-		return 0, fmt.Errorf("decode protected header: %w", err)
-	}
-	alg, ok := asInt64(protectedMap[CoseHeaderAlg])
-	if !ok {
-		return 0, fmt.Errorf("protected header missing alg")
-	}
-	return alg, nil
 }

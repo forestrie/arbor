@@ -73,8 +73,22 @@ func VerifyDelegationLease(
 		if err != nil {
 			return nil, fmt.Errorf("parse trust root public key: %w", err)
 		}
+		// The certificate's own protected header selects ES256 or
+		// ES256_WEBAUTHN; the trust root is an ordinary P-256 point in
+		// both cases, which is why the branch above keys on the root's
+		// curve rather than on the certificate's algorithm.
+		//
+		// User verification is deliberately NOT required here. UV is
+		// per-log policy carried by the grant flag
+		// GF_REQUIRES_USER_VERIFICATION, and the sealer verifies a lease,
+		// not a grant — it has no grant in evidence. devdocs ADR-0063 §4
+		// records that asymmetry as accepted: the on-chain verifier
+		// backstops UV at publish, where the grant IS in evidence. Passing
+		// the option explicitly keeps the choice visible rather than
+		// implicit in a default.
 		if err := delegationcert.VerifyCertificateSignature(
 			issuerResp.Certificate, trustPub, req.Curve,
+			delegationcert.WithRequireUserVerification(false),
 		); err != nil {
 			return nil, err
 		}

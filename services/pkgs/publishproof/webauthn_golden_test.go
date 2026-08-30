@@ -46,6 +46,20 @@ type webauthnGolden struct {
 		ChallengeIndex    string `json:"challengeIndex"`
 		TypeIndex         string `json:"typeIndex"`
 	} `json:"onchain"`
+	// Certificate is the OTHER half of the same ceremony: the delegation
+	// certificate, which carries its own assertion (two gestures per
+	// ceremony, ADR-0063 §1). The fixture has always contained it; until
+	// FOR-551 this struct declared no field for it, so arbor read only
+	// half the capture and the certificate vector went unused.
+	Certificate struct {
+		CoseSign1         string `json:"coseSign1"`
+		RootKid           string `json:"rootKid"`
+		SigStructure      string `json:"sigStructure"`
+		ChallengeB64u     string `json:"challengeB64u"`
+		AuthenticatorData string `json:"authenticatorData"`
+		ClientDataJSON    string `json:"clientDataJSON"`
+		Signature         string `json:"signature"`
+	} `json:"certificate"`
 }
 
 func loadWebauthnGolden(t *testing.T) webauthnGolden {
