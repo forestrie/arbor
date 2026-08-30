@@ -23,12 +23,18 @@ func VerifyCertificateSignature(
 	certBytes []byte,
 	trustRoot *ecdsa.PublicKey,
 	curve Curve,
+	opts ...CertificateVerifyOption,
 ) error {
 	if len(certBytes) == 0 {
 		return fmt.Errorf("empty certificate")
 	}
 	if trustRoot == nil {
 		return fmt.Errorf("trust root public key is nil")
+	}
+
+	cfg := certVerifyConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 
 	protectedBytes, payloadBytes, signature, err :=
@@ -51,12 +57,26 @@ func VerifyCertificateSignature(
 
 	switch alg {
 	case CoseAlgES256:
+		// Fail closed in the other direction too: alg-specific material
+		// under an algorithm that defines none is evidence of confusion,
+		// never something to ignore (ADR-0063 §5).
+		if certHasWebAuthnEnvelope(certBytes) {
+			return fmt.Errorf(
+				"unexpected WebAuthn envelope at unprotected label %d on "+
+					"an alg %d (ES256) certificate",
+				CoseHeaderWebAuthnEnvelope, CoseAlgES256,
+			)
+		}
 		return verifyES256Signature(sigStructureBytes, signature, trustRoot)
+	case CoseAlgES256WebAuthn:
+		return verifyWebAuthnCertificate(
+			certBytes, sigStructureBytes, signature, trustRoot, cfg,
+		)
 	default:
 		return fmt.Errorf(
 			"delegation cert alg %d is not supported by this verifier "+
-				"(supported: %d ES256)",
-			alg, CoseAlgES256,
+				"(supported: %d ES256, %d ES256_WEBAUTHN)",
+			alg, CoseAlgES256, CoseAlgES256WebAuthn,
 		)
 	}
 }

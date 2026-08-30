@@ -44,28 +44,21 @@ func testRootKey(t *testing.T) *ecdsa.PublicKey {
 func TestVerifyCertificateSignatureNamesUnsupportedAlg(t *testing.T) {
 	root := testRootKey(t)
 
-	t.Run("ES256_WEBAUTHN", func(t *testing.T) {
-		err := VerifyCertificateSignature(
-			certWithAlg(t, CoseAlgES256WebAuthn, 64), root, Secp256r1,
-		)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "-65800")
-		require.Contains(t, err.Error(), "not supported")
-		// The old misattributions must not reappear.
-		require.NotContains(t, err.Error(), "signature invalid")
-		require.NotContains(t, err.Error(), "must be 64 bytes")
-	})
-
-	// A DER-shaped assertion signature must still be reported as an
-	// unsupported algorithm, not as a length problem: the alg is read
-	// before the signature is looked at.
-	t.Run("ES256_WEBAUTHN with DER-length signature", func(t *testing.T) {
-		err := VerifyCertificateSignature(
-			certWithAlg(t, CoseAlgES256WebAuthn, 71), root, Secp256r1,
-		)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "-65800")
-		require.NotContains(t, err.Error(), "must be 64 bytes")
+	// A -65800 certificate with no envelope must fail CLOSED, naming the
+	// missing envelope — never fall back to a plain ES256 verify. Before
+	// FOR-551 this surfaced as a bare signature or length complaint.
+	t.Run("ES256_WEBAUTHN without envelope fails closed", func(t *testing.T) {
+		for _, sigLen := range []int{64, 71} {
+			err := VerifyCertificateSignature(
+				certWithAlg(t, CoseAlgES256WebAuthn, sigLen), root, Secp256r1,
+			)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "WebAuthn")
+			require.Contains(t, err.Error(), "envelope")
+			// The old misattributions must not reappear.
+			require.NotContains(t, err.Error(), "signature invalid")
+			require.NotContains(t, err.Error(), "must be 64 bytes")
+		}
 	})
 
 	t.Run("KS256 on the ES256 path", func(t *testing.T) {
@@ -76,6 +69,42 @@ func TestVerifyCertificateSignatureNamesUnsupportedAlg(t *testing.T) {
 		require.Contains(t, err.Error(), "-65799")
 		require.Contains(t, err.Error(), "not supported")
 	})
+}
+
+// certWithEnvelope builds a certificate declaring alg and carrying a
+// WebAuthn envelope in its unprotected header.
+func certWithEnvelope(t *testing.T, alg int64) []byte {
+	t.Helper()
+	protected, err := cbor.Marshal(map[int64]any{CoseHeaderAlg: alg})
+	require.NoError(t, err)
+	payload, err := cbor.Marshal(map[int64]any{PayloadLabelSchemaVer: 1})
+	require.NoError(t, err)
+	certBytes, err := cbor.Marshal([]any{
+		protected,
+		map[int64]any{
+			CoseHeaderWebAuthnEnvelope: []any{
+				make([]byte, webAuthnAuthDataMinLen),
+				[]byte(`{"type":"webauthn.get","challenge":"x"}`),
+			},
+		},
+		payload,
+		make([]byte, 64),
+	})
+	require.NoError(t, err)
+	return certBytes
+}
+
+// The mirror fail-closed rule (ADR-0063 §5): alg-specific material under
+// an algorithm that defines none is evidence of confusion, never
+// ignorable. Mirrors the on-chain UnexpectedDelegationAlgData revert.
+func TestVerifyCertificateRejectsEnvelopeOnPlainES256(t *testing.T) {
+	err := VerifyCertificateSignature(
+		certWithEnvelope(t, CoseAlgES256), testRootKey(t), Secp256r1,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unexpected WebAuthn envelope")
+	// It must be rejected, not merely fail the signature check later.
+	require.NotContains(t, err.Error(), "signature invalid")
 }
 
 // The curve argument is honoured rather than ignored: it asserts which

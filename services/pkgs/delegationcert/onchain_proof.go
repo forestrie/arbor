@@ -144,3 +144,18 @@ func NormalizeES256SignatureLowS(sig []byte) []byte {
 	s.FillBytes(out[32:])
 	return out
 }
+
+// isLowS reports whether a raw 64-byte P-256 signature is in low-s form.
+//
+// Verifiers must reject the high-s twin rather than normalise it: (r, s)
+// and (r, N-s) both verify for the same digest and key, so accepting both
+// makes a signature malleable — the same authorisation with two distinct
+// byte encodings. Signature bytes are committed elsewhere in this system,
+// so that matters beyond tidiness.
+func isLowS(sig []byte) bool {
+	if len(sig) != 64 {
+		return false
+	}
+	s := new(big.Int).SetBytes(sig[32:])
+	return s.Sign() > 0 && s.Cmp(p256HalfN) <= 0
+}
