@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
-
-	"github.com/fxamacker/cbor/v2"
 )
 
 // WebAuthn authenticatorData flag bits (WebAuthn L2 §6.1).
@@ -65,13 +63,13 @@ type clientData struct {
 // Without that equality the assertion proves key possession and says
 // nothing about this certificate.
 func verifyWebAuthnCertificate(
-	certBytes []byte,
+	parts *certParts,
 	sigStructureBytes []byte,
-	signature []byte,
 	trustRoot *ecdsa.PublicKey,
 	cfg certVerifyConfig,
 ) error {
-	authData, clientDataJSON, err := webAuthnEnvelopeFromCert(certBytes)
+	signature := parts.Signature
+	authData, clientDataJSON, err := webAuthnEnvelopeFromParts(parts)
 	if err != nil {
 		return err
 	}
@@ -152,31 +150,21 @@ func checkAuthenticatorFlags(authData []byte, cfg certVerifyConfig) error {
 	return nil
 }
 
-// webAuthnEnvelopeFromCert reads the 2-element assertion envelope from the
-// certificate's unprotected header at CoseHeaderWebAuthnEnvelope.
+// webAuthnEnvelopeFromParts reads the 2-element assertion envelope from
+// the certificate's unprotected header at CoseHeaderWebAuthnEnvelope.
 //
 // Unlike the on-chain algData, the off-chain envelope carries NO
 // challengeIndex/typeIndex hint element: those exist on-chain only to
 // avoid scanning JSON at Solidity gas prices, and carrying them here would
-// create a verify-or-ignore obligation for no gain (ADR-0063 §2).
-func webAuthnEnvelopeFromCert(certBytes []byte) (authData, clientDataJSON []byte, err error) {
-	var coseArr []any
-	if err := cbor.Unmarshal(certBytes, &coseArr); err != nil {
-		return nil, nil, fmt.Errorf("decode COSE Sign1: %w", err)
-	}
-	if len(coseArr) != 4 {
-		return nil, nil, fmt.Errorf(
-			"unexpected COSE Sign1 array length: %d", len(coseArr),
-		)
-	}
-	unprotected, ok := normalizeAnyIntKeyedMap(coseArr[1])
-	if !ok {
-		return nil, nil, fmt.Errorf(
-			"COSE unprotected header is not a map; the WebAuthn " +
-				"assertion envelope is missing",
-		)
-	}
-	raw, ok := unprotected[CoseHeaderWebAuthnEnvelope]
+// create a verify-or-ignore obligation for no gain (ADR-0063 s2). A
+// 3-element on-chain-shaped algData is therefore rejected here.
+//
+// Elements must be genuine CBOR byte strings: asBstrStrict, not asBstr.
+// The permissive helper coerces an array of small integers into bytes,
+// which would let a hostile encoder supply structure where bytes are
+// required.
+func webAuthnEnvelopeFromParts(p *certParts) (authData, clientDataJSON []byte, err error) {
+	raw, ok := p.Unprotected[CoseHeaderWebAuthnEnvelope]
 	if !ok {
 		return nil, nil, fmt.Errorf(
 			"certificate declares alg %d but carries no WebAuthn "+
@@ -191,34 +179,13 @@ func webAuthnEnvelopeFromCert(certBytes []byte) (authData, clientDataJSON []byte
 				"[authenticatorData, clientDataJSON]",
 		)
 	}
-	authData, ok = asBstr(arr[0])
+	authData, ok = asBstrStrict(arr[0])
 	if !ok {
 		return nil, nil, fmt.Errorf("authenticatorData is not bstr")
 	}
-	clientDataJSON, ok = asBstr(arr[1])
+	clientDataJSON, ok = asBstrStrict(arr[1])
 	if !ok {
 		return nil, nil, fmt.Errorf("clientDataJSON is not bstr")
 	}
 	return authData, clientDataJSON, nil
-}
-
-// certHasWebAuthnEnvelope reports whether the certificate carries an entry
-// at the WebAuthn envelope label. Used to reject alg-specific material
-// under an algorithm that defines none: that is evidence of confusion,
-// never something to ignore (ADR-0063 §5, mirroring the on-chain
-// UnexpectedDelegationAlgData revert).
-func certHasWebAuthnEnvelope(certBytes []byte) bool {
-	var coseArr []any
-	if err := cbor.Unmarshal(certBytes, &coseArr); err != nil {
-		return false
-	}
-	if len(coseArr) != 4 {
-		return false
-	}
-	unprotected, ok := normalizeAnyIntKeyedMap(coseArr[1])
-	if !ok {
-		return false
-	}
-	_, present := unprotected[CoseHeaderWebAuthnEnvelope]
-	return present
 }

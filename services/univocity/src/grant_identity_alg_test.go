@@ -15,19 +15,17 @@ import "testing"
 //
 // FOR-551 was originally filed claiming that upstream failure was a real
 // mode. It is not, and this test is what keeps that true.
-const coseAlgES256WebAuthn = -65800
 
 func TestGrantDataIdentityInfersES256FromLength(t *testing.T) {
 	alg, key, ok := grantDataIdentity(make([]byte, 64))
 	if !ok {
 		t.Fatal("a 64-byte grantData must resolve")
 	}
+	// Asserting the alg IS ES256 already excludes -65800; a separate
+	// check against it would be a branch that can never be taken.
 	if alg != coseAlgES256 {
 		t.Fatalf("64-byte grantData: got alg %d, want %d (ES256)",
 			alg, coseAlgES256)
-	}
-	if alg == coseAlgES256WebAuthn {
-		t.Fatal("a trust root must never be advertised as -65800")
 	}
 	if len(key) != 64 {
 		t.Fatalf("key length: got %d, want 64", len(key))

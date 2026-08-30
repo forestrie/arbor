@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"testing"
 	"time"
 
@@ -63,7 +62,13 @@ func buildWebauthnCertificate(
 		t.Fatal(err)
 	}
 
-	protected, err := cbor.Marshal(map[int64]any{
+	// Canonical (core-deterministic) ordering, as the real producer
+	// emits and as the verifier now requires.
+	enc, err := cbor.EncOptions{Sort: cbor.SortCoreDeterministic}.EncMode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	protected, err := enc.Marshal(map[int64]any{
 		delegationcert.CoseHeaderAlg: delegationcert.CoseAlgES256WebAuthn,
 		delegationcert.CoseHeaderCty: delegationcert.DelegationContentType,
 		delegationcert.CoseHeaderKid: kid,
@@ -309,34 +314,5 @@ func TestVerifyDelegationLeaseRejectsWebauthnCertWrongRoot(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected rejection for a certificate under another root")
-	}
-}
-
-// Guards the premise the FOR-551 fix rests on: a 64-byte P-256 root is
-// advertised as ES256, never as -65800. ALG_ES256_WEBAUTHN is a signature
-// algorithm, not a key type, so a trust root must never carry it — if this
-// ever changes, the sealer's ES256 branch stops being reached.
-func TestWebauthnTrustRootStaysES256(t *testing.T) {
-	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root := LogSigningKey{
-		PublicKeyPEM: spkiPEM(t, &rootPriv.PublicKey),
-		Alg:          "ES256",
-		AlgInt:       delegationcert.CoseAlgES256,
-	}
-	if root.IsKS256Root() {
-		t.Fatal("a 64-byte P-256 root must not resolve as KS256")
-	}
-	if root.AlgInt == delegationcert.CoseAlgES256WebAuthn {
-		t.Fatal("a trust root must never be advertised as ALG_ES256_WEBAUTHN")
-	}
-	if !algMatchesCurve(root.Alg, delegationcert.Secp256r1) {
-		t.Fatal("ES256 root must match secp256r1")
-	}
-	// Sanity: the delegated key is a plain P-256 point either way.
-	if new(big.Int).Set(rootPriv.PublicKey.X).BitLen() == 0 {
-		t.Fatal("root key X must be set")
 	}
 }

@@ -1,6 +1,7 @@
 package publishproof
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
@@ -151,19 +152,26 @@ func TestWebauthnGoldenCertificateMutations(t *testing.T) {
 	})
 
 	t.Run("mutated challenge", func(t *testing.T) {
+		// Locate the challenge value precisely rather than scanning for
+		// an arbitrary character: a scan can land anywhere in the JSON,
+		// which would make this assert nothing about challenge binding.
 		bad := append([]byte(nil), clientDataJSON...)
-		// Flip a byte inside the base64url challenge value.
-		for i := range bad {
-			if bad[i] == 'A' || bad[i] == 'B' {
-				bad[i] = 'C'
-				break
-			}
+		at := bytes.Index(bad, []byte(g.Certificate.ChallengeB64u))
+		require.GreaterOrEqual(t, at, 0,
+			"challenge must appear verbatim in clientDataJSON")
+		if bad[at] == 'A' {
+			bad[at] = 'B'
+		} else {
+			bad[at] = 'A'
 		}
+
 		err := delegationcert.VerifyCertificateSignature(
 			rebuild(t, protectedBytes, envelope(authData, bad), signature),
 			root, delegationcert.Secp256r1,
 		)
 		require.Error(t, err)
+		require.Contains(t, err.Error(), "does not bind",
+			"must fail challenge binding, not merely the signature")
 	})
 
 	t.Run("user presence cleared", func(t *testing.T) {

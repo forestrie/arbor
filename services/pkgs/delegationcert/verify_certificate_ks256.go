@@ -30,27 +30,31 @@ func VerifyCertificateSignatureKS256(
 		return fmt.Errorf("KS256 root signer must be 20 bytes, got %d", len(rootSigner))
 	}
 
-	protectedBytes, payloadBytes, signature, err := decodeCoseSign1Parts(certBytes)
+	parts, err := decodeCertificate(certBytes)
 	if err != nil {
 		return err
 	}
-	alg, err := algFromProtectedHeader(protectedBytes)
+	alg, err := algFromParts(parts)
 	if err != nil {
 		return err
 	}
 	if alg != CoseAlgKS256 {
 		return fmt.Errorf("delegation cert alg %d is not KS256", alg)
 	}
-
-	sigStructure := []any{
-		"Signature1",
-		protectedBytes,
-		[]byte{},
-		payloadBytes,
+	// KS256 defines no alg-specific material, so a WebAuthn envelope here
+	// is confusion and must be rejected BEFORE any signature work. This
+	// entry point is separate from VerifyCertificateSignature, so the
+	// guard is repeated rather than inherited — that separation is
+	// exactly how the envelope previously rode through this path
+	// untouched.
+	if err := rejectStrayWebAuthnEnvelope(alg, parts); err != nil {
+		return err
 	}
-	sigStructureBytes, err := cbor.Marshal(sigStructure)
+
+	signature := parts.Signature
+	sigStructureBytes, err := buildSigStructure(parts)
 	if err != nil {
-		return fmt.Errorf("encode sig structure: %w", err)
+		return err
 	}
 	hash := crypto.Keccak256(sigStructureBytes)
 

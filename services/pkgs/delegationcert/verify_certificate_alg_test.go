@@ -114,7 +114,24 @@ func TestVerifyCertificateSignatureHonoursCurve(t *testing.T) {
 		certWithAlg(t, CoseAlgES256, 64), testRootKey(t), Curve("secp256k1"),
 	)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "requires curve secp256r1")
+	require.Contains(t, err.Error(), "require curve secp256r1")
+}
+
+// The trust root's own curve is the load-bearing assertion: both supported
+// algorithms are P-256, so a root on another curve must be refused before
+// any parsing or flag checking, rather than left to a signature verify
+// that could never succeed.
+func TestVerifyCertificateSignatureRequiresP256Root(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+
+	for _, alg := range []int64{CoseAlgES256, CoseAlgES256WebAuthn} {
+		err := VerifyCertificateSignature(
+			certWithAlg(t, alg, 64), &priv.PublicKey, Secp256r1,
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "P-256 trust root")
+	}
 }
 
 // A malformed ES256 signature still reports as a length problem — the

@@ -3,6 +3,7 @@ package delegationcert
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"fmt"
 	"math/big"
@@ -25,11 +26,26 @@ func VerifyCertificateSignature(
 	curve Curve,
 	opts ...CertificateVerifyOption,
 ) error {
-	if len(certBytes) == 0 {
-		return fmt.Errorf("empty certificate")
-	}
 	if trustRoot == nil {
 		return fmt.Errorf("trust root public key is nil")
+	}
+	// The caller's asserted curve. Curve has one legal value today, but
+	// the assertion is cheap and keeps the caller honest.
+	if curve != Secp256r1 {
+		return fmt.Errorf(
+			"delegation certificates require curve %s, got %s",
+			Secp256r1, curve,
+		)
+	}
+	// The load-bearing check: both supported algorithms are P-256. A root
+	// on any other curve must be refused here rather than reaching a
+	// signature verify that would silently never succeed — or, worse,
+	// reaching the WebAuthn flag checks first and reporting the wrong
+	// reason.
+	if trustRoot.Curve != elliptic.P256() {
+		return fmt.Errorf(
+			"delegation certificates require a P-256 trust root",
+		)
 	}
 
 	cfg := certVerifyConfig{}
@@ -37,40 +53,37 @@ func VerifyCertificateSignature(
 		opt(&cfg)
 	}
 
-	protectedBytes, payloadBytes, signature, err :=
-		decodeCoseSign1Parts(certBytes)
+	parts, err := decodeCertificate(certBytes)
 	if err != nil {
 		return err
 	}
-	alg, err := algFromProtectedHeader(protectedBytes)
+	alg, err := algFromParts(parts)
 	if err != nil {
-		return err
-	}
-	if err := checkAlgCurve(alg, curve); err != nil {
 		return err
 	}
 
-	sigStructureBytes, err := buildSigStructure(protectedBytes, payloadBytes)
+	// Fail closed in BOTH directions, above the switch so it holds for
+	// every algorithm including unsupported ones: alg-specific material
+	// under an algorithm that defines none is evidence of confusion,
+	// never something to ignore (ADR-0063 §5, mirroring the on-chain
+	// UnexpectedDelegationAlgData revert and the TypeScript verifier).
+	if err := rejectStrayWebAuthnEnvelope(alg, parts); err != nil {
+		return err
+	}
+
+	sigStructureBytes, err := buildSigStructure(parts)
 	if err != nil {
 		return err
 	}
 
 	switch alg {
 	case CoseAlgES256:
-		// Fail closed in the other direction too: alg-specific material
-		// under an algorithm that defines none is evidence of confusion,
-		// never something to ignore (ADR-0063 §5).
-		if certHasWebAuthnEnvelope(certBytes) {
-			return fmt.Errorf(
-				"unexpected WebAuthn envelope at unprotected label %d on "+
-					"an alg %d (ES256) certificate",
-				CoseHeaderWebAuthnEnvelope, CoseAlgES256,
-			)
-		}
-		return verifyES256Signature(sigStructureBytes, signature, trustRoot)
+		return verifyES256Signature(
+			sigStructureBytes, parts.Signature, trustRoot,
+		)
 	case CoseAlgES256WebAuthn:
 		return verifyWebAuthnCertificate(
-			certBytes, sigStructureBytes, signature, trustRoot, cfg,
+			parts, sigStructureBytes, trustRoot, cfg,
 		)
 	default:
 		return fmt.Errorf(
@@ -81,34 +94,32 @@ func VerifyCertificateSignature(
 	}
 }
 
-// checkAlgCurve honours the caller's asserted curve. The caller is stating
-// which curve it believes the trust root is on; a declared alg that cannot
-// be verified on that curve is a mismatch, not something to ignore.
-func checkAlgCurve(alg int64, curve Curve) error {
-	switch alg {
-	case CoseAlgES256, CoseAlgES256WebAuthn:
-		if curve != Secp256r1 {
-			return fmt.Errorf(
-				"delegation cert alg %d requires curve %s, got %s",
-				alg, Secp256r1, curve,
-			)
-		}
-		return nil
-	default:
-		// Unsupported algs are reported by the caller's switch, which
-		// names the alg; do not pre-empt that with a curve error.
+// rejectStrayWebAuthnEnvelope enforces the mirror fail-closed rule for
+// every algorithm that does not define the envelope. It is deliberately
+// not inside the ES256 arm: KS256 and unsupported algorithms must reject
+// it too, and the KS256 entry point is a separate function.
+func rejectStrayWebAuthnEnvelope(alg int64, p *certParts) error {
+	if alg == CoseAlgES256WebAuthn {
 		return nil
 	}
+	if hasWebAuthnEnvelope(p) {
+		return fmt.Errorf(
+			"unexpected WebAuthn envelope at unprotected label %d on an "+
+				"alg %d certificate",
+			CoseHeaderWebAuthnEnvelope, alg,
+		)
+	}
+	return nil
 }
 
 // buildSigStructure encodes the COSE Signature1 structure that both the
 // plain and WebAuthn paths bind to.
-func buildSigStructure(protectedBytes, payloadBytes []byte) ([]byte, error) {
+func buildSigStructure(p *certParts) ([]byte, error) {
 	sigStructure := []any{
 		"Signature1",
-		protectedBytes,
+		p.Protected,
 		[]byte{},
-		payloadBytes,
+		p.Payload,
 	}
 	sigStructureBytes, err := cbor.Marshal(sigStructure)
 	if err != nil {
