@@ -34,7 +34,7 @@ func VerifyCertificateSignatureKS256(
 	if err != nil {
 		return err
 	}
-	alg, err := ks256AlgFromProtectedHeader(protectedBytes)
+	alg, err := algFromProtectedHeader(protectedBytes)
 	if err != nil {
 		return err
 	}
@@ -104,7 +104,10 @@ func decodeCoseSign1Parts(certBytes []byte) (protected, payload, signature []byt
 	return protectedBytes, payloadBytes, sigBytes, nil
 }
 
-func ks256AlgFromProtectedHeader(protected []byte) (int64, error) {
+// algFromProtectedHeader reads the COSE algorithm from a protected header.
+// Shared by every certificate verify path: reading the declared alg is what
+// keeps an unsupported one self-describing (FOR-551).
+func algFromProtectedHeader(protected []byte) (int64, error) {
 	protectedMap, err := decodeIntKeyedMap(protected)
 	if err != nil {
 		return 0, fmt.Errorf("decode protected header: %w", err)

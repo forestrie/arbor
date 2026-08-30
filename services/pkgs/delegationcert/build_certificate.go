@@ -16,6 +16,15 @@ const (
 	CoseAlgES256 = -7 // ECDSA w/ SHA-256 (P-256)
 	// CoseAlgKS256 is secp256k1 + Keccak-256 + Ethereum address / ERC-1271.
 	CoseAlgKS256 = -65799
+	// CoseAlgES256WebAuthn is ALG_ES256_WEBAUTHN (univocity ADR-0008,
+	// devdocs ADR-0063): a P-256 key whose signature is a WebAuthn
+	// assertion rather than a plain COSE signature.
+	//
+	// It is a SIGNATURE algorithm, not a key type. The key is an ordinary
+	// P-256 point, so a trust root is never advertised with this alg —
+	// grantDataIdentity infers ES256 from a 64-byte key and that is
+	// correct. Only the certificate's signature envelope is WebAuthn.
+	CoseAlgES256WebAuthn = -65800
 )
 
 // COSE protected header labels.
@@ -24,6 +33,20 @@ const (
 	CoseHeaderCty = 3 // Content type
 	CoseHeaderKid = 4 // Key ID
 )
+
+// CoseHeaderWebAuthnEnvelope is the UNPROTECTED header label carrying the
+// 2-element WebAuthn assertion envelope [authenticatorData, clientDataJSON]
+// on a CoseAlgES256WebAuthn certificate (devdocs ADR-0063 §2).
+//
+// It deliberately shares the numeric value of CoseAlgES256WebAuthn: the
+// original design let the alg id double as the header label. The two live
+// in different COSE registries and never occupy the same parse position —
+// the alg is a VALUE under protected label 1, this is a KEY in the
+// unprotected map — so it is not a wire ambiguity. It is still a recorded
+// bug (devdocs protocol/label-registry.md §4, where the label is being
+// separated as TBD1), which is why it is declared here as its own named
+// constant rather than reusing CoseAlgES256WebAuthn at the use site.
+const CoseHeaderWebAuthnEnvelope = -65800
 
 // Delegation payload labels per forestrie.delegation profile.
 const (
