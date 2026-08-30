@@ -150,20 +150,30 @@ func verifyES256Signature(
 
 // DelegatedKeyFromCertificate extracts the delegated EC public key from a
 // delegation certificate payload (label 5).
+//
+// This is a verification path, not an informational one — the sealer binds
+// its ephemeral key to what this returns — so it decodes the same way
+// VerifyCertificateSignature does. A permissive read here could resolve the
+// payload differently from the read the signature covered.
 func DelegatedKeyFromCertificate(certBytes []byte) (*DelegatedCoseKey, Curve, error) {
 	if len(certBytes) == 0 {
 		return nil, "", fmt.Errorf("empty certificate")
 	}
 
 	var coseArr []any
-	if err := cbor.Unmarshal(certBytes, &coseArr); err != nil {
+	if err := strictUnmarshal(certBytes, &coseArr); err != nil {
 		return nil, "", fmt.Errorf("decode COSE_Sign1: %w", err)
 	}
-	payloadBytes, ok := asBstr(coseArr[2])
+	if len(coseArr) != 4 {
+		return nil, "", fmt.Errorf(
+			"unexpected COSE_Sign1 array length: %d", len(coseArr),
+		)
+	}
+	payloadBytes, ok := asBstrStrict(coseArr[2])
 	if !ok {
 		return nil, "", fmt.Errorf("COSE payload is not bstr")
 	}
-	payloadMap, err := decodeIntKeyedMap(payloadBytes)
+	payloadMap, err := decodeIntKeyedMapStrict(payloadBytes)
 	if err != nil {
 		return nil, "", fmt.Errorf("decode payload: %w", err)
 	}

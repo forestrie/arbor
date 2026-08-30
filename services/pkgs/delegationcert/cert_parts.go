@@ -55,14 +55,21 @@ func decodeCertificate(certBytes []byte) (*certParts, error) {
 		return nil, fmt.Errorf("COSE signature is not bstr")
 	}
 
-	// The protected header is signed, so its exact bytes matter.
+	// The protected header and the payload are both signed, so their exact
+	// bytes matter: a non-canonical encoding of either is a second reading
+	// of the same artifact.
 	if len(protected) > 0 {
 		if err := requireCanonicalMap(protected, "protected header"); err != nil {
 			return nil, err
 		}
 	}
+	if len(payload) > 0 {
+		if err := requireCanonicalMap(payload, "payload"); err != nil {
+			return nil, err
+		}
+	}
 
-	unprotected, err := strictIntKeyedMapFromAny(arr[1])
+	unprotected, err := unprotectedMapFromAny(arr[1])
 	if err != nil {
 		return nil, fmt.Errorf("COSE unprotected header: %w", err)
 	}
@@ -75,11 +82,22 @@ func decodeCertificate(certBytes []byte) (*certParts, error) {
 	}, nil
 }
 
-// strictIntKeyedMapFromAny converts a decoded CBOR map to int64 keys,
-// rejecting non-integer keys rather than skipping them. The permissive
-// normalizeAnyIntKeyedMap drops keys it cannot interpret, which would let
-// an unrecognised entry pass unnoticed.
-func strictIntKeyedMapFromAny(v any) (map[int64]any, error) {
+// unprotectedMapFromAny converts the decoded UNPROTECTED header to int64
+// keys, skipping entries whose key is not an integer.
+//
+// Skipping is correct here and only here. COSE permits tstr labels in a
+// header map, and the TypeScript verifier (coseUnprotectedToMap) already
+// drops non-numeric keys, so a future producer that adds one would
+// otherwise hard-fail every arbor verify while canopy kept working — a
+// forward-compatibility hazard, not a security one: nothing in the
+// unprotected header is signed, and the labels this verifier acts on are
+// looked up by integer, so an unrecognised entry cannot displace one.
+//
+// Everything else stays strict. Duplicate keys, indefinite lengths and
+// non-integer keys in the PROTECTED header or the payload are still
+// rejected (strictUnmarshal and decodeIntKeyedMapStrict), because those
+// bytes are signed.
+func unprotectedMapFromAny(v any) (map[int64]any, error) {
 	raw, ok := v.(map[any]any)
 	if !ok {
 		return nil, fmt.Errorf("not a map")
@@ -88,7 +106,7 @@ func strictIntKeyedMapFromAny(v any) (map[int64]any, error) {
 	for k, vv := range raw {
 		ki, ok := asInt64(k)
 		if !ok {
-			return nil, fmt.Errorf("non-integer map key: %T", k)
+			continue
 		}
 		out[ki] = vv
 	}
@@ -108,7 +126,10 @@ func algFromParts(p *certParts) (int64, error) {
 	return alg, nil
 }
 
-// decodeIntKeyedMapStrict is decodeIntKeyedMap on the strict decoder.
+// decodeIntKeyedMapStrict decodes an int-keyed CBOR map on the strict
+// decoder, rejecting a non-integer key. It is the only int-keyed map
+// decoder in this package: the signed material (protected header, payload)
+// and the informational reader must not disagree about what decodes.
 func decodeIntKeyedMapStrict(b []byte) (map[int64]any, error) {
 	var raw map[any]any
 	if err := strictUnmarshal(b, &raw); err != nil {

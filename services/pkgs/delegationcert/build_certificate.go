@@ -220,25 +220,16 @@ func encodeDeterministicIntKeyedMap(m map[int64]any) ([]byte, error) {
 		return ki > kj
 	})
 
-	// Use cbor encoder with RFC 8949 §4.2 core deterministic map ordering
-	// (bytewise lexicographic on encoded keys) — the COSE/SCITT canonical
-	// profile, matching the rest of arbor (go-merklelog, go-datatrails-common)
-	// and the TS @canopy/encoding writer. NB: fxamacker's SortCanonical is the
-	// legacy RFC 7049 *length-first* ordering, which diverges from §4.2 once a
-	// multi-byte key (>=24) appears; the current delegation labels are all
-	// single-byte so this switch is byte-identical for existing certs.
-	encMode, err := cbor.EncOptions{
-		Sort: cbor.SortCoreDeterministic,
-	}.EncMode()
-	if err != nil {
-		return nil, err
-	}
-
 	// Build ordered map for encoding
 	orderedMap := make(map[int64]any)
 	for _, k := range keys {
 		orderedMap[k] = m[k]
 	}
 
-	return encMode.Marshal(orderedMap)
+	// canonicalEnc (strict_cbor.go) is the package's single canonical
+	// encoder, shared with the verifier's canonicity check: producer and
+	// consumer MUST agree on canonical form. RFC 8949 §4.2 core
+	// deterministic ordering, matching the rest of arbor (go-merklelog,
+	// go-datatrails-common) and the TS @canopy/encoding writer.
+	return canonicalEnc.Marshal(orderedMap)
 }

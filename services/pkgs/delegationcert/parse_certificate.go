@@ -25,24 +25,28 @@ func ParseCertificate(certBytes []byte) (*CertificateInfo, error) {
 		return nil, fmt.Errorf("unexpected COSE_Sign1 array length: %d", len(coseArr))
 	}
 
-	protectedBytes, ok := asBstr(coseArr[0])
+	// The structural elements go through the strict accessor even here.
+	// The display fields are informational, but a reader that accepts a
+	// shape the verifier refuses gives one certificate two readings, and
+	// this is the function the sealer logs from.
+	protectedBytes, ok := asBstrStrict(coseArr[0])
 	if !ok {
 		return nil, fmt.Errorf("COSE_Sign1[0] (protected) is not bstr (type=%T)", coseArr[0])
 	}
-	payloadBytes, ok := asBstr(coseArr[2])
+	payloadBytes, ok := asBstrStrict(coseArr[2])
 	if !ok {
 		return nil, fmt.Errorf("COSE_Sign1[2] (payload) is not bstr (type=%T)", coseArr[2])
 	}
-	signature, ok := asBstr(coseArr[3])
+	signature, ok := asBstrStrict(coseArr[3])
 	if !ok {
 		return nil, fmt.Errorf("COSE_Sign1[3] (signature) is not bstr (type=%T)", coseArr[3])
 	}
 
-	protectedMap, err := decodeIntKeyedMap(protectedBytes)
+	protectedMap, err := decodeIntKeyedMapStrict(protectedBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode protected header: %w", err)
 	}
-	payloadMap, err := decodeIntKeyedMap(payloadBytes)
+	payloadMap, err := decodeIntKeyedMapStrict(payloadBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decode payload: %w", err)
 	}
@@ -149,22 +153,6 @@ func asBstr(v any) ([]byte, bool) {
 	default:
 		return nil, false
 	}
-}
-
-func decodeIntKeyedMap(b []byte) (map[int64]any, error) {
-	var raw map[any]any
-	if err := cbor.Unmarshal(b, &raw); err != nil {
-		return nil, err
-	}
-	out := make(map[int64]any, len(raw))
-	for k, v := range raw {
-		ki, ok := asInt64(k)
-		if !ok {
-			return nil, fmt.Errorf("non-integer CBOR map key: %T", k)
-		}
-		out[ki] = v
-	}
-	return out, nil
 }
 
 func normalizeAnyIntKeyedMap(v any) (map[int64]any, bool) {

@@ -15,9 +15,14 @@ import (
 // artifact have two readings — a certificate whose algorithm is -7 to one
 // parser and -65800 to another is a forgery primitive, not a curiosity.
 //
-// Informational parsing (ParseCertificate's display fields) keeps the
-// permissive decoder; only material a signature or a policy decision rests
-// on goes through here.
+// canonicalEnc is the ONE canonical encoder in this package: the verifier's
+// canonicity check and the builder (build_certificate.go) share it, because
+// a producer and a consumer that disagree about canonical form reject
+// perfectly valid certificates. cbor.CoreDetEncOptions() is RFC 8949 §4.2.1
+// core-deterministic — NOT CanonicalEncOptions, which is the older RFC 7049
+// length-first ordering and sorts multi-byte map keys differently. With only
+// single-byte labels today the two agree, so the divergence would stay
+// invisible until the first label >= 24 and then look like a signature bug.
 var (
 	strictDecMode cbor.DecMode
 	canonicalEnc  cbor.EncMode
@@ -37,17 +42,7 @@ func init() {
 	if err != nil {
 		panic(fmt.Sprintf("delegationcert: strict DecMode: %v", err))
 	}
-	// MUST match the producer (build_certificate.go): core-deterministic
-	// ordering, RFC 8949 §4.2.1, per rules-of-the-road P16.
-	//
-	// Not CanonicalEncOptions — that is the older RFC 7049 length-first
-	// ordering, which sorts multi-byte map keys differently. With only
-	// single-byte header labels the two agree, so the divergence would
-	// have stayed invisible until the first multi-byte label and then
-	// rejected a perfectly valid certificate.
-	canonicalEnc, err = cbor.EncOptions{
-		Sort: cbor.SortCoreDeterministic,
-	}.EncMode()
+	canonicalEnc, err = cbor.CoreDetEncOptions().EncMode()
 	if err != nil {
 		panic(fmt.Sprintf("delegationcert: canonical EncMode: %v", err))
 	}

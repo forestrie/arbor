@@ -62,9 +62,12 @@ func buildWebauthnCertificate(
 		t.Fatal(err)
 	}
 
-	// Canonical (core-deterministic) ordering, as the real producer
-	// emits and as the verifier now requires.
-	enc, err := cbor.EncOptions{Sort: cbor.SortCoreDeterministic}.EncMode()
+	// Canonical (core-deterministic) ordering for BOTH signed halves, as
+	// the real producer emits and as the verifier requires. cbor.Marshal's
+	// default is unsorted, so a payload written with it would be canonical
+	// only by accident; the real-authenticator capture is asserted to
+	// round-trip canonically in the publishproof golden tests.
+	enc, err := cbor.CoreDetEncOptions().EncMode()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +79,7 @@ func buildWebauthnCertificate(
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := cbor.Marshal(map[int64]any{
+	payload, err := enc.Marshal(map[int64]any{
 		delegationcert.PayloadLabelLogID:        logIdHex,
 		delegationcert.PayloadLabelMmrStart:     mmrStart,
 		delegationcert.PayloadLabelMmrEnd:       mmrEnd,

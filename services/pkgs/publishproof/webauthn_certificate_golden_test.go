@@ -100,6 +100,46 @@ func TestWebauthnGoldenCertificateChallengeBinding(t *testing.T) {
 		base64.RawURLEncoding.EncodeToString(digest[:]))
 }
 
+// The verifier requires the signed halves of the certificate — protected
+// header and payload — to be canonical CBOR, so this asserts that a REAL
+// authenticator ceremony produces exactly that. If the browser's writer
+// ever drifted from RFC 8949 §4.2.1 core-deterministic encoding, the
+// canonicity check would start refusing genuine certificates; this is the
+// test that would say so, rather than leaving it to a live seal.
+//
+// The encoder is rebuilt here from cbor.CoreDetEncOptions() rather than
+// borrowed from delegationcert, so the fixture is measured against the
+// standard preset and not against whatever the verifier happens to use.
+func TestWebauthnGoldenCertificateIsCanonicalCBOR(t *testing.T) {
+	g := loadWebauthnGolden(t)
+	certBytes := goldenHex(t, g.Certificate.CoseSign1)
+
+	enc, err := cbor.CoreDetEncOptions().EncMode()
+	require.NoError(t, err)
+
+	var coseArr []any
+	require.NoError(t, cbor.Unmarshal(certBytes, &coseArr))
+	require.Len(t, coseArr, 4)
+
+	for _, part := range []struct {
+		what    string
+		encoded []byte
+	}{
+		{"protected header", coseArr[0].([]byte)},
+		{"payload", coseArr[2].([]byte)},
+	} {
+		t.Run(part.what, func(t *testing.T) {
+			var m map[int64]any
+			require.NoError(t, cbor.Unmarshal(part.encoded, &m))
+			reencoded, err := enc.Marshal(m)
+			require.NoError(t, err)
+			require.Equal(t, part.encoded, reencoded,
+				"the captured %s does not round-trip through "+
+					"core-deterministic encoding", part.what)
+		})
+	}
+}
+
 // Mutation negatives. Each alters exactly one thing and must fail; none
 // may fall back to a plain ES256 verify.
 func TestWebauthnGoldenCertificateMutations(t *testing.T) {

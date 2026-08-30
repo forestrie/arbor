@@ -147,6 +147,122 @@ func TestVerifyRejectsNonCanonicalCBOR(t *testing.T) {
 	})
 }
 
+// The payload is signed too, so it gets the same canonicity treatment as
+// the protected header. Nothing decodes the payload during verification
+// otherwise — it travels as an opaque bstr into the Sig_structure — so
+// without this check a payload could carry a duplicate key and be read one
+// way by the sealer and another by anything downstream.
+func TestVerifyRejectsNonCanonicalPayload(t *testing.T) {
+	protected, err := cbor.Marshal(map[int64]any{CoseHeaderAlg: CoseAlgES256})
+	require.NoError(t, err)
+
+	certWithPayload := func(t *testing.T, payload []byte) []byte {
+		t.Helper()
+		b, err := cbor.Marshal([]any{
+			protected, map[int64]any{}, payload, make([]byte, 64),
+		})
+		require.NoError(t, err)
+		return b
+	}
+
+	t.Run("duplicate payload key", func(t *testing.T) {
+		// a2 0101 0101  =  {1: 1, 1: 1} — two entries, same key.
+		err := VerifyCertificateSignature(
+			certWithPayload(t, mustHex(t, "a2"+"0101"+"0101")),
+			testRootKey(t), Secp256r1,
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "payload")
+		require.NotContains(t, err.Error(), "signature invalid",
+			"a duplicate-key payload must fail at decode, not verify")
+	})
+
+	t.Run("non-canonical integer key encoding", func(t *testing.T) {
+		// a1 1801 01  =  {1: 1} with key 1 written as an 8-bit int. No
+		// decoder option rejects this; only the byte comparison does.
+		err := VerifyCertificateSignature(
+			certWithPayload(t, mustHex(t, "a1"+"1801"+"01")),
+			testRootKey(t), Secp256r1,
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "payload is not canonical")
+	})
+}
+
+// signedES256Cert builds a plain ES256 certificate that verifies, with a
+// caller-supplied unprotected header, so tests can plant entries there
+// without disturbing anything the signature covers.
+func signedES256Cert(t *testing.T, priv *ecdsa.PrivateKey, unprotected any) []byte {
+	t.Helper()
+	protected, err := cbor.Marshal(map[int64]any{CoseHeaderAlg: CoseAlgES256})
+	require.NoError(t, err)
+	payload, err := cbor.Marshal(map[int64]any{PayloadLabelSchemaVer: 1})
+	require.NoError(t, err)
+
+	sigStructure, err := cbor.Marshal([]any{
+		"Signature1", protected, []byte{}, payload,
+	})
+	require.NoError(t, err)
+	digest := sha256.Sum256(sigStructure)
+	r, s, err := ecdsa.Sign(rand.Reader, priv, digest[:])
+	require.NoError(t, err)
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+
+	cert, err := cbor.Marshal([]any{protected, unprotected, payload, sig})
+	require.NoError(t, err)
+	return cert
+}
+
+// Forward compatibility, one direction only. COSE permits tstr labels in a
+// header map and the TypeScript verifier drops non-numeric unprotected keys
+// (coseUnprotectedToMap), so a producer that adds one must not hard-fail
+// every arbor verify while canopy keeps working. Nothing in the unprotected
+// header is signed and the labels this verifier acts on are looked up by
+// integer, so an unrecognised entry cannot displace one.
+//
+// The protected header gets no such latitude: those bytes are signed, and
+// the alg is read from them.
+func TestUnrecognisedHeaderKeys(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+
+	t.Run("tstr key in the unprotected header is skipped", func(t *testing.T) {
+		cert := signedES256Cert(t, priv, map[any]any{
+			"ext": "a label this verifier does not know",
+		})
+		require.NoError(t,
+			VerifyCertificateSignature(cert, &priv.PublicKey, Secp256r1))
+	})
+
+	t.Run("integer entries survive the skip", func(t *testing.T) {
+		// The envelope guard still sees a -65800 entry alongside a tstr
+		// one: skipping must not drop the keys the verifier acts on.
+		cert := signedES256Cert(t, priv, map[any]any{
+			"ext": "unknown",
+			int64(CoseHeaderWebAuthnEnvelope): []any{
+				make([]byte, webAuthnAuthDataMinLen),
+				[]byte(`{"type":"webauthn.get","challenge":"x"}`),
+			},
+		})
+		err := VerifyCertificateSignature(cert, &priv.PublicKey, Secp256r1)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "unexpected WebAuthn envelope")
+	})
+
+	t.Run("tstr key in the protected header still fails", func(t *testing.T) {
+		// a2 0126 6165 6666  =  {1: -7, "e": "f"} — signed bytes, so an
+		// unrecognised key here is refused rather than skipped.
+		protected := mustHex(t, "a2"+"0126"+"6165"+"6166")
+		cert := rawCert(t, protected, map[int64]any{}, make([]byte, 64))
+		err := VerifyCertificateSignature(cert, testRootKey(t), Secp256r1)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "protected header")
+		require.NotContains(t, err.Error(), "signature invalid")
+	})
+}
+
 // The protocol profile is an UNTAGGED COSE_Sign1. A tag-18 wrapper must be
 // rejected rather than silently unwrapped, so one artifact cannot have two
 // readings.
