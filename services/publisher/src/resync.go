@@ -107,6 +107,17 @@ const resyncMaxAgedChecksPerSweep = 64
 // publisher_resync_stranded gauge, which is what an alert rule should use.
 const strandRecheck = 30 * time.Minute
 
+// resyncMaxStrandRechecksPerSweep bounds how many due strand re-checks one
+// sweep spends read-only Assembles on, separately from
+// resyncMaxAgedChecksPerSweep. Re-checks must not compete with first-time
+// classification: on lane A ~1,000 strands falling due every 30m would
+// have consumed the whole 64-check budget (1,000 / 15 sweeps ≈ 67) and
+// stalled the post-restart warm-up indefinitely. A strand whose re-check is
+// deferred keeps its cached verdict and is still counted stranded; with a
+// large strand population the re-check cadence stretches (1,000 strands at
+// 16 per 120s sweep ≈ 2h) and recovery is noticed that much later.
+const resyncMaxStrandRechecksPerSweep = 16
+
 // verdictCap bounds the settled and strand caches; beyond it the oldest
 // entries are pruned (re-classifying an evicted entry costs one Assemble).
 const verdictCap = 16384
@@ -233,10 +244,13 @@ type SweepStats struct {
 	// AgedDeferred counts aged-out candidates left unclassified this sweep
 	// because the check budget was spent; they are picked up next sweep.
 	AgedDeferred int
-	// Stranded counts aged-out candidates VERIFIED still unanchored. Each is
-	// logged at ERROR once per sweep: a seal that aged out while unanchored
-	// is the FOR-408 strand shape and needs an operator re-drive.
+	// Stranded counts aged-out candidates VERIFIED still unanchored (this
+	// sweep or from cache): a seal that aged out while unanchored is the
+	// FOR-408 strand shape and needs an operator re-drive.
 	Stranded int
+	// StrandRechecks counts cached strands re-verified this sweep (bounded
+	// by resyncMaxStrandRechecksPerSweep); AgedChecked does not include them.
+	StrandRechecks int
 	// PoisonSkipped counts candidates skipped via the poison cache — seals
 	// already proven unpublishable at their current ETag. No gas, no ERROR.
 	PoisonSkipped int
@@ -455,8 +469,9 @@ func (r *Resync) Run(ctx context.Context) {
 					"listed", stats.Listed, "gaps", stats.Gaps, "handoffs", stats.Handoffs,
 					"covered", stats.Covered, "blocked", stats.Blocked,
 					"unpublishable", stats.Unpublishable, "poisonSkipped", stats.PoisonSkipped,
-					"stranded", stats.Stranded, "agedOut", stats.AgedOut,
-					"agedChecked", stats.AgedChecked, "agedDeferred", stats.AgedDeferred,
+					"stranded", stats.Stranded, "strandRechecks", stats.StrandRechecks,
+					"agedOut", stats.AgedOut, "agedChecked", stats.AgedChecked,
+					"agedDeferred", stats.AgedDeferred,
 					"capDeferred", stats.CapDeferred, "errors", stats.Errors)
 			} else {
 				r.logger.Info("resync sweep clean", "listed", stats.Listed,
@@ -685,18 +700,24 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 			continue
 		}
 		if aged {
-			if e, ok := r.strands[key]; ok && e.etag == ref.etag && now.Sub(e.at) < strandRecheck {
-				stats.Stranded++ // standing verdict: counted, not re-logged
-				strandLogged = true
-				continue
-			}
-			if stats.AgedChecked >= resyncMaxAgedChecksPerSweep {
+			if e, ok := r.strands[key]; ok && e.etag == ref.etag {
+				// Standing verdict: counted, not re-logged. Re-verified on
+				// its own budget once due; if that budget is spent the
+				// verdict simply stands another sweep.
+				if now.Sub(e.at) < strandRecheck || stats.StrandRechecks >= resyncMaxStrandRechecksPerSweep {
+					stats.Stranded++
+					strandLogged = true
+					continue
+				}
+				stats.StrandRechecks++
+			} else if stats.AgedChecked >= resyncMaxAgedChecksPerSweep {
 				// Unverified: nothing below may settle this log on its
 				// behalf (a cached lower verdict would hide a strand here).
 				stats.AgedDeferred++
 				return assembled{}, 0, true
+			} else {
+				stats.AgedChecked++
 			}
-			stats.AgedChecked++
 		}
 		calldata, res, ready, err := r.pub.Assemble(ctx, key)
 		if err != nil {
