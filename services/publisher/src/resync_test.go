@@ -717,7 +717,7 @@ func TestResyncHorizonStrandedStillAlerts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep 3: %v", err)
 	}
-	if s3.Stranded != 1 || s3.AgedChecked != 1 || strandedAlerts(logs) != 1 {
+	if s3.Stranded != 1 || s3.StrandRechecks != 1 || s3.AgedChecked != 0 || strandedAlerts(logs) != 1 {
 		t.Fatalf("unchanged verdict on re-check must not re-log; stats=%+v ERRORs=%d", s3, strandedAlerts(logs))
 	}
 
@@ -727,7 +727,7 @@ func TestResyncHorizonStrandedStillAlerts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep 4: %v", err)
 	}
-	if s3.Stranded != 0 || s3.Covered != 1 || s3.AgedChecked != 1 {
+	if s3.Stranded != 0 || s3.Covered != 1 || s3.StrandRechecks != 1 {
 		t.Fatalf("anchored by re-drive must clear the strand; stats=%+v", s3)
 	}
 	if n := strandedAlerts(logs); n != 1 {
@@ -772,6 +772,41 @@ func TestResyncHorizonStrandsCannotStarveBudget(t *testing.T) {
 	if s2.Stranded != n || s2.AgedDeferred != 0 || s2.AgedChecked != 6 || len(pub.assembles) != n {
 		t.Fatalf("sweep 2 must alert all from cache + verify the remainder; stats=%+v assembles=%d",
 			s2, len(pub.assembles))
+	}
+}
+
+// TestResyncHorizonRechecksDoNotStarveClassification: due re-checks spend
+// their own (smaller) budget, so a large strand population cannot stall the
+// warm-up of unclassified candidates, and a strand whose re-check is
+// deferred still counts as stranded — its verdict stands until re-verified.
+func TestResyncHorizonRechecksDoNotStarveClassification(t *testing.T) {
+	const strands = resyncMaxStrandRechecksPerSweep + 4
+	const fresh = 8
+	seq := make(map[string][]step)
+	keys := make([]string, 0, strands+fresh)
+	for i := 0; i < strands+fresh; i++ {
+		k := ckpt(fmt.Sprintf("%08x-0000-4000-8000-%012x", i, i), 0)
+		seq[k] = []step{stepPublish}
+		keys = append(keys, k)
+	}
+	pub := newFakeCore(seq)
+	r := newTestResync(pub, onePageAged(resyncHorizon+time.Hour, keys[:strands]...), nil, nil)
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	for _, e := range r.strands {
+		e.at = time.Now().Add(-2 * strandRecheck) // every strand due
+	}
+	r.lister = onePageAged(resyncHorizon+time.Hour, keys...) // 8 new aged logs appear
+	st, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if st.StrandRechecks != resyncMaxStrandRechecksPerSweep || st.AgedChecked != fresh || st.AgedDeferred != 0 {
+		t.Fatalf("re-checks capped on their own budget, new logs all classified; stats=%+v", st)
+	}
+	if st.Stranded != strands+fresh {
+		t.Fatalf("deferred re-checks still count as stranded; stats=%+v", st)
 	}
 }
 
@@ -899,7 +934,7 @@ func TestResyncHorizonPoisonBackoffHonouredWhenAged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep 3: %v", err)
 	}
-	if s3.Stranded != 1 || s3.AgedChecked != 1 || len(pub.assembles) != 2 || len(pub.submits) != 1 {
+	if s3.Stranded != 1 || s3.StrandRechecks != 1 || len(pub.assembles) != 2 || len(pub.submits) != 1 {
 		t.Fatalf("elapsed backoff re-verifies read-only, never re-mines; stats=%+v assembles=%v submits=%v",
 			s3, pub.assembles, pub.submits)
 	}
