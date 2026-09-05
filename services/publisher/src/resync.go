@@ -92,10 +92,19 @@ const resyncHorizon = 12 * time.Hour
 const resyncMaxAgedChecksPerSweep = 64
 
 // strandRecheck is how long a verified strand verdict is trusted before it
-// is re-verified against the chain. The alert fires every sweep either way;
-// the re-check is what notices an operator re-drive (or a catch-up seal)
-// having anchored it, and what keeps a strand's per-sweep cost at zero round
-// trips in between so many strands cannot monopolise the check budget.
+// is re-verified against the chain. The re-check is what notices an operator
+// re-drive (or a catch-up seal) having anchored it, and what keeps a strand's
+// per-sweep cost at zero round trips in between so many strands cannot
+// monopolise the check budget.
+//
+// A strand is logged at ERROR on TRANSITION — when first verified (once per
+// process lifetime per content), when a re-check changes its verdict, and
+// (at INFO) when it is found anchored — not on every sweep. The first
+// rollout of verified classification showed lane A carrying ~1,000 genuine
+// never-anchored test forests: repeating each at ERROR every 120s was the
+// same wall of noise the false alarms had been, only truthful. The standing
+// signal is the sweep summary's "stranded" count and the
+// publisher_resync_stranded gauge, which is what an alert rule should use.
 const strandRecheck = 30 * time.Minute
 
 // verdictCap bounds the settled and strand caches; beyond it the oldest
@@ -316,8 +325,8 @@ type Resync struct {
 	settled map[string]*settledEntry
 
 	// strands maps checkpoint key -> the seal content verified still
-	// unanchored past the horizon, with what the chain said. Alerted from
-	// cache every sweep and re-verified on strandRecheck.
+	// unanchored past the horizon, with what the chain said. Counted from
+	// cache every sweep, re-verified on strandRecheck, logged on transition.
 	strands map[string]*strandEntry
 
 	// agedResume is the sorted-group index at which the previous sweep's
@@ -336,8 +345,9 @@ type settledEntry struct {
 // strandEntry records one seal content verified unanchored past the horizon.
 type strandEntry struct {
 	etag   string
-	at     time.Time
-	status string // "publishable", or the not-ready PublishStatus name
+	at     time.Time // last verification
+	since  time.Time // first verification of this verdict
+	status string    // "publishable", or the not-ready PublishStatus name
 	reason string
 	// sized is set when the verdict came from a full assemble that read the
 	// sizes; the owner-gated path returns before it does.
@@ -667,7 +677,7 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 			if aged {
 				// Known unpublishable and past the horizon: a strand whose
 				// reason the chain already gave. Free — no round trips.
-				r.alertStrand(ref, stats, &strandEntry{status: StatusReverted.String(), reason: e.reason})
+				r.cacheStrand(ref, stats, &strandEntry{status: StatusReverted.String(), reason: e.reason})
 				strandLogged = true
 				continue
 			}
@@ -676,7 +686,7 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 		}
 		if aged {
 			if e, ok := r.strands[key]; ok && e.etag == ref.etag && now.Sub(e.at) < strandRecheck {
-				r.alertStrand(ref, stats, e)
+				stats.Stranded++ // standing verdict: counted, not re-logged
 				strandLogged = true
 				continue
 			}
@@ -718,6 +728,12 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 		case StatusAlreadyAnchored:
 			stats.Covered++
 			r.cacheSettled(key, ref.etag)
+			if e, ok := r.strands[key]; ok && e.etag == ref.etag {
+				// The transition an operator is waiting for.
+				delete(r.strands, key)
+				r.logger.Info("stranded checkpoint now anchored", "key", key,
+					"strandedSince", e.since.UTC().Format(time.RFC3339))
+			}
 			return assembled{}, 0, true
 		case StatusChainNotConfigured:
 			// Unverifiable, not unanchored (D3): this publisher cannot read
@@ -739,9 +755,31 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 	return assembled{}, 0, true // exhausted: every seal for this log is poison
 }
 
-// alertStrand counts and logs one strand verdict (cached or free).
-func (r *Resync) alertStrand(ref sealRef, stats *SweepStats, e *strandEntry) {
+// sameVerdict reports whether two strand entries say the same thing about
+// the same content, so a re-check that confirms it is not re-logged.
+func (e *strandEntry) sameVerdict(o *strandEntry) bool {
+	return e.etag == o.etag && e.status == o.status && e.reason == o.reason &&
+		e.sized == o.sized && e.sealed == o.sealed && e.onchain == o.onchain
+}
+
+// cacheStrand records a verified strand verdict, counts it, and logs it at
+// ERROR only when it is new for this content or differs from the cached one
+// (see strandRecheck for why not every sweep).
+func (r *Resync) cacheStrand(ref sealRef, stats *SweepStats, e *strandEntry) {
 	stats.Stranded++
+	now := time.Now()
+	e.etag, e.at, e.since = ref.etag, now, now
+	prev, had := r.strands[ref.key]
+	if had && prev.sameVerdict(e) {
+		prev.at = now
+		return
+	}
+	if had {
+		e.since = prev.since
+	} else if len(r.strands) >= verdictCap {
+		evictOldest(r.strands, func(e *strandEntry) time.Time { return e.at })
+	}
+	r.strands[ref.key] = e
 	args := []any{
 		"key", ref.key, "lastModified", ref.lastModified.UTC().Format(time.RFC3339),
 		"horizon", resyncHorizon.String(), "status", e.status, "reason", e.reason,
@@ -750,16 +788,6 @@ func (r *Resync) alertStrand(ref sealRef, stats *SweepStats, e *strandEntry) {
 		args = append(args, "sealedSize", e.sealed, "onchainSize", e.onchain)
 	}
 	r.logger.Error("checkpoint aged out of resync horizon, still unanchored", args...)
-}
-
-// cacheStrand records a freshly verified strand verdict and alerts it.
-func (r *Resync) cacheStrand(ref sealRef, stats *SweepStats, e *strandEntry) {
-	e.etag, e.at = ref.etag, time.Now()
-	if _, ok := r.strands[ref.key]; !ok && len(r.strands) >= verdictCap {
-		evictOldest(r.strands, func(e *strandEntry) time.Time { return e.at })
-	}
-	r.strands[ref.key] = e
-	r.alertStrand(ref, stats, e)
 }
 
 // isSettled reports whether key was verified anchored at exactly this ETag.

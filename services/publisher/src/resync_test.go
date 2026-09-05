@@ -674,14 +674,15 @@ func TestResyncHorizonAnchoredIsQuiet(t *testing.T) {
 
 // TestResyncHorizonStrandedStillAlerts guards the other side of the fix: a
 // genuine strand — publishable calldata the chain is still behind, past the
-// horizon where nothing will submit it — MUST keep alerting, once per sweep,
-// until an operator re-drive anchors it; then it goes quiet and stays cached.
-// This is the FOR-408 strand shape (and today's InvalidPaymentReceipt logs,
-// which assemble fine and revert on-chain). Between re-checks the alert comes
-// from the strand cache at zero round trips.
+// horizon where nothing will submit it — MUST alert, and MUST be counted in
+// every sweep's stranded total (the gauge), until an operator re-drive
+// anchors it; then the recovery is logged and the seal stays cached. This is
+// the FOR-408 strand shape (and today's InvalidPaymentReceipt logs, which
+// assemble fine and revert on-chain). The ERROR fires on transition, not
+// every sweep: the standing state is the count, not a repeated line.
 func TestResyncHorizonStrandedStillAlerts(t *testing.T) {
 	pub := newFakeCore(map[string][]step{
-		ckpt(robertLog, 0): {stepPublish, stepAnchored},
+		ckpt(robertLog, 0): {stepPublish, stepPublish, stepAnchored},
 	})
 	lister := onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
 	r := newTestResync(pub, lister, nil, nil)
@@ -694,14 +695,14 @@ func TestResyncHorizonStrandedStillAlerts(t *testing.T) {
 			t.Fatalf("sweep %d: %v", i, err)
 		}
 		if st.Stranded != 1 || st.Covered != 0 || st.AgedOut != 1 {
-			t.Fatalf("sweep %d: unanchored aged seal must be stranded; stats=%+v", i, st)
+			t.Fatalf("sweep %d: unanchored aged seal must be counted stranded; stats=%+v", i, st)
 		}
-		if n := strandedAlerts(logs); n != i {
-			t.Fatalf("sweep %d: strand must alert once per sweep; got %d ERRORs:\n%s", i, n, logs)
+		if n := strandedAlerts(logs); n != 1 {
+			t.Fatalf("sweep %d: strand alerts once on first verification; got %d ERRORs:\n%s", i, n, logs)
 		}
 	}
 	if len(pub.assembles) != 1 {
-		t.Fatalf("sweep 2 must alert from the strand cache, not re-assemble; assembles=%v", pub.assembles)
+		t.Fatalf("sweep 2 must count from the strand cache, not re-assemble; assembles=%v", pub.assembles)
 	}
 	if !strings.Contains(logs.String(), "status=publishable") {
 		t.Fatalf("alert must say WHY it is stranded:\n%s", logs)
@@ -710,25 +711,41 @@ func TestResyncHorizonStrandedStillAlerts(t *testing.T) {
 		t.Fatalf("a strand is alerted, never driven past the horizon; submits=%v", pub.submits)
 	}
 
-	// Re-check due: the operator poke has landed.
+	// Re-check due, same verdict: re-verified read-only, not re-logged.
 	r.strands[ckpt(robertLog, 0)].at = time.Now().Add(-2 * strandRecheck)
 	s3, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("sweep 3: %v", err)
 	}
-	if s3.Stranded != 0 || s3.Covered != 1 || s3.AgedChecked != 1 {
-		t.Fatalf("anchored by re-drive must clear the strand; stats=%+v", s3)
+	if s3.Stranded != 1 || s3.AgedChecked != 1 || strandedAlerts(logs) != 1 {
+		t.Fatalf("unchanged verdict on re-check must not re-log; stats=%+v ERRORs=%d", s3, strandedAlerts(logs))
 	}
-	if n := strandedAlerts(logs); n != 2 {
-		t.Fatalf("no alert once anchored; got %d ERRORs", n)
-	}
-	s4, err := r.SweepOnce(context.Background())
+
+	// Re-check due: the operator poke has landed.
+	r.strands[ckpt(robertLog, 0)].at = time.Now().Add(-2 * strandRecheck)
+	s3, err = r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("sweep 4: %v", err)
 	}
-	if s4.AgedChecked != 0 || len(pub.assembles) != 2 {
+	if s3.Stranded != 0 || s3.Covered != 1 || s3.AgedChecked != 1 {
+		t.Fatalf("anchored by re-drive must clear the strand; stats=%+v", s3)
+	}
+	if n := strandedAlerts(logs); n != 1 {
+		t.Fatalf("no alert once anchored; got %d ERRORs", n)
+	}
+	if !strings.Contains(logs.String(), `level=INFO msg="stranded checkpoint now anchored"`) {
+		t.Fatalf("recovery is the transition an operator waits for; must be logged:\n%s", logs)
+	}
+	if _, still := r.strands[ckpt(robertLog, 0)]; still {
+		t.Fatalf("recovered strand must leave the strand cache")
+	}
+	s5, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 5: %v", err)
+	}
+	if s5.AgedChecked != 0 || len(pub.assembles) != 3 {
 		t.Fatalf("recovered strand must be cached like any settled seal; stats=%+v assembles=%v",
-			s4, pub.assembles)
+			s5, pub.assembles)
 	}
 }
 
@@ -875,7 +892,9 @@ func TestResyncHorizonPoisonBackoffHonouredWhenAged(t *testing.T) {
 		t.Fatalf("alert must carry the revert reason the chain gave:\n%s", logs)
 	}
 
+	// Both the poison backoff and the strand re-check are due.
 	r.poison[ckpt(robertLog, 0)].at = time.Now().Add(-100 * poisonRetryMax)
+	r.strands[ckpt(robertLog, 0)].at = time.Now().Add(-2 * strandRecheck)
 	s3, err := r.SweepOnce(context.Background())
 	if err != nil {
 		t.Fatalf("sweep 3: %v", err)
@@ -883,6 +902,10 @@ func TestResyncHorizonPoisonBackoffHonouredWhenAged(t *testing.T) {
 	if s3.Stranded != 1 || s3.AgedChecked != 1 || len(pub.assembles) != 2 || len(pub.submits) != 1 {
 		t.Fatalf("elapsed backoff re-verifies read-only, never re-mines; stats=%+v assembles=%v submits=%v",
 			s3, pub.assembles, pub.submits)
+	}
+	// The verdict changed (reverted -> publishable): that transition is logged.
+	if strandedAlerts(logs) != 2 || !strings.Contains(logs.String(), "status=publishable") {
+		t.Fatalf("changed verdict must be re-logged once:\n%s", logs)
 	}
 }
 
