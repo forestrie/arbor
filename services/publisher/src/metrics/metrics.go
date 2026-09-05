@@ -93,7 +93,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		}, []string{"result"}),
 		ResyncStranded: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "publisher_resync_stranded",
-			Help: "Checkpoints past the resync horizon that the last sweep verified are still unanchored on-chain (FOR-408 strand shape; each needs an operator re-drive). A lower bound while the post-restart classification backlog drains.",
+			Help: "Checkpoints past the resync horizon that the last successful sweep verified are still unanchored on-chain (FOR-408 strand shape; each needs an operator re-drive). Holds its last value across failed sweeps; a lower bound while the post-restart classification backlog drains.",
 		}),
 	}
 
