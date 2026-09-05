@@ -61,12 +61,46 @@ const resyncMaxSubmitsPerSweep = 16
 // which the listing already returns, so nothing has to be remembered, written,
 // or reconciled — and a restart cannot reset it.
 //
-// The cost is a real one and is why aged-out candidates ALERT rather than
-// disappearing: an infrastructure outage longer than the horizon would age out
-// checkpoints that were never successfully driven, which is precisely the
-// strand FOR-408 exists to prevent. Recovery is the operator re-drive ("poke")
-// path the terminal-ack comment already anticipates.
+// The cost is a real one and is why aged-out candidates that are still
+// unanchored ALERT rather than disappearing: an infrastructure outage longer
+// than the horizon would age out checkpoints that were never successfully
+// driven, which is precisely the strand FOR-408 exists to prevent. Recovery is
+// the operator re-drive ("poke") path the terminal-ack comment already
+// anticipates.
+//
+// "Still unanchored" is a VERIFIED verdict, not an inference from age: an
+// aged-out candidate is classified against on-chain state (one read-only
+// Assemble, memoised per content in the settled cache) and only a candidate
+// the chain does not cover alerts. Asserting it from age alone reported every
+// checkpoint older than the horizon as stranded forever — ~1,750 ERRORs per
+// sweep on lane A — which buried the real incidents the ERROR exists for.
 const resyncHorizon = 12 * time.Hour
+
+// resyncMaxAgedChecksPerSweep bounds how many aged-out candidates one sweep
+// classifies with a read-only Assemble (7–10+ R2/RPC round trips each,
+// including a massif read). The settled cache makes classification a
+// once-per-content cost, but the cache is in-memory, so a restart re-learns
+// every aged candidate: on lane A that is ~1,750 of them, which unbounded
+// would turn the first sweep after a deploy into a ~15k-request burst that
+// RPC rate limits answer with a wall of WARNs. Deferred candidates are past
+// the horizon by definition — nothing is waiting on them this sweep — so
+// spreading the warm-up over ~30 sweeps costs only a delay in re-surfacing a
+// strand after a restart. Classification resumes each sweep at the log where
+// the budget ran out (Resync.agedResume), so a deterministic prefix of
+// uncacheable verdicts (Assemble errors, strands due for re-check) cannot
+// starve the rest.
+const resyncMaxAgedChecksPerSweep = 64
+
+// strandRecheck is how long a verified strand verdict is trusted before it
+// is re-verified against the chain. The alert fires every sweep either way;
+// the re-check is what notices an operator re-drive (or a catch-up seal)
+// having anchored it, and what keeps a strand's per-sweep cost at zero round
+// trips in between so many strands cannot monopolise the check budget.
+const strandRecheck = 30 * time.Minute
+
+// verdictCap bounds the settled and strand caches; beyond it the oldest
+// entries are pruned (re-classifying an evicted entry costs one Assemble).
+const verdictCap = 16384
 
 // resyncHealthyWithin is the freshness multiple for Healthy(): the consumer
 // may ack owner-gated messages only while the last successful sweep is at
@@ -99,6 +133,11 @@ type ResyncMetrics interface {
 	RecordResyncHandoff()
 	// RecordResyncSweep counts a completed sweep by result ("ok" | "error").
 	RecordResyncSweep(result string)
+	// RecordResyncStranded sets the number of aged-out checkpoints the last
+	// sweep verified as still unanchored (the FOR-408 strand shape; each one
+	// needs an operator re-drive). A gauge, not a counter: the same strand is
+	// re-verified every sweep until it is anchored or re-sealed.
+	RecordResyncStranded(n int)
 }
 
 type noopResyncMetrics struct{}
@@ -106,6 +145,7 @@ type noopResyncMetrics struct{}
 func (noopResyncMetrics) RecordResyncGap()         {}
 func (noopResyncMetrics) RecordResyncHandoff()     {}
 func (noopResyncMetrics) RecordResyncSweep(string) {}
+func (noopResyncMetrics) RecordResyncStranded(int) {}
 
 // OwnerGateHandoffs is the consumer → sweep channel that keeps the
 // "notification loss" signal honest (plan-2607-08 W2/F7): the consumer
@@ -173,10 +213,21 @@ type SweepStats struct {
 	// mined revert or assemble-terminal status); lower massifs of the same
 	// log are attempted in their place (W3).
 	Unpublishable int
-	// AgedOut counts candidates skipped for being older than resyncHorizon.
-	// Each one is also logged at ERROR: a seal that aged out while still
-	// unanchored is the FOR-408 strand shape and needs an operator re-drive.
+	// AgedOut counts candidates older than resyncHorizon. None is driven;
+	// each is classified (or deferred) rather than assumed stranded, and
+	// lands in exactly one of Covered, Stranded, AgedDeferred or Errors.
 	AgedOut int
+	// AgedChecked counts aged-out candidates classified this sweep with a
+	// read-only Assemble (bounded by resyncMaxAgedChecksPerSweep; a settled
+	// cache hit or a calldata-invalid poison hit costs no check).
+	AgedChecked int
+	// AgedDeferred counts aged-out candidates left unclassified this sweep
+	// because the check budget was spent; they are picked up next sweep.
+	AgedDeferred int
+	// Stranded counts aged-out candidates VERIFIED still unanchored. Each is
+	// logged at ERROR once per sweep: a seal that aged out while unanchored
+	// is the FOR-408 strand shape and needs an operator re-drive.
+	Stranded int
 	// PoisonSkipped counts candidates skipped via the poison cache — seals
 	// already proven unpublishable at their current ETag. No gas, no ERROR.
 	PoisonSkipped int
@@ -255,13 +306,51 @@ type Resync struct {
 	// change (new ETag — e.g. a FOR-410 self-heal re-seal) clears the entry
 	// immediately. In-memory only: a restart re-mines each at most once.
 	poison map[string]*poisonEntry
+
+	// settled maps checkpoint key -> the seal content (ETag) verified anchored
+	// on-chain, so an aged-out candidate is classified once per content rather
+	// than once per sweep (which would make sweep cost track total history
+	// again — the exact regression resyncHorizon exists to prevent). Anchoring
+	// is monotonic, so the verdict never goes stale for the same bytes; a
+	// re-seal arrives as a new ETag and misses. In-memory only, like poison.
+	settled map[string]*settledEntry
+
+	// strands maps checkpoint key -> the seal content verified still
+	// unanchored past the horizon, with what the chain said. Alerted from
+	// cache every sweep and re-verified on strandRecheck.
+	strands map[string]*strandEntry
+
+	// agedResume is the sorted-group index at which the previous sweep's
+	// aged-check budget ran out; this sweep's walk starts there, so warm-up
+	// proceeds through the listing instead of re-spending the budget on the
+	// same deterministic prefix.
+	agedResume int
+}
+
+// settledEntry records one seal content verified anchored, and when.
+type settledEntry struct {
+	etag string
+	at   time.Time
+}
+
+// strandEntry records one seal content verified unanchored past the horizon.
+type strandEntry struct {
+	etag   string
+	at     time.Time
+	status string // "publishable", or the not-ready PublishStatus name
+	reason string
+	// sized is set when the verdict came from a full assemble that read the
+	// sizes; the owner-gated path returns before it does.
+	sized           bool
+	sealed, onchain uint64
 }
 
 // poisonEntry records one unpublishable seal content and its retry state.
 type poisonEntry struct {
-	etag  string
-	at    time.Time
-	tries int
+	etag   string
+	at     time.Time
+	tries  int
+	reason string // decoded revert name or assemble-terminal reason
 	// calldataInvalid marks a revert that can never be resolved by
 	// re-submitting the same bytes (RevertIsCalldataInvalid). Such an entry is
 	// not re-adjudicated on backoff at all — only a re-seal, which arrives as
@@ -318,6 +407,8 @@ func NewResync(cfg Config, pub *Publisher, doer s3.HTTPDoer, logger *slog.Logger
 		metrics:  m,
 		handoffs: handoffs,
 		poison:   make(map[string]*poisonEntry),
+		settled:  make(map[string]*settledEntry),
+		strands:  make(map[string]*strandEntry),
 	}, nil
 }
 
@@ -348,15 +439,20 @@ func (r *Resync) Run(ctx context.Context) {
 		default:
 			r.metrics.RecordResyncSweep("ok")
 			r.lastGood.Store(time.Now().UnixNano())
-			if stats.Gaps > 0 || stats.Blocked > 0 || stats.Errors > 0 || stats.Unpublishable > 0 || stats.CapDeferred > 0 {
+			r.metrics.RecordResyncStranded(stats.Stranded)
+			if stats.Gaps > 0 || stats.Blocked > 0 || stats.Errors > 0 || stats.Unpublishable > 0 || stats.CapDeferred > 0 || stats.Stranded > 0 {
 				r.logger.Warn("resync sweep",
 					"listed", stats.Listed, "gaps", stats.Gaps, "handoffs", stats.Handoffs,
 					"covered", stats.Covered, "blocked", stats.Blocked,
 					"unpublishable", stats.Unpublishable, "poisonSkipped", stats.PoisonSkipped,
+					"stranded", stats.Stranded, "agedOut", stats.AgedOut,
+					"agedChecked", stats.AgedChecked, "agedDeferred", stats.AgedDeferred,
 					"capDeferred", stats.CapDeferred, "errors", stats.Errors)
 			} else {
 				r.logger.Info("resync sweep clean", "listed", stats.Listed,
-					"handoffs", stats.Handoffs, "poisonSkipped", stats.PoisonSkipped)
+					"handoffs", stats.Handoffs, "poisonSkipped", stats.PoisonSkipped,
+					"agedOut", stats.AgedOut, "agedChecked", stats.AgedChecked,
+					"agedDeferred", stats.AgedDeferred)
 			}
 		}
 		select {
@@ -387,6 +483,16 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 	}
 	stats.Listed = len(groups)
 
+	// Start the walk where the last sweep's aged-check budget ran out; the
+	// owner-ordering passes below are a fixpoint, so order is not
+	// correctness, only fairness of the budget.
+	offset := 0
+	if n := len(groups); n > 0 {
+		offset = r.agedResume % n
+		groups = append(append(make([]*logSeals, 0, n), groups[offset:]...), groups[:offset]...)
+	}
+	firstDeferred := -1
+
 	budget := resyncMaxSubmitsPerSweep
 	pending := groups
 	for pass := 0; pass < resyncMaxPasses && len(pending) > 0; pass++ {
@@ -401,10 +507,14 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 		// Assemble phase: walk each group's candidates top-down until one is
 		// submittable, blocked, or the group is exhausted (W3 fallback for
 		// assemble-time terminal statuses).
-		for _, g := range pending {
+		for i, g := range pending {
+			deferredBefore := stats.AgedDeferred
 			req, outcome, done := r.assembleCandidate(ctx, g, &stats)
 			if ctx.Err() != nil {
 				return stats, ctx.Err()
+			}
+			if pass == 0 && firstDeferred < 0 && stats.AgedDeferred > deferredBefore {
+				firstDeferred = (offset + i) % len(groups)
 			}
 			switch {
 			case done:
@@ -456,9 +566,11 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 			switch out.res.Status {
 			case StatusPublished:
 				progressed = true
+				r.markSettled(out.group, out.key)
 				r.recordAnchored(out.key, out.res, &stats)
 			case StatusAlreadyAnchored:
 				stats.Covered++
+				r.markSettled(out.group, out.key)
 			case StatusReverted:
 				stats.Unpublishable++
 				r.markPoison(out.group, out.key, out.res.Reason)
@@ -486,6 +598,11 @@ func (r *Resync) SweepOnce(ctx context.Context) (SweepStats, error) {
 		}
 	}
 	stats.Blocked = len(pending)
+	if firstDeferred >= 0 {
+		r.agedResume = firstDeferred
+	} else {
+		r.agedResume = 0
+	}
 	return stats, nil
 }
 
@@ -501,26 +618,42 @@ type assembled struct {
 // (done=false, outcome StatusOwnerNotAnchored), or the group settles this
 // sweep (done=true). Assemble-time terminal statuses fall through to lower
 // massifs (W3), mirroring the submit-phase poison fallback.
+//
+// Age changes what a verdict MEANS, not how it is reached. Every seal walks
+// the same ladder — settled cache, poison cache, Assemble — but one past
+// resyncHorizon is never submitted or left blocked: a verdict the chain does
+// not cover is a strand (alerted once per sweep per log, cached, re-verified
+// on strandRecheck), an unverified one is deferred (the read-only check
+// budget), and only "already anchored" is the quiet, healthy shape. A strand
+// is exactly the FOR-408 strand this sweep exists to prevent, so it must be
+// visible and operator-actionable rather than silently dropped; recovery is
+// the operator re-drive ("poke") path, and the sealed vs on-chain sizes in
+// the line say how far behind the log is.
 func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *SweepStats) (assembled, PublishStatus, bool) {
+	now := time.Now()
+	strandLogged := false
 	for ; g.next < len(g.seals); g.next++ {
 		ref := g.seals[g.next]
 		key := ref.key
 		if ctx.Err() != nil {
 			return assembled{}, 0, true
 		}
-		// Horizon: past it, this seal is no longer sweep material. See
-		// resyncHorizon — the notification-loss window closed hours ago, and
-		// re-driving forever is what made sweep cost track total history.
-		if ref.agedOut(time.Now()) {
-			stats.AgedOut++
-			// Loud, once per sweep per key. An aged-out seal that never
-			// anchored is exactly the FOR-408 strand this sweep exists to
-			// prevent, so it must be visible and operator-actionable rather
-			// than silently dropped. Recovery is the re-drive ("poke") path.
-			r.logger.Error("checkpoint aged out of resync horizon, still unanchored",
-				"key", key, "lastModified", ref.lastModified.UTC().Format(time.RFC3339),
-				"horizon", resyncHorizon.String())
+		aged := ref.agedOut(now)
+		if aged && strandLogged {
+			// One alert per log: lower aged seals of a stranded log add
+			// nothing an operator can act on. In-window seals below are
+			// still driven (an out-of-band rewrite can put one there).
 			continue
+		}
+		if aged {
+			stats.AgedOut++
+		}
+		// Settled cache: anchored at exactly this content. Anchoring is
+		// monotonic, so the verdict is final for these bytes whether the
+		// seal is in-window or aged — no Assemble until a re-seal.
+		if r.isSettled(key, ref.etag) {
+			stats.Covered++
+			return assembled{}, 0, true
 		}
 		// Poison cache: a seal proven unpublishable at this exact content is
 		// skipped without assembling or (worse) re-mining its revert. A
@@ -531,8 +664,29 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 		// become valid, so only a re-seal (new ETag) can clear it.
 		if e, known := r.poison[key]; known && e.etag == ref.etag &&
 			(e.calldataInvalid || time.Since(e.at) < poisonBackoff(e.tries)) {
+			if aged {
+				// Known unpublishable and past the horizon: a strand whose
+				// reason the chain already gave. Free — no round trips.
+				r.alertStrand(ref, stats, &strandEntry{status: StatusReverted.String(), reason: e.reason})
+				strandLogged = true
+				continue
+			}
 			stats.PoisonSkipped++
 			continue
+		}
+		if aged {
+			if e, ok := r.strands[key]; ok && e.etag == ref.etag && now.Sub(e.at) < strandRecheck {
+				r.alertStrand(ref, stats, e)
+				strandLogged = true
+				continue
+			}
+			if stats.AgedChecked >= resyncMaxAgedChecksPerSweep {
+				// Unverified: nothing below may settle this log on its
+				// behalf (a cached lower verdict would hide a strand here).
+				stats.AgedDeferred++
+				return assembled{}, 0, true
+			}
+			stats.AgedChecked++
 		}
 		calldata, res, ready, err := r.pub.Assemble(ctx, key)
 		if err != nil {
@@ -541,15 +695,33 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 			return assembled{}, 0, true
 		}
 		if ready {
+			if aged {
+				// The plainest strand: the calldata builds, the chain is
+				// behind the seal, and nothing will submit it.
+				r.cacheStrand(ref, stats, &strandEntry{status: "publishable", reason: res.Reason,
+					sized: true, sealed: res.SealedSize, onchain: res.OnchainSize})
+				strandLogged = true
+				continue
+			}
 			return assembled{key: key, calldata: calldata, res: res}, 0, false
 		}
 		switch res.Status {
 		case StatusOwnerNotAnchored:
+			if aged {
+				// The 2026-07-19 shape: the owner never anchored (or the
+				// forest never resolved), so nothing under it can.
+				r.cacheStrand(ref, stats, &strandEntry{status: res.Status.String(), reason: res.Reason})
+				strandLogged = true
+				continue
+			}
 			return assembled{}, StatusOwnerNotAnchored, false
 		case StatusAlreadyAnchored:
 			stats.Covered++
+			r.cacheSettled(key, ref.etag)
 			return assembled{}, 0, true
 		case StatusChainNotConfigured:
+			// Unverifiable, not unanchored (D3): this publisher cannot read
+			// the forest's chain. Never a strand — that is a verified verdict.
 			stats.Errors++
 			r.logger.Warn("resync skipped checkpoint", "key", key,
 				"status", res.Status.String(), "reason", res.Reason)
@@ -565,6 +737,69 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 		}
 	}
 	return assembled{}, 0, true // exhausted: every seal for this log is poison
+}
+
+// alertStrand counts and logs one strand verdict (cached or free).
+func (r *Resync) alertStrand(ref sealRef, stats *SweepStats, e *strandEntry) {
+	stats.Stranded++
+	args := []any{
+		"key", ref.key, "lastModified", ref.lastModified.UTC().Format(time.RFC3339),
+		"horizon", resyncHorizon.String(), "status", e.status, "reason", e.reason,
+	}
+	if e.sized {
+		args = append(args, "sealedSize", e.sealed, "onchainSize", e.onchain)
+	}
+	r.logger.Error("checkpoint aged out of resync horizon, still unanchored", args...)
+}
+
+// cacheStrand records a freshly verified strand verdict and alerts it.
+func (r *Resync) cacheStrand(ref sealRef, stats *SweepStats, e *strandEntry) {
+	e.etag, e.at = ref.etag, time.Now()
+	if _, ok := r.strands[ref.key]; !ok && len(r.strands) >= verdictCap {
+		evictOldest(r.strands, func(e *strandEntry) time.Time { return e.at })
+	}
+	r.strands[ref.key] = e
+	r.alertStrand(ref, stats, e)
+}
+
+// isSettled reports whether key was verified anchored at exactly this ETag.
+func (r *Resync) isSettled(key, etag string) bool {
+	e, ok := r.settled[key]
+	return ok && e.etag == etag
+}
+
+// cacheSettled records that key's content at etag is anchored on-chain.
+func (r *Resync) cacheSettled(key, etag string) {
+	if e, ok := r.settled[key]; ok {
+		e.etag, e.at = etag, time.Now()
+		return
+	}
+	if len(r.settled) >= verdictCap {
+		evictOldest(r.settled, func(e *settledEntry) time.Time { return e.at })
+	}
+	r.settled[key] = &settledEntry{etag: etag, at: time.Now()}
+}
+
+// evictOldest drops the entry with the earliest timestamp from a verdict cache.
+func evictOldest[T any](m map[string]*T, at func(*T) time.Time) {
+	oldestKey, oldest := "", time.Time{}
+	for k, e := range m {
+		if t := at(e); oldest.IsZero() || t.Before(oldest) {
+			oldestKey, oldest = k, t
+		}
+	}
+	delete(m, oldestKey)
+}
+
+// markSettled caches a submit-phase anchored verdict for g's candidate key at
+// its listed ETag (the submit path carries the key, not the ref).
+func (r *Resync) markSettled(g *logSeals, key string) {
+	for _, ref := range g.seals {
+		if ref.key == key {
+			r.cacheSettled(key, ref.etag)
+			return
+		}
+	}
 }
 
 // markPoison caches out-of-band (submit-phase) poison for g's current
@@ -587,9 +822,12 @@ func (r *Resync) cachePoison(key, etag, reason string) {
 		// Latch: once these bytes are known invalid, a later adjudication that
 		// reported a vaguer reason must not re-arm the backoff.
 		e.calldataInvalid = e.calldataInvalid || invalid
+		if reason != "" {
+			e.reason = reason
+		}
 		return
 	}
-	r.poison[key] = &poisonEntry{etag: etag, at: time.Now(), calldataInvalid: invalid}
+	r.poison[key] = &poisonEntry{etag: etag, at: time.Now(), calldataInvalid: invalid, reason: reason}
 }
 
 // driveLowerMassifs synchronously drives g's remaining lower candidates after
@@ -616,10 +854,12 @@ func (r *Resync) driveLowerMassifs(ctx context.Context, g *logSeals, stats *Swee
 		res := r.submitOne(ctx, req)
 		switch res.Status {
 		case StatusPublished:
+			r.markSettled(g, req.key)
 			r.recordAnchored(req.key, res, stats)
 			return true
 		case StatusAlreadyAnchored:
 			stats.Covered++
+			r.markSettled(g, req.key)
 			return false
 		case StatusReverted:
 			stats.Unpublishable++

@@ -1,10 +1,12 @@
 package publisher
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,41 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// syncBuffer is a goroutine-safe sink for captureLogger (submit-phase acks
+// log from the batch goroutine).
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// captureLogger returns a logger whose text output can be searched, so a test
+// can pin what an OPERATOR sees — the alert line — not only what stats say.
+func captureLogger() (*slog.Logger, *syncBuffer) {
+	b := &syncBuffer{}
+	return slog.New(slog.NewTextHandler(b, nil)), b
+}
+
+// strandedMsg is the operator-actionable alert; its text is part of the
+// operational contract (grep targets, log-based alert rules).
+const strandedMsg = "checkpoint aged out of resync horizon, still unanchored"
+
+// strandedAlerts counts strand ERROR lines in captured output.
+func strandedAlerts(b *syncBuffer) int {
+	return strings.Count(b.String(), `level=ERROR msg="`+strandedMsg+`"`)
 }
 
 // step scripts one Assemble outcome for a key: either ready (submit) with a
@@ -70,19 +107,34 @@ func (f *fakeCore) Assemble(_ context.Context, key string) ([]byte, PublishResul
 	}
 	res := PublishResult{Key: key, Status: st.status}
 	if st.ready {
+		// Calldata carries the key so SubmitBatch can match the request to
+		// its scripted outcome; a read-only assemble past the horizon leaves
+		// its item unconsumed rather than shifting later submissions.
 		f.pending = append(f.pending, readyItem{key: key, st: st})
-		return []byte{0x01}, res, true, nil
+		return []byte(key), res, true, nil
 	}
 	return nil, res, false, nil
 }
 
-// SubmitBatch acks each request in order; batch order matches the FIFO of
-// ready assembles, which is how the sweep constructs its batches.
+// SubmitBatch acks each request with the outcome scripted for the key its
+// calldata names.
 func (f *fakeCore) SubmitBatch(_ context.Context, reqs []AssembledPublish) {
 	for _, r := range reqs {
+		key := string(r.Calldata)
 		f.mu.Lock()
-		item := f.pending[0]
-		f.pending = f.pending[1:]
+		found := -1
+		for i, it := range f.pending {
+			if it.key == key {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			f.mu.Unlock()
+			panic(fmt.Sprintf("SubmitBatch for %s without a ready assemble", key))
+		}
+		item := f.pending[found]
+		f.pending = append(f.pending[:found], f.pending[found+1:]...)
 		f.submits = append(f.submits, item.key)
 		f.mu.Unlock()
 		r.Ack(SubmitResult{Outcome: item.st.submit, Reason: item.st.reason})
@@ -94,6 +146,7 @@ type recordingMetrics struct {
 	mu       sync.Mutex
 	gaps     int
 	handoffs int
+	stranded int
 	sweeps   map[string]int
 }
 
@@ -109,6 +162,11 @@ func (m *recordingMetrics) RecordResyncHandoff() {
 func (m *recordingMetrics) RecordResyncSweep(result string) {
 	m.mu.Lock()
 	m.sweeps[result]++
+	m.mu.Unlock()
+}
+func (m *recordingMetrics) RecordResyncStranded(n int) {
+	m.mu.Lock()
+	m.stranded = n
 	m.mu.Unlock()
 }
 
@@ -182,8 +240,36 @@ func newTestResync(pub sweepCore, lister objectLister, m ResyncMetrics, h *Owner
 	return &Resync{
 		pub: pub, lister: lister, interval: time.Minute, pageSize: 500,
 		logger: testLogger(), metrics: m, handoffs: h,
-		poison: make(map[string]*poisonEntry),
+		poison:  make(map[string]*poisonEntry),
+		settled: make(map[string]*settledEntry),
+		strands: make(map[string]*strandEntry),
 	}
+}
+
+// pageMixed builds a listing with a per-key age, for logs whose seals
+// straddle the horizon.
+func pageMixed(ages map[string]time.Duration) *fakeLister {
+	var objs []s3.ObjectSummary
+	for k, age := range ages {
+		objs = append(objs, s3.ObjectSummary{
+			Key: k, ETag: k + "#v1",
+			LastModified: time.Now().Add(-age).UTC().Format(time.RFC3339Nano),
+		})
+	}
+	return &fakeLister{pages: map[string]s3.ListResult{"": {Objects: objs}}}
+}
+
+// agedLogs scripts n distinct aged genesis logs with the same step, for
+// budget tests.
+func agedLogs(n int, st step) (*fakeCore, *fakeLister) {
+	seq := make(map[string][]step, n)
+	keys := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		k := ckpt(fmt.Sprintf("%08x-0000-4000-8000-%012x", i, i), 0)
+		seq[k] = []step{st}
+		keys = append(keys, k)
+	}
+	return newFakeCore(seq), onePageAged(resyncHorizon+time.Hour, keys...)
 }
 
 // TestSweepReplaysThe20260719Incident: genesis notification lost, children
@@ -523,11 +609,13 @@ func TestPoisonCacheAgeing(t *testing.T) {
 	}
 }
 
-// TestResyncHorizonSkipsAgedCandidates pins the bound that makes this backstop
-// cheap: per-sweep work must track OUTSTANDING work, not total history. Before
-// the horizon, a seal that could never publish stayed a candidate forever, so
-// sweep cost grew with every checkpoint the platform had ever written.
-func TestResyncHorizonSkipsAgedCandidates(t *testing.T) {
+// TestResyncHorizonNeverDrivesAgedCandidates pins the bound that makes this
+// backstop cheap: per-sweep work must track OUTSTANDING work, not total
+// history. Before the horizon, a seal that could never publish stayed a
+// candidate forever, so sweep cost grew with every checkpoint the platform had
+// ever written. An aged candidate is classified (one read-only assemble) but
+// never submitted: no gas, no nonce, no tx.
+func TestResyncHorizonNeverDrivesAgedCandidates(t *testing.T) {
 	pub := newFakeCore(map[string][]step{
 		ckpt(robertLog, 0): {stepPublish},
 	})
@@ -538,13 +626,470 @@ func TestResyncHorizonSkipsAgedCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if stats.AgedOut != 1 {
-		t.Fatalf("aged candidate must be counted, not silently dropped; stats=%+v", stats)
+	if stats.AgedOut != 1 || stats.Stranded != 1 || stats.AgedChecked != 1 {
+		t.Fatalf("aged candidate must be counted and classified, not silently dropped; stats=%+v", stats)
 	}
-	// The point of the horizon: no assemble, no gas, no chain call.
-	if len(pub.submits) != 0 || len(pub.assembles) != 0 {
-		t.Fatalf("aged candidate must not be driven; assembles=%v submits=%v",
+	if len(pub.submits) != 0 || len(pub.assembles) != 1 {
+		t.Fatalf("aged candidate must be classified once and never driven; assembles=%v submits=%v",
 			pub.assembles, pub.submits)
+	}
+}
+
+// TestResyncHorizonAnchoredIsQuiet is the false alarm this horizon shipped
+// with: "still unanchored" was asserted from AGE alone, so every checkpoint
+// older than 12h — on lane A ~1,750 of them, all anchored — logged at ERROR
+// every sweep and buried the real incidents the line exists to surface. An
+// aged, anchored seal is the healthy shape of an old checkpoint: covered,
+// quiet, and (via the settled cache) never re-assembled for the same bytes.
+func TestResyncHorizonAnchoredIsQuiet(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(robertLog, 0): {stepAnchored}})
+	lister := onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+	logs := &syncBuffer{}
+	r.logger, logs = captureLogger()
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.AgedOut != 1 || s1.Covered != 1 || s1.Stranded != 0 || s1.AgedChecked != 1 {
+		t.Fatalf("aged+anchored must be covered, not stranded; stats=%+v", s1)
+	}
+	if n := strandedAlerts(logs); n != 0 {
+		t.Fatalf("anchored checkpoint must not alert; got %d strand ERRORs:\n%s", n, logs)
+	}
+
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.Covered != 1 || s2.AgedChecked != 0 || len(pub.assembles) != 1 {
+		t.Fatalf("settled cache must make classification a once-per-content cost; stats=%+v assembles=%v",
+			s2, pub.assembles)
+	}
+	if len(pub.submits) != 0 {
+		t.Fatalf("no gas for an aged candidate; submits=%v", pub.submits)
+	}
+}
+
+// TestResyncHorizonStrandedStillAlerts guards the other side of the fix: a
+// genuine strand — publishable calldata the chain is still behind, past the
+// horizon where nothing will submit it — MUST keep alerting, once per sweep,
+// until an operator re-drive anchors it; then it goes quiet and stays cached.
+// This is the FOR-408 strand shape (and today's InvalidPaymentReceipt logs,
+// which assemble fine and revert on-chain). Between re-checks the alert comes
+// from the strand cache at zero round trips.
+func TestResyncHorizonStrandedStillAlerts(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {stepPublish, stepAnchored},
+	})
+	lister := onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+	logs := &syncBuffer{}
+	r.logger, logs = captureLogger()
+
+	for i := 1; i <= 2; i++ {
+		st, err := r.SweepOnce(context.Background())
+		if err != nil {
+			t.Fatalf("sweep %d: %v", i, err)
+		}
+		if st.Stranded != 1 || st.Covered != 0 || st.AgedOut != 1 {
+			t.Fatalf("sweep %d: unanchored aged seal must be stranded; stats=%+v", i, st)
+		}
+		if n := strandedAlerts(logs); n != i {
+			t.Fatalf("sweep %d: strand must alert once per sweep; got %d ERRORs:\n%s", i, n, logs)
+		}
+	}
+	if len(pub.assembles) != 1 {
+		t.Fatalf("sweep 2 must alert from the strand cache, not re-assemble; assembles=%v", pub.assembles)
+	}
+	if !strings.Contains(logs.String(), "status=publishable") {
+		t.Fatalf("alert must say WHY it is stranded:\n%s", logs)
+	}
+	if len(pub.submits) != 0 {
+		t.Fatalf("a strand is alerted, never driven past the horizon; submits=%v", pub.submits)
+	}
+
+	// Re-check due: the operator poke has landed.
+	r.strands[ckpt(robertLog, 0)].at = time.Now().Add(-2 * strandRecheck)
+	s3, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if s3.Stranded != 0 || s3.Covered != 1 || s3.AgedChecked != 1 {
+		t.Fatalf("anchored by re-drive must clear the strand; stats=%+v", s3)
+	}
+	if n := strandedAlerts(logs); n != 2 {
+		t.Fatalf("no alert once anchored; got %d ERRORs", n)
+	}
+	s4, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 4: %v", err)
+	}
+	if s4.AgedChecked != 0 || len(pub.assembles) != 2 {
+		t.Fatalf("recovered strand must be cached like any settled seal; stats=%+v assembles=%v",
+			s4, pub.assembles)
+	}
+}
+
+// TestResyncHorizonStrandsCannotStarveBudget: strands are re-verified on
+// strandRecheck, not every sweep, so a lane with more persistent strands than
+// the per-sweep check budget still classifies everything: the cached ones
+// cost no checks, and the deferred remainder is reached next sweep.
+func TestResyncHorizonStrandsCannotStarveBudget(t *testing.T) {
+	const n = resyncMaxAgedChecksPerSweep + 6
+	pub, lister := agedLogs(n, stepPublish)
+	r := newTestResync(pub, lister, nil, nil)
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.Stranded != resyncMaxAgedChecksPerSweep || s1.AgedDeferred != 6 {
+		t.Fatalf("sweep 1 must strand the budget's worth and defer the rest; stats=%+v", s1)
+	}
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.Stranded != n || s2.AgedDeferred != 0 || s2.AgedChecked != 6 || len(pub.assembles) != n {
+		t.Fatalf("sweep 2 must alert all from cache + verify the remainder; stats=%+v assembles=%d",
+			s2, len(pub.assembles))
+	}
+}
+
+// TestResyncHorizonResumesPastUncacheablePrefix: Assemble errors cache
+// nothing, so with deterministic group order a prefix of >= budget failing
+// logs would classify the same prefix every sweep and never reach the rest.
+// The walk resumes where the budget ran out instead.
+func TestResyncHorizonResumesPastUncacheablePrefix(t *testing.T) {
+	const n = resyncMaxAgedChecksPerSweep + 6
+	_, lister := agedLogs(n, stepPublish)
+	pub := newFakeCore(map[string][]step{}) // every key unscripted: Assemble errors
+	r := newTestResync(pub, lister, nil, nil)
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.Errors != resyncMaxAgedChecksPerSweep || s1.AgedDeferred != 6 {
+		t.Fatalf("sweep 1: stats=%+v", s1)
+	}
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, k := range pub.assembles {
+		seen[k] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("two sweeps must have reached every log at least once; reached %d of %d", len(seen), n)
+	}
+}
+
+// TestResyncHorizonDeferredTopIsNotSettledByLowerSeal: an unverified
+// (deferred) top seal must not let a cached verdict on a lower massif settle
+// the log — that would report a possible strand at the top as covered.
+func TestResyncHorizonDeferredTopIsNotSettledByLowerSeal(t *testing.T) {
+	const n = resyncMaxAgedChecksPerSweep
+	filler, _ := agedLogs(n, stepAnchored)
+	filler.seq[ckpt(robertLog, 1)] = []step{stepPublish} // would be a strand
+	filler.seq[ckpt(robertLog, 0)] = []step{stepAnchored}
+	keys := make([]string, 0, n+2)
+	for k := range filler.seq {
+		keys = append(keys, k)
+	}
+	// robertLog sorts after the zero-padded filler ids, so it is deferred.
+	r := newTestResync(filler, onePageAged(resyncHorizon+time.Hour, keys...), nil, nil)
+	r.cacheSettled(ckpt(robertLog, 0), ckpt(robertLog, 0)+"#v1") // lower seal verified earlier
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.AgedDeferred != 1 || s1.Covered != n || s1.Stranded != 0 {
+		t.Fatalf("deferred top must count as deferred, not covered; stats=%+v", s1)
+	}
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.Stranded != 1 || s2.AgedDeferred != 0 {
+		t.Fatalf("sweep 2 must verify the deferred top and find the strand; stats=%+v", s2)
+	}
+}
+
+// TestResyncHorizonInWindowLowerSealStillDriven: a strand at the top must not
+// starve a publishable in-window seal below it (an out-of-band rewrite can
+// put one there). Pre-horizon the aged branch continued; so does this.
+func TestResyncHorizonInWindowLowerSealStillDriven(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 1): {stepPublish}, // aged: strand
+		ckpt(robertLog, 0): {stepPublish}, // fresh: must submit
+	})
+	lister := pageMixed(map[string]time.Duration{
+		ckpt(robertLog, 1): resyncHorizon + time.Hour,
+		ckpt(robertLog, 0): time.Hour,
+	})
+	r := newTestResync(pub, lister, nil, nil)
+
+	st, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if st.Stranded != 1 || st.Gaps != 1 {
+		t.Fatalf("top strands, lower publishes; stats=%+v", st)
+	}
+	if len(pub.submits) != 1 || pub.submits[0] != ckpt(robertLog, 0) {
+		t.Fatalf("only the in-window seal is submitted; submits=%v", pub.submits)
+	}
+}
+
+// TestResyncHorizonPoisonBackoffHonouredWhenAged: a seal poisoned in-window
+// (FOR-411 backoff) that then ages out is a strand the chain already
+// explained: alert with the cached reason, no round trips, until the backoff
+// elapses and one fresh adjudication is due.
+func TestResyncHorizonPoisonBackoffHonouredWhenAged(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {{ready: true, submit: OutcomeReverted, reason: "InvalidPaymentReceipt"}, stepPublish},
+	})
+	r := newTestResync(pub, onePageAged(time.Hour, ckpt(robertLog, 0)), nil, nil)
+	logs := &syncBuffer{}
+	r.logger, logs = captureLogger()
+
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if len(pub.submits) != 1 {
+		t.Fatalf("sweep 1 mines the revert; submits=%v", pub.submits)
+	}
+	r.lister = onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.Stranded != 1 || s2.AgedChecked != 0 || len(pub.assembles) != 1 {
+		t.Fatalf("poisoned aged seal strands for free within backoff; stats=%+v assembles=%v", s2, pub.assembles)
+	}
+	if !strings.Contains(logs.String(), "reason=InvalidPaymentReceipt") {
+		t.Fatalf("alert must carry the revert reason the chain gave:\n%s", logs)
+	}
+
+	r.poison[ckpt(robertLog, 0)].at = time.Now().Add(-100 * poisonRetryMax)
+	s3, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if s3.Stranded != 1 || s3.AgedChecked != 1 || len(pub.assembles) != 2 || len(pub.submits) != 1 {
+		t.Fatalf("elapsed backoff re-verifies read-only, never re-mines; stats=%+v assembles=%v submits=%v",
+			s3, pub.assembles, pub.submits)
+	}
+}
+
+// TestSettledCacheSkipsInWindowReassembly: an in-window seal verified
+// anchored is not re-assembled every sweep for the 12h until it ages out —
+// anchoring is monotonic, so the cached verdict is final for those bytes.
+func TestSettledCacheSkipsInWindowReassembly(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(robertLog, 0): {stepAnchored}})
+	r := newTestResync(pub, onePageAged(time.Hour, ckpt(robertLog, 0)), nil, nil)
+	for i := 1; i <= 3; i++ {
+		st, err := r.SweepOnce(context.Background())
+		if err != nil {
+			t.Fatalf("sweep %d: %v", i, err)
+		}
+		if st.Covered != 1 {
+			t.Fatalf("sweep %d: stats=%+v", i, st)
+		}
+	}
+	if len(pub.assembles) != 1 {
+		t.Fatalf("one assemble, then cache; assembles=%v", pub.assembles)
+	}
+}
+
+// TestResyncHorizonOwnerGatedIsStranded: the original 2026-07-19 incident
+// shape — a genesis whose owner never anchored — is unanchored past the
+// horizon and must alert with the owner-gate status, not be mistaken for
+// covered because the assemble was not "ready".
+func TestResyncHorizonOwnerGatedIsStranded(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(childLog, 0): {stepOwnerGated}})
+	lister := onePageAged(resyncHorizon+time.Hour, ckpt(childLog, 0))
+	r := newTestResync(pub, lister, nil, nil)
+	logs := &syncBuffer{}
+	r.logger, logs = captureLogger()
+
+	st, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if st.Stranded != 1 || st.Blocked != 0 {
+		t.Fatalf("aged owner-gated seal is a strand, not a blocked candidate; stats=%+v", st)
+	}
+	if strandedAlerts(logs) != 1 || !strings.Contains(logs.String(), "status=owner_not_anchored") {
+		t.Fatalf("alert must carry the owner-gate status:\n%s", logs)
+	}
+}
+
+// TestResyncHorizonSettledCacheSurvivesAgeing: a seal the sweep saw anchored
+// while in-window must not be re-assembled once it ages out — the normal
+// life cycle of every healthy checkpoint. A re-seal (new ETag) misses the
+// cache and is classified afresh.
+func TestResyncHorizonSettledCacheSurvivesAgeing(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(robertLog, 0): {stepAnchored}})
+	r := newTestResync(pub, onePageAged(time.Hour, ckpt(robertLog, 0)), nil, nil)
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.Covered != 1 || s1.AgedOut != 0 || len(pub.assembles) != 1 {
+		t.Fatalf("in-window anchored seal is covered; stats=%+v assembles=%v", s1, pub.assembles)
+	}
+
+	// Same object, now past the horizon (same ETag).
+	r.lister = onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.AgedOut != 1 || s2.Covered != 1 || s2.AgedChecked != 0 || len(pub.assembles) != 1 {
+		t.Fatalf("in-window verdict must carry across the horizon; stats=%+v assembles=%v",
+			s2, pub.assembles)
+	}
+
+	// Re-sealed: new content at the same key must be classified afresh.
+	resealed := onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	resealed.pages[""].Objects[0].ETag = "resealed#v2"
+	r.lister = resealed
+	s3, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 3: %v", err)
+	}
+	if s3.AgedChecked != 1 || len(pub.assembles) != 2 {
+		t.Fatalf("new ETag must miss the settled cache; stats=%+v assembles=%v", s3, pub.assembles)
+	}
+}
+
+// TestResyncHorizonCheckBudgetDefers bounds the post-restart warm-up: the
+// settled cache is in-memory, so a fresh process meets every aged checkpoint
+// at once (~1,750 on lane A). Classification is spread over sweeps rather
+// than issued as one burst, and the deferred remainder is picked up next
+// sweep — nothing is dropped, nothing is falsely alerted meanwhile.
+func TestResyncHorizonCheckBudgetDefers(t *testing.T) {
+	const logs = resyncMaxAgedChecksPerSweep + 6
+	seq := make(map[string][]step, logs)
+	keys := make([]string, 0, logs)
+	for i := 0; i < logs; i++ {
+		k := ckpt(fmt.Sprintf("%08x-0000-4000-8000-%012x", i, i), 0)
+		seq[k] = []step{stepAnchored}
+		keys = append(keys, k)
+	}
+	pub := newFakeCore(seq)
+	r := newTestResync(pub, onePageAged(resyncHorizon+time.Hour, keys...), nil, nil)
+	logsOut := &syncBuffer{}
+	r.logger, logsOut = captureLogger()
+
+	s1, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if s1.AgedOut != logs || s1.AgedChecked != resyncMaxAgedChecksPerSweep ||
+		s1.AgedDeferred != 6 || s1.Covered != resyncMaxAgedChecksPerSweep || s1.Stranded != 0 {
+		t.Fatalf("sweep 1 must classify exactly the budget and defer the rest; stats=%+v", s1)
+	}
+	if strandedAlerts(logsOut) != 0 {
+		t.Fatalf("deferred candidates must not be alerted as stranded:\n%s", logsOut)
+	}
+
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.AgedChecked != 6 || s2.AgedDeferred != 0 || s2.Covered != logs || len(pub.assembles) != logs {
+		t.Fatalf("sweep 2 must finish the backlog from cache + remainder; stats=%+v assembles=%d",
+			s2, len(pub.assembles))
+	}
+}
+
+// TestResyncHorizonCalldataInvalidPoisonStrandsForFree: a seal the contract
+// rejected on its bytes can never anchor at this ETag, so once it ages out
+// the strand verdict is already known — alert with the cached reason, spend
+// no round trips and no check budget. Only a re-seal changes the answer.
+func TestResyncHorizonCalldataInvalidPoisonStrandsForFree(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(robertLog, 0): {stepRevertInvalid}})
+	r := newTestResync(pub, onePageAged(time.Hour, ckpt(robertLog, 0)), nil, nil)
+	logs := &syncBuffer{}
+	r.logger, logs = captureLogger()
+
+	if _, err := r.SweepOnce(context.Background()); err != nil {
+		t.Fatalf("sweep 1: %v", err)
+	}
+	if len(pub.submits) != 1 || r.poison[ckpt(robertLog, 0)] == nil {
+		t.Fatalf("sweep 1 mines the revert once and caches poison; submits=%v", pub.submits)
+	}
+
+	r.lister = onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0))
+	s2, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep 2: %v", err)
+	}
+	if s2.Stranded != 1 || s2.AgedChecked != 0 || len(pub.assembles) != 1 {
+		t.Fatalf("known-invalid aged seal is stranded without a check; stats=%+v assembles=%v",
+			s2, pub.assembles)
+	}
+	if strandedAlerts(logs) != 1 || !strings.Contains(logs.String(), "reason=InvalidCheckpointCose") {
+		t.Fatalf("alert must carry the cached revert reason:\n%s", logs)
+	}
+}
+
+// TestResyncHorizonUnconfiguredChainIsNotStranded: "stranded" is a verified
+// verdict. A forest bound to a chain this publisher cannot read (D3) is
+// unverifiable — an error and a WARN, as in-window — not a strand ERROR that
+// would send an operator to re-drive something the chain may already hold.
+func TestResyncHorizonUnconfiguredChainIsNotStranded(t *testing.T) {
+	pub := newFakeCore(map[string][]step{
+		ckpt(robertLog, 0): {{status: StatusChainNotConfigured}},
+	})
+	r := newTestResync(pub, onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0)), nil, nil)
+	logs := &syncBuffer{}
+	r.logger, logs = captureLogger()
+
+	st, err := r.SweepOnce(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if st.Stranded != 0 || st.Errors != 1 || st.AgedChecked != 1 {
+		t.Fatalf("unconfigured chain is an error, not a strand; stats=%+v", st)
+	}
+	if strandedAlerts(logs) != 0 || !strings.Contains(logs.String(), "status=chain_not_configured") {
+		t.Fatalf("expected a WARN skip, no strand ERROR:\n%s", logs)
+	}
+}
+
+// TestRunRecordsStrandedGauge: the strand count is exported per sweep so an
+// alert rule can fire on it rather than on log volume.
+func TestRunRecordsStrandedGauge(t *testing.T) {
+	pub := newFakeCore(map[string][]step{ckpt(robertLog, 0): {stepPublish}})
+	m := newRecordingMetrics()
+	r := newTestResync(pub, onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0)), m, nil)
+	r.interval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+	deadline := time.After(2 * time.Second)
+	for !r.Healthy() {
+		select {
+		case <-deadline:
+			t.Fatalf("never became healthy")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.stranded != 1 {
+		t.Fatalf("resync_stranded gauge must reflect the last sweep; got %d", m.stranded)
 	}
 }
 

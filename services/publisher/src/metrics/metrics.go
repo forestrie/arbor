@@ -30,6 +30,7 @@ type Metrics struct {
 	ResyncGapsTotal     prometheus.Counter     // sweep-anchored, NOT owner-gate acked: genuine lost notifications
 	ResyncHandoffsTotal prometheus.Counter     // sweep-anchored after a deliberate owner-gated ack
 	ResyncSweepsTotal   *prometheus.CounterVec // label: result (ok, error)
+	ResyncStranded      prometheus.Gauge       // aged-out checkpoints verified still unanchored by the last sweep
 }
 
 // NewMetrics creates and registers all metrics with the provided registry.
@@ -90,6 +91,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "publisher_resync_sweeps_total",
 			Help: "Resync sweeps by result (ok, error).",
 		}, []string{"result"}),
+		ResyncStranded: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "publisher_resync_stranded",
+			Help: "Checkpoints past the resync horizon that the last successful sweep verified are still unanchored on-chain (FOR-408 strand shape; each needs an operator re-drive). Holds its last value across failed sweeps; a lower bound while the post-restart classification backlog drains.",
+		}),
 	}
 
 	reg.MustRegister(
@@ -97,7 +102,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.MessagesPerPoll, m.PollDuration,
 		m.PublishTotal, m.RevertsTotal, m.PublishDuration,
 		m.AnchorLag, m.KeyBalWei,
-		m.ResyncGapsTotal, m.ResyncHandoffsTotal, m.ResyncSweepsTotal,
+		m.ResyncGapsTotal, m.ResyncHandoffsTotal, m.ResyncSweepsTotal, m.ResyncStranded,
 	)
 	return m
 }
@@ -114,6 +119,10 @@ func (m *Metrics) RecordResyncHandoff() { m.ResyncHandoffsTotal.Inc() }
 func (m *Metrics) RecordResyncSweep(result string) {
 	m.ResyncSweepsTotal.WithLabelValues(result).Inc()
 }
+
+// RecordResyncStranded sets the number of aged-out checkpoints the last sweep
+// verified as still unanchored.
+func (m *Metrics) RecordResyncStranded(n int) { m.ResyncStranded.Set(float64(n)) }
 
 func (m *Metrics) RecordPoll(result string) { m.PollsTotal.WithLabelValues(result).Inc() }
 
