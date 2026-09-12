@@ -43,13 +43,14 @@ Prefer stable **GitHub blob links** with heading anchors:
 ```go
 // ResolveLogSigningKey fetches the target log's active signer from Univocity
 // public-root (GET /api/logs/{logId}/public-root). Grant verification model:
-// https://github.com/forestrie/devdocs/blob/main/arc/arc-0019-grant-verification-model.md
+// https://github.com/forestrie/protocol/blob/main/decisions/arc-0019-grant-verification-model.md
 ```
 
 | Target | Link form |
 |--------|-----------|
 | Same repo doc | `https://github.com/forestrie/arbor/blob/main/docs/…` |
 | Platform ADR/ARC | `https://github.com/forestrie/devdocs/blob/main/arc/…` or `adr/…` |
+| Moved decisions (ADR-0045/0064/0065, ARC-0019) | `https://github.com/forestrie/protocol/blob/main/decisions/…` |
 | Sibling service | `https://github.com/forestrie/canopy/blob/main/packages/…` |
 | On-chain behaviour | `https://github.com/forestrie/univocity/blob/main/docs/arc/…` |
 | Ops runbooks | `https://github.com/forestrie/devdocs/blob/main/ops/…` |

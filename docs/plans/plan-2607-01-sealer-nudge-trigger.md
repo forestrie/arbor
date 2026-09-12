@@ -26,7 +26,7 @@ never depends on hint delivery; the sealer stays outbound-only.
   **forest-1/Doppler** — the same provisioning pattern as the sealer's existing
   pull token (not a separate per-producer token).
 - **Terminology (canonical, now in
-  [devdocs/glossary.md](https://github.com/forestrie/devdocs/blob/main/glossary.md)):**
+  [devdocs/glossary.md](https://github.com/forestrie/protocol/blob/main/glossary.md)):**
   a **seal hint** is the trigger *message* (same `{"object":{"key":…}}` shape on
   every transport); **nudge** is the *verb* — the act of delivering one. The plan
   title keeps "nudge" only in the verb sense.
