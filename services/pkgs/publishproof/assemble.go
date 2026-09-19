@@ -20,6 +20,16 @@ var ErrAlreadyAnchored = errors.New("checkpoint already anchored on-chain")
 // The owner log must be published first (root-first ordering).
 var ErrOwnerNotAnchored = errors.New("owner log not anchored over the grant leaf")
 
+// ErrOnchainSizeNotSealedBoundary indicates the on-chain size lies strictly
+// inside a pending checkpoint's embedded proof span, rather than at a sealed
+// checkpoint boundary (some proof's TreeSize1). Since ADR-0066, the
+// checkpoint signature covers tree-size-1 as well as tree-size-2, so no proof
+// spanning a different tree-size-1 rides the sealer's original signature —
+// there is no sound rebase. The log must be re-anchored from a sealed
+// checkpoint boundary (plan-2609-10 D6: no legacy, pre-boundary-invariant
+// on-chain state is supported).
+var ErrOnchainSizeNotSealedBoundary = errors.New("on-chain size is not a sealed checkpoint boundary")
+
 // AssemblePublish builds the publishCheckpoint calldata for the checkpoint
 // sealed at massifIndex of logID, entirely from public objects (plan-2607-02
 // slice 2): the v3 checkpoint receipt supplies the signature, protected
@@ -28,10 +38,12 @@ var ErrOwnerNotAnchored = errors.New("owner log not anchored over the grant leaf
 // supplies the grant leaf position and inclusion proof against the owner's
 // on-chain accumulator.
 //
-// The consistency proof is the checkpoint's own when the on-chain size
-// matches its tree-size-1, and is otherwise rebuilt from the massif so a
-// lagging on-chain state catches up in one publish (the signature covers only
-// the final accumulator, so intermediate proofs need no signatures).
+// The consistency proof chain relays each pending checkpoint's own embedded
+// proof from the on-chain size up to this seal (BuildEmbeddedProofChain); the
+// on-chain size must be a sealed checkpoint boundary (some proof's
+// TreeSize1), since ADR-0066 signs tree-size-1 alongside tree-size-2 and a
+// proof cannot be rebased to a different tree-size-1 without invalidating
+// that signature.
 //
 // r is the forest root from ResolveForestContract; targetOnchain and
 // ownerOnchain are current logState reads from the resolved contract. owner
@@ -89,6 +101,15 @@ func AssemblePublish(
 			"head proof treeSize2 %d != sealed size %d", last.TreeSize2, sealed.MMRSize)
 	}
 	receipt.ConsistencyProofs = chain
+
+	// The sealer signs each checkpoint with that checkpoint's own proof sizes
+	// (ADR-0066 D1), and this publisher submits only the head checkpoint's
+	// protected header and signature (see CheckSignedSizes). Verify locally so
+	// a mis-built receipt fails here rather than on-chain
+	// (ConsistencyReceiptSizeMismatch / MissingSignedTreeSize).
+	if err := CheckSignedSizes(receipt); err != nil {
+		return nil, SealedState{}, fmt.Errorf("checkpoint %d: %w", massifIndex, err)
+	}
 
 	inclusion := InclusionProof{Index: 0, Path: [][32]byte{}}
 	bootstrap := logID == r && targetOnchain.Size == 0 && ownerOnchain.Size == 0
@@ -175,21 +196,20 @@ func BuildEmbeddedProofChain(
 				k, p.TreeSize2, chain[0].TreeSize1)
 		}
 		// The embedded proof's base (TreeSize1) is the massif boundary. Relay it
-		// as-is when the on-chain size is exactly that boundary; rebuild just the
-		// (onchainSize -> TreeSize2) segment from the massif's nodes when the
-		// on-chain size lags *inside* this massif — a partial-size anchor, or a
-		// legacy checkpoint whose base predates the boundary invariant. The
-		// checkpoint signature covers only the TreeSize2 accumulator (ADR-0046),
-		// which the rebuilt proof preserves, so it rides the original signature.
+		// as-is when the on-chain size is exactly that boundary. Since ADR-0066
+		// the checkpoint signature covers tree-size-1 as well as tree-size-2, so
+		// an on-chain size that lags *inside* this massif's proof span — a
+		// partial-size anchor, or a legacy checkpoint whose base predates the
+		// boundary invariant — cannot be served: rebasing the proof to a
+		// different TreeSize1 would no longer match the signature. That is an
+		// error (D6: no legacy, pre-boundary on-chain state is supported).
 		switch {
 		case p.TreeSize1 == onchainSize:
 			return append([]ConsistencyProof{p}, chain...), nil // relay
 		case onchainSize < p.TreeSize2 && (onchainSize > p.TreeSize1 || k == 0):
-			rebased, err := rebaseSegment(ctx, reader, k, onchainSize, p.TreeSize2)
-			if err != nil {
-				return nil, err
-			}
-			return append([]ConsistencyProof{rebased}, chain...), nil
+			return nil, fmt.Errorf(
+				"%w: checkpoint %d proof spans [%d, %d), on-chain size %d",
+				ErrOnchainSizeNotSealedBoundary, k, p.TreeSize1, p.TreeSize2, onchainSize)
 		case onchainSize >= p.TreeSize2:
 			return nil, fmt.Errorf(
 				"checkpoint %d treeSize2 %d not above on-chain size %d", k, p.TreeSize2, onchainSize)
@@ -209,26 +229,4 @@ func BuildEmbeddedProofChain(
 		}
 		cur = rec.ConsistencyProofs
 	}
-}
-
-// rebaseSegment rebuilds the (fromSize -> toSize) consistency proof for massif
-// massifIndex directly from its nodes. It is used when the on-chain size lags
-// inside a massif, so the embedded boundary proof cannot be relayed to it. The
-// proof is unsigned material — the checkpoint signature covers only the toSize
-// accumulator — so re-basing the proof to a higher fromSize is sound as long as
-// toSize (and its accumulator) is preserved.
-func rebaseSegment(
-	ctx context.Context, reader massifs.ObjectReader,
-	massifIndex uint32, fromSize, toSize uint64,
-) (ConsistencyProof, error) {
-	mc, err := massifs.GetMassifContext(ctx, reader, massifIndex)
-	if err != nil {
-		return ConsistencyProof{}, fmt.Errorf("read massif %d for re-base: %w", massifIndex, err)
-	}
-	proof, err := BuildConsistencyProof(&mc, fromSize, toSize)
-	if err != nil {
-		return ConsistencyProof{}, fmt.Errorf(
-			"re-base massif %d to on-chain size %d: %w", massifIndex, fromSize, err)
-	}
-	return proof, nil
 }

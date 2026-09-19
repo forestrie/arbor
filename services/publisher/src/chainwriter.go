@@ -571,6 +571,12 @@ var calldataInvalidReverts = map[string]struct{}{
 	"DelegationRpIdMismatch":             {},
 	"DelegationUserPresenceRequired":     {},
 	"DelegationUserVerificationRequired": {},
+	// ADR-0066: the signed tree sizes (checkpoint protected header) are
+	// properties of the submitted receipt bytes against the submitted
+	// consistency proofs — a mismatch or a missing label fails identically
+	// forever. Only a new seal (a new signed receipt) changes them.
+	"ConsistencyReceiptSizeMismatch": {},
+	"MissingSignedTreeSize":          {},
 }
 
 // RevertIsCalldataInvalid reports whether a decoded revert reason can never be
@@ -647,5 +653,7 @@ const univocityErrorsABI = `[
   {"type":"error","name":"DelegationChallengeMismatch","inputs":[]},
   {"type":"error","name":"DelegationUserPresenceRequired","inputs":[]},
   {"type":"error","name":"DelegationUserVerificationRequired","inputs":[]},
-  {"type":"error","name":"DelegationRpIdMismatch","inputs":[]}
+  {"type":"error","name":"DelegationRpIdMismatch","inputs":[]},
+  {"type":"error","name":"ConsistencyReceiptSizeMismatch","inputs":[{"name":"claimed","type":"uint64"},{"name":"signed","type":"uint64"}]},
+  {"type":"error","name":"MissingSignedTreeSize","inputs":[]}
 ]`

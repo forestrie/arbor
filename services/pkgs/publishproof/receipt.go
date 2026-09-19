@@ -1,12 +1,62 @@
 package publishproof
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"github.com/forestrie/go-merklelog/massifs"
 	"github.com/fxamacker/cbor/v2"
 )
+
+// ErrSignedSizeMismatch indicates a checkpoint receipt's signed tree sizes
+// (ADR-0066 protected header labels -65932/-65933) do not match the sizes
+// declared by its consistency proof chain, or that the protected header
+// carries neither label (signed before ADR-0066). See CheckSignedSizes.
+var ErrSignedSizeMismatch = errors.New("signed tree size does not match declared proof chain")
+
+// CheckSignedSizes verifies a checkpoint receipt's signed tree-size-1 and
+// tree-size-2 against the last link of its consistency proof chain.
+//
+// This publisher assembles the calldata proof chain at publish time by
+// RELAYING each pending checkpoint's own embedded single proof
+// (BuildEmbeddedProofChain) and submits only the HEAD checkpoint's protected
+// header and signature; the sealer signs each checkpoint with that
+// checkpoint's own proof sizes. So for a multi-link catch-up chain, the
+// signed tree-size-1 equals the LAST link's TreeSize1 (the head checkpoint's
+// own embedded proof base), not the first link's — ADR-0066 D2's "signed
+// tree-size-1 MUST equal the first proof's tree-size-1" describes a receipt
+// that itself carries several signed proofs, which this sealer never
+// produces. The equalities checked here are the ones true of the relay
+// model:
+//
+//   - signed tree-size-2 == chain[last].TreeSize2 (== the sealed MMR size)
+//   - signed tree-size-1 == chain[last].TreeSize1 (the head checkpoint's own
+//     embedded proof base)
+//
+// A mismatch means the receipt was assembled from a different proof chain
+// than the one the sealer signed, and would fail the same check on-chain
+// (ConsistencyReceiptSizeMismatch); a protected header missing either label
+// fails the same way the contract's MissingSignedTreeSize does.
+func CheckSignedSizes(receipt ConsistencyReceipt) error {
+	if len(receipt.ConsistencyProofs) == 0 {
+		return fmt.Errorf("%w: no consistency proofs", ErrSignedSizeMismatch)
+	}
+	signedSize1, signedSize2, err := massifs.ProtectedHeaderTreeSizes(receipt.ProtectedHeader)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrSignedSizeMismatch, err)
+	}
+	last := receipt.ConsistencyProofs[len(receipt.ConsistencyProofs)-1]
+	if signedSize2 != last.TreeSize2 {
+		return fmt.Errorf("%w: signed tree-size-2 %d != chain tree-size-2 %d",
+			ErrSignedSizeMismatch, signedSize2, last.TreeSize2)
+	}
+	if signedSize1 != last.TreeSize1 {
+		return fmt.Errorf("%w: signed tree-size-1 %d != chain tree-size-1 %d",
+			ErrSignedSizeMismatch, signedSize1, last.TreeSize1)
+	}
+	return nil
+}
 
 // The format-v3 checkpoint receipt codec lives in go-merklelog massifs. These
 // adapters convert between the calldata-shaped [32]byte ConsistencyProof /
