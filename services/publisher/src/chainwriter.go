@@ -510,7 +510,9 @@ func (w *ChainWriter) classifyRevert(err error) (string, bool) {
 // identically forever, so re-driving one is pure waste: malformed CBOR/COSE, a
 // signature that does not verify, a length or algorithm the contract rejects,
 // an id that does not match. The only thing that can fix these is a NEW seal,
-// which arrives as a changed ETag and clears the poison entry on its own.
+// which arrives as a changed ETag and clears the poison entry on its own
+// (a log that stops appending keeps its ETag and stays poisoned until it is
+// re-driven; the poison map is in-process, so a restart also clears it).
 //
 // Everything NOT in this set is treated as possibly-resolvable and aged within
 // the sweep horizon, because external action can make the same bytes valid
@@ -571,6 +573,12 @@ var calldataInvalidReverts = map[string]struct{}{
 	"DelegationRpIdMismatch":             {},
 	"DelegationUserPresenceRequired":     {},
 	"DelegationUserVerificationRequired": {},
+	// ADR-0066: the signed tree sizes (checkpoint protected header) are
+	// properties of the submitted receipt bytes against the submitted
+	// consistency proofs — a mismatch or a missing label fails identically
+	// forever. Only a new seal (a new signed receipt) changes them.
+	"ConsistencyReceiptSizeMismatch": {},
+	"MissingSignedTreeSize":          {},
 }
 
 // RevertIsCalldataInvalid reports whether a decoded revert reason can never be
@@ -647,5 +655,7 @@ const univocityErrorsABI = `[
   {"type":"error","name":"DelegationChallengeMismatch","inputs":[]},
   {"type":"error","name":"DelegationUserPresenceRequired","inputs":[]},
   {"type":"error","name":"DelegationUserVerificationRequired","inputs":[]},
-  {"type":"error","name":"DelegationRpIdMismatch","inputs":[]}
+  {"type":"error","name":"DelegationRpIdMismatch","inputs":[]},
+  {"type":"error","name":"ConsistencyReceiptSizeMismatch","inputs":[{"name":"claimed","type":"uint64"},{"name":"signed","type":"uint64"}]},
+  {"type":"error","name":"MissingSignedTreeSize","inputs":[]}
 ]`

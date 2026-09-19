@@ -174,6 +174,77 @@ func TestDecodedReceiptLiftsWebauthnAlgData(t *testing.T) {
 	require.Equal(t, [][]byte{}, receipt.DelegationProof.AlgData)
 }
 
+// protectedHeaderWithSize builds the canonical {1: alg, 395: vds, -65933:
+// tree-size-2} protected header SignCheckpointReceipt signs (ADR-0066).
+func protectedHeaderWithSize(t *testing.T, size2 uint64) []byte {
+	t.Helper()
+	em, err := cbor.CanonicalEncOptions().EncMode()
+	require.NoError(t, err)
+	raw, err := em.Marshal(map[int64]any{
+		1:                                int64(-7),
+		395:                              massifs.CheckpointVDSConsistency,
+		massifs.CheckpointLabelTreeSize2: size2,
+	})
+	require.NoError(t, err)
+	return raw
+}
+
+// CheckSignedSize compares the signed tree-size-2 against the last link of
+// the declared consistency proof chain: a match passes, a different sealed
+// size fails, and a protected header signed before ADR-0066 fails.
+func TestCheckSignedSize(t *testing.T) {
+	proof := func(size1, size2 uint64) ConsistencyProof {
+		return ConsistencyProof{TreeSize1: size1, TreeSize2: size2}
+	}
+
+	t.Run("signed size matches the chain's last link", func(t *testing.T) {
+		receipt := ConsistencyReceipt{
+			ProtectedHeader:   protectedHeaderWithSize(t, 10),
+			ConsistencyProofs: []ConsistencyProof{proof(0, 7), proof(7, 10)},
+		}
+		require.NoError(t, CheckSignedSize(receipt))
+	})
+
+	t.Run("re-based single link keeps the signed size", func(t *testing.T) {
+		receipt := ConsistencyReceipt{
+			ProtectedHeader:   protectedHeaderWithSize(t, 10),
+			ConsistencyProofs: []ConsistencyProof{proof(8, 10)},
+		}
+		require.NoError(t, CheckSignedSize(receipt))
+	})
+
+	t.Run("signed 8 presented as 7 -> 10", func(t *testing.T) {
+		receipt := ConsistencyReceipt{
+			ProtectedHeader:   protectedHeaderWithSize(t, 8),
+			ConsistencyProofs: []ConsistencyProof{proof(7, 10)},
+		}
+		require.ErrorIs(t, CheckSignedSize(receipt), ErrSignedSizeMismatch)
+	})
+
+	t.Run("first checkpoint signed for size 1 presented at 2^64-1", func(t *testing.T) {
+		receipt := ConsistencyReceipt{
+			ProtectedHeader:   protectedHeaderWithSize(t, 1),
+			ConsistencyProofs: []ConsistencyProof{proof(0, ^uint64(0))},
+		}
+		require.ErrorIs(t, CheckSignedSize(receipt), ErrSignedSizeMismatch)
+	})
+
+	t.Run("protected header signed before ADR-0066 carries no size label", func(t *testing.T) {
+		receipt := ConsistencyReceipt{
+			ProtectedHeader:   mustHex(t, "a1013a00010106"), // {1: -65800}
+			ConsistencyProofs: []ConsistencyProof{proof(0, 1)},
+		}
+		err := CheckSignedSize(receipt)
+		require.ErrorIs(t, err, ErrSignedSizeMismatch)
+		require.ErrorIs(t, err, massifs.ErrSignedSizeMissing)
+	})
+
+	t.Run("empty chain", func(t *testing.T) {
+		receipt := ConsistencyReceipt{ProtectedHeader: protectedHeaderWithSize(t, 1)}
+		require.ErrorIs(t, CheckSignedSize(receipt), ErrSignedSizeMismatch)
+	})
+}
+
 // The vertical slice: a format-v3 checkpoint object encoded by publishproof
 // (standing in for the sealer) decodes to calldata that publishes on-chain.
 func TestCheckpointReceiptDecodesToPublishableCalldata(t *testing.T) {

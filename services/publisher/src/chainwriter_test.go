@@ -88,6 +88,26 @@ func TestRevertClassificationWebAuthnAlg(t *testing.T) {
 	}
 }
 
+// ADR-0066: the signed checkpoint tree sizes are checked against the
+// submitted consistency proof chain, and both reverts are properties of the
+// submitted receipt bytes — a mismatched size or a missing label fails
+// identically until a new seal is signed. Both must classify as
+// calldata-invalid (settle + alert, don't retry) and stay bounded metric
+// labels.
+func TestRevertClassificationSignedTreeSize(t *testing.T) {
+	for _, name := range []string{
+		"ConsistencyReceiptSizeMismatch",
+		"MissingSignedTreeSize",
+	} {
+		if !RevertIsCalldataInvalid(name) {
+			t.Errorf("RevertIsCalldataInvalid(%q) = false, want true (permanent-failure shaped)", name)
+		}
+		if got := RevertLabel(name); got != name {
+			t.Errorf("RevertLabel(%q) = %q, want passthrough", name, got)
+		}
+	}
+}
+
 func TestClassifyRevertInconsistentReceiptSignature(t *testing.T) {
 	w := newTestWriter(t)
 
@@ -177,6 +197,9 @@ var pinnedErrorSelectors = map[string]string{
 	"DelegationUserPresenceRequired":     "16463fd5",
 	"DelegationUserVerificationRequired": "b3ef0619",
 	"DelegationRpIdMismatch":             "b3c5e2b7",
+	// ADR-0066: signed checkpoint tree-size cross-check.
+	"ConsistencyReceiptSizeMismatch": "51ffdcf0",
+	"MissingSignedTreeSize":          "74fb9612",
 }
 
 func TestUnivocityErrorsABISelectorsPinned(t *testing.T) {
