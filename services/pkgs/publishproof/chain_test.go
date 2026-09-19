@@ -121,12 +121,15 @@ func TestBuildEmbeddedProofChainMultiMassif(t *testing.T) {
 	require.Equal(t, sealed[1], one[0].TreeSize1)
 
 	// An on-chain size that lags *inside* a massif (no embedded link starts at
-	// it) cannot be served: since ADR-0066 the checkpoint signature covers
-	// tree-size-1, so no proof spanning a different base rides the sealer's
-	// signature. The log must be re-anchored from a sealed boundary instead.
+	// it) is rebuilt from that massif's nodes and re-based to the on-chain size,
+	// then verifies from the on-chain accumulator at that size.
 	mid := sealed[0] + 1
-	_, err = BuildEmbeddedProofChain(t.Context(), reader, mid, 2, headProofs(t, reader, 2))
-	require.ErrorIs(t, err, ErrOnchainSizeNotSealedBoundary)
+	rebased, err := BuildEmbeddedProofChain(t.Context(), reader, mid, 2, headProofs(t, reader, 2))
+	require.NoError(t, err)
+	require.Equal(t, mid, rebased[0].TreeSize1, "first link re-based to the on-chain size")
+	require.Equal(t, sealed[2], rebased[len(rebased)-1].TreeSize2, "chain ends at the head seal")
+	finalMid := verifyProofChainLikeContract(t, peaks32(t, oracle, mid), rebased)
+	require.Equal(t, peaks32(t, oracle, sealed[2]), finalMid)
 }
 
 // Bootstrap: catching up from an unanchored log (on-chain size 0) walks to the
@@ -149,12 +152,9 @@ func TestBuildEmbeddedProofChainBootstrap(t *testing.T) {
 // A single massif re-sealed at two partial sizes leaves an embedded checkpoint
 // proof whose base is the *last partial seal* (>0), not the massif boundary —
 // the production overwrite bug (a 2-leaf log's massif-0 checkpoint was (1 -> 3)).
-// Catching up a never-anchored log (on-chain size 0) can no longer re-base that
-// proof to (0 -> head): since ADR-0066 the checkpoint signature covers
-// tree-size-1, so a proof rebuilt with a different base would not match the
-// signature the sealer produced. This is now ErrOnchainSizeNotSealedBoundary
-// (plan-2609-10 D6: no legacy, pre-boundary on-chain state is supported).
-func TestBuildEmbeddedProofChainRejectsResealedPartialBase(t *testing.T) {
+// Catching up a never-anchored log (on-chain size 0) must re-base that proof to
+// (0 -> head) from the massif and verify from the empty accumulator.
+func TestBuildEmbeddedProofChainReBaseFirstAnchorAfterReseal(t *testing.T) {
 	ctx := t.Context()
 	logID := mustHex(t, "2122232425262728292a2b2c2d2e2f30")
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -200,7 +200,7 @@ func TestBuildEmbeddedProofChainRejectsResealedPartialBase(t *testing.T) {
 	add(0)
 	require.Greater(t, seal(), uint64(0)) // checkpoint (0 -> s1)
 	add(1)
-	seal() // checkpoint (s1 -> s2): base is the partial seal, boundary 0 lost
+	s2 := seal() // checkpoint (s1 -> s2): base is the partial seal, boundary 0 lost
 
 	rf, err := merklelog.NewFactory(client, rolloverMassifHeight, logger)
 	require.NoError(t, err)
@@ -212,8 +212,13 @@ func TestBuildEmbeddedProofChainRejectsResealedPartialBase(t *testing.T) {
 	require.Greater(t, head[0].TreeSize1, uint64(0),
 		"embedded base is the last partial seal, not the boundary")
 
-	// On-chain size 0 lies inside the embedded proof's span (0 < s1), so it
-	// cannot be served from this checkpoint's signed proof.
-	_, err = BuildEmbeddedProofChain(ctx, reader, 0, 0, head)
-	require.ErrorIs(t, err, ErrOnchainSizeNotSealedBoundary)
+	// On-chain size 0: re-base (s1 -> s2) to (0 -> s2) from the massif.
+	chain, err := BuildEmbeddedProofChain(ctx, reader, 0, 0, head)
+	require.NoError(t, err)
+	require.Len(t, chain, 1)
+	require.Equal(t, uint64(0), chain[0].TreeSize1, "re-based to on-chain size 0")
+	require.Equal(t, s2, chain[0].TreeSize2)
+
+	final := verifyProofChainLikeContract(t, [][32]byte{}, chain)
+	require.Equal(t, peaks32(t, oracle, s2), final)
 }

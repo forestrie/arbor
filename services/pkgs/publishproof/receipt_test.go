@@ -174,58 +174,74 @@ func TestDecodedReceiptLiftsWebauthnAlgData(t *testing.T) {
 	require.Equal(t, [][]byte{}, receipt.DelegationProof.AlgData)
 }
 
-// protectedHeaderWithSizes builds a bare {tree-size-1, tree-size-2} protected
-// header (ADR-0066 labels), standing in for the sizes SignCheckpointReceipt
-// signs alongside {1: alg, 395: vds}.
-func protectedHeaderWithSizes(t *testing.T, size1, size2 uint64) []byte {
+// protectedHeaderWithSize builds the canonical {1: alg, 395: vds, -65933:
+// tree-size-2} protected header SignCheckpointReceipt signs (ADR-0066).
+func protectedHeaderWithSize(t *testing.T, size2 uint64) []byte {
 	t.Helper()
-	raw, err := cbor.Marshal(map[int64]uint64{
-		massifs.CheckpointLabelTreeSize1: size1,
+	em, err := cbor.CanonicalEncOptions().EncMode()
+	require.NoError(t, err)
+	raw, err := em.Marshal(map[int64]any{
+		1:                                int64(-7),
+		395:                              massifs.CheckpointVDSConsistency,
 		massifs.CheckpointLabelTreeSize2: size2,
 	})
 	require.NoError(t, err)
 	return raw
 }
 
-// CheckSignedSizes compares the signed tree sizes against the LAST link of
-// the declared consistency proof chain — the relay model's equalities (see
-// CheckSignedSizes doc): matching sizes pass; either size disagreeing fails;
-// a protected header signed before ADR-0066 (neither label present) fails.
-func TestCheckSignedSizes(t *testing.T) {
+// CheckSignedSize compares the signed tree-size-2 against the last link of
+// the declared consistency proof chain: a match passes, a different sealed
+// size fails, and a protected header signed before ADR-0066 fails.
+func TestCheckSignedSize(t *testing.T) {
 	proof := func(size1, size2 uint64) ConsistencyProof {
 		return ConsistencyProof{TreeSize1: size1, TreeSize2: size2}
 	}
 
-	t.Run("signed sizes match the chain's last link", func(t *testing.T) {
+	t.Run("signed size matches the chain's last link", func(t *testing.T) {
 		receipt := ConsistencyReceipt{
-			ProtectedHeader:   protectedHeaderWithSizes(t, 7, 10),
+			ProtectedHeader:   protectedHeaderWithSize(t, 10),
 			ConsistencyProofs: []ConsistencyProof{proof(0, 7), proof(7, 10)},
 		}
-		require.NoError(t, CheckSignedSizes(receipt))
+		require.NoError(t, CheckSignedSize(receipt))
 	})
 
-	t.Run("signed tree-size-2 disagrees with the declared last link", func(t *testing.T) {
+	t.Run("re-based single link keeps the signed size", func(t *testing.T) {
 		receipt := ConsistencyReceipt{
-			ProtectedHeader:   protectedHeaderWithSizes(t, 7, 8),
+			ProtectedHeader:   protectedHeaderWithSize(t, 10),
+			ConsistencyProofs: []ConsistencyProof{proof(8, 10)},
+		}
+		require.NoError(t, CheckSignedSize(receipt))
+	})
+
+	t.Run("signed 8 presented as 7 -> 10", func(t *testing.T) {
+		receipt := ConsistencyReceipt{
+			ProtectedHeader:   protectedHeaderWithSize(t, 8),
 			ConsistencyProofs: []ConsistencyProof{proof(7, 10)},
 		}
-		require.ErrorIs(t, CheckSignedSizes(receipt), ErrSignedSizeMismatch)
+		require.ErrorIs(t, CheckSignedSize(receipt), ErrSignedSizeMismatch)
 	})
 
-	t.Run("signed tree-size-1 matches but tree-size-2 disagrees by a wide margin", func(t *testing.T) {
+	t.Run("first checkpoint signed for size 1 presented at 2^64-1", func(t *testing.T) {
 		receipt := ConsistencyReceipt{
-			ProtectedHeader:   protectedHeaderWithSizes(t, 0, 1),
+			ProtectedHeader:   protectedHeaderWithSize(t, 1),
 			ConsistencyProofs: []ConsistencyProof{proof(0, ^uint64(0))},
 		}
-		require.ErrorIs(t, CheckSignedSizes(receipt), ErrSignedSizeMismatch)
+		require.ErrorIs(t, CheckSignedSize(receipt), ErrSignedSizeMismatch)
 	})
 
-	t.Run("protected header signed before ADR-0066 carries neither label", func(t *testing.T) {
+	t.Run("protected header signed before ADR-0066 carries no size label", func(t *testing.T) {
 		receipt := ConsistencyReceipt{
 			ProtectedHeader:   mustHex(t, "a1013a00010106"), // {1: -65800}
 			ConsistencyProofs: []ConsistencyProof{proof(0, 1)},
 		}
-		require.ErrorIs(t, CheckSignedSizes(receipt), ErrSignedSizeMismatch)
+		err := CheckSignedSize(receipt)
+		require.ErrorIs(t, err, ErrSignedSizeMismatch)
+		require.ErrorIs(t, err, massifs.ErrSignedSizeMissing)
+	})
+
+	t.Run("empty chain", func(t *testing.T) {
+		receipt := ConsistencyReceipt{ProtectedHeader: protectedHeaderWithSize(t, 1)}
+		require.ErrorIs(t, CheckSignedSize(receipt), ErrSignedSizeMismatch)
 	})
 }
 

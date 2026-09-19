@@ -9,51 +9,41 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// ErrSignedSizeMismatch indicates a checkpoint receipt's signed tree sizes
-// (ADR-0066 protected header labels -65932/-65933) do not match the sizes
-// declared by its consistency proof chain, or that the protected header
-// carries neither label (signed before ADR-0066). See CheckSignedSizes.
-var ErrSignedSizeMismatch = errors.New("signed tree size does not match declared proof chain")
+// ErrSignedSizeMismatch indicates a checkpoint receipt's signed tree-size-2
+// (ADR-0066 protected header label -65933) does not match the sealed size
+// its consistency proof chain reaches, or that the protected header does not
+// carry the label at all (signed before ADR-0066). See CheckSignedSize.
+var ErrSignedSizeMismatch = errors.New("signed tree-size-2 does not match the declared proof chain")
 
-// CheckSignedSizes verifies a checkpoint receipt's signed tree-size-1 and
-// tree-size-2 against the last link of its consistency proof chain.
+// CheckSignedSize verifies a checkpoint receipt's signed tree-size-2 against
+// the last link of its consistency proof chain: the size the contract will
+// store and the accumulator the signature covers must be read at the same
+// height, otherwise the same signed calldata is accepted at every size with
+// the same peak count (ADR-0066).
 //
-// This publisher assembles the calldata proof chain at publish time by
-// RELAYING each pending checkpoint's own embedded single proof
-// (BuildEmbeddedProofChain) and submits only the HEAD checkpoint's protected
-// header and signature; the sealer signs each checkpoint with that
-// checkpoint's own proof sizes. So for a multi-link catch-up chain, the
-// signed tree-size-1 equals the LAST link's TreeSize1 (the head checkpoint's
-// own embedded proof base), not the first link's — ADR-0066 D2's "signed
-// tree-size-1 MUST equal the first proof's tree-size-1" describes a receipt
-// that itself carries several signed proofs, which this sealer never
-// produces. The equalities checked here are the ones true of the relay
-// model:
+// Only tree-size-2 is signed. Each link's tree-size-1 is unsigned prover
+// context: the contract binds the first link's base to its own stored size
+// and each later link's base to the previous link's target, so the publisher
+// is free to relay embedded per-seal proofs or to rebuild the head segment
+// from the on-chain size (BuildEmbeddedProofChain) under the head
+// checkpoint's original signature.
 //
-//   - signed tree-size-2 == chain[last].TreeSize2 (== the sealed MMR size)
-//   - signed tree-size-1 == chain[last].TreeSize1 (the head checkpoint's own
-//     embedded proof base)
-//
-// A mismatch means the receipt was assembled from a different proof chain
-// than the one the sealer signed, and would fail the same check on-chain
-// (ConsistencyReceiptSizeMismatch); a protected header missing either label
-// fails the same way the contract's MissingSignedTreeSize does.
-func CheckSignedSizes(receipt ConsistencyReceipt) error {
+// A mismatch means the receipt was assembled for a different sealed size
+// than the one the sealer signed and would fail the same check on-chain
+// (ConsistencyReceiptSizeMismatch); a header without the label fails the way
+// the contract's MissingSignedTreeSize does.
+func CheckSignedSize(receipt ConsistencyReceipt) error {
 	if len(receipt.ConsistencyProofs) == 0 {
 		return fmt.Errorf("%w: no consistency proofs", ErrSignedSizeMismatch)
 	}
-	signedSize1, signedSize2, err := massifs.ProtectedHeaderTreeSizes(receipt.ProtectedHeader)
+	signed, err := massifs.ProtectedHeaderTreeSize(receipt.ProtectedHeader)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrSignedSizeMismatch, err)
 	}
 	last := receipt.ConsistencyProofs[len(receipt.ConsistencyProofs)-1]
-	if signedSize2 != last.TreeSize2 {
+	if signed != last.TreeSize2 {
 		return fmt.Errorf("%w: signed tree-size-2 %d != chain tree-size-2 %d",
-			ErrSignedSizeMismatch, signedSize2, last.TreeSize2)
-	}
-	if signedSize1 != last.TreeSize1 {
-		return fmt.Errorf("%w: signed tree-size-1 %d != chain tree-size-1 %d",
-			ErrSignedSizeMismatch, signedSize1, last.TreeSize1)
+			ErrSignedSizeMismatch, signed, last.TreeSize2)
 	}
 	return nil
 }
