@@ -510,7 +510,9 @@ func (w *ChainWriter) classifyRevert(err error) (string, bool) {
 // identically forever, so re-driving one is pure waste: malformed CBOR/COSE, a
 // signature that does not verify, a length or algorithm the contract rejects,
 // an id that does not match. The only thing that can fix these is a NEW seal,
-// which arrives as a changed ETag and clears the poison entry on its own.
+// which arrives as a changed ETag and clears the poison entry on its own
+// (a log that stops appending keeps its ETag and stays poisoned until it is
+// re-driven; the poison map is in-process, so a restart also clears it).
 //
 // Everything NOT in this set is treated as possibly-resolvable and aged within
 // the sweep horizon, because external action can make the same bytes valid
