@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/forestrie/go-merklelog/massifs"
+	"github.com/forestrie/go-merklelog/mmr"
 	"github.com/stretchr/testify/require"
 	"github.com/veraison/go-cose"
 )
@@ -108,4 +109,66 @@ func TestChainReceiptRejectsABrokenChain(t *testing.T) {
 	// A receipt proves something or it is not a receipt of consistency.
 	_, err = EncodeChainReceipt(cp.Raw, nil)
 	require.ErrorIs(t, err, massifs.ErrProofChainEmpty)
+}
+
+// ARB105-F1: a chain that stops short of the size the head signs must not
+// encode. Only the last link's tree-size-2 is checked against the head's
+// signed tree-size-2 - stopping early would produce a receipt whose
+// accumulator and declared size disagree, caught only later by
+// CheckSignedSize (or on-chain).
+func TestChainReceiptRejectsChainShortOfSignedSize(t *testing.T) {
+	ctx := t.Context()
+	logID := mustHex(t, "3132333435363738393a3b3c3d3e3f40")
+	reader, sealed, _ := sealedMultiMassifLog(t, logID, newFixtureSealer(t), 3)
+	require.Len(t, sealed, 3)
+
+	cp, err := massifs.GetCheckpoint(ctx, reader, 2)
+	require.NoError(t, err)
+	head, err := DecodeCheckpointReceipt(cp.Raw)
+	require.NoError(t, err)
+	chain, err := BuildEmbeddedProofChain(ctx, reader, 0, 2, head.ConsistencyProofs)
+	require.NoError(t, err)
+	require.Len(t, chain, 3)
+
+	// Truncated to the first two links: ends at sealed[1], head signs sealed[2].
+	short := chain[:2]
+	_, err = EncodeChainReceipt(cp.Raw, short)
+	require.ErrorIs(t, err, ErrSignedSizeMismatch)
+}
+
+// ARB105-F2: a zero-length link satisfies contiguity (it starts where the
+// previous link ends) but proves nothing at that step; the univocity
+// contract rejects any link whose tree-size-2 does not exceed its
+// tree-size-1 (InvalidConsistencyProof), so it must be rejected here too,
+// both directly and through EncodeChainReceipt.
+func TestChainReceiptRejectsZeroLengthLink(t *testing.T) {
+	ctx := t.Context()
+	logID := mustHex(t, "3132333435363738393a3b3c3d3e3f40")
+	reader, _, _ := sealedMultiMassifLog(t, logID, newFixtureSealer(t), 3)
+
+	cp, err := massifs.GetCheckpoint(ctx, reader, 2)
+	require.NoError(t, err)
+	head, err := DecodeCheckpointReceipt(cp.Raw)
+	require.NoError(t, err)
+	chain, err := BuildEmbeddedProofChain(ctx, reader, 0, 2, head.ConsistencyProofs)
+	require.NoError(t, err)
+	require.Len(t, chain, 3)
+
+	// Insert a zero-length link between the first and second links:
+	// [0->7, 7->7, 7->15, 15->22].
+	zeroLength := ConsistencyProof{
+		TreeSize1:  chain[0].TreeSize2,
+		TreeSize2:  chain[0].TreeSize2,
+		Paths:      [][][32]byte{},
+		RightPeaks: [][32]byte{},
+	}
+	withZeroLink := []ConsistencyProof{chain[0], zeroLength, chain[1], chain[2]}
+
+	err = CheckProofChainContiguous(withZeroLink)
+	require.ErrorIs(t, err, massifs.ErrConsistencyProofCheck)
+	require.ErrorIs(t, err, mmr.ErrSizesNotIncreasing)
+
+	_, err = EncodeChainReceipt(cp.Raw, withZeroLink)
+	require.ErrorIs(t, err, massifs.ErrConsistencyProofCheck)
+	require.ErrorIs(t, err, mmr.ErrSizesNotIncreasing)
 }

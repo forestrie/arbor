@@ -6,6 +6,7 @@ import (
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 	"github.com/forestrie/go-merklelog/massifs"
+	"github.com/forestrie/go-merklelog/mmr"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -109,6 +110,10 @@ func EncodeCheckpointReceiptChain(
 // DecodeCheckpointReceipt reverses it into exactly the ConsistencyReceipt the
 // calldata is packed from, so the submission has one source rather than a
 // receipt for the signature and a separately assembled chain for the proofs.
+//
+// The relayed chain must reach the size the head's protected header signs;
+// a chain that stops short encodes a receipt whose accumulator and signed
+// size no longer agree (ARB105-F1).
 func EncodeChainReceipt(headCheckpoint []byte, chain []ConsistencyProof) ([]byte, error) {
 	head, err := massifs.DecodeCheckpointReceipt(headCheckpoint)
 	if err != nil {
@@ -116,6 +121,18 @@ func EncodeChainReceipt(headCheckpoint []byte, chain []ConsistencyProof) ([]byte
 	}
 	if err := CheckProofChainContiguous(chain); err != nil {
 		return nil, err
+	}
+	signed, err := massifs.ProtectedHeaderTreeSize(head.ProtectedHeader)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSignedSizeMismatch, err)
+	}
+	if headLast := head.Proofs[len(head.Proofs)-1].TreeSize2; signed != headLast {
+		return nil, fmt.Errorf("%w: signed tree-size-2 %d != head proof tree-size-2 %d",
+			ErrSignedSizeMismatch, signed, headLast)
+	}
+	if last := chain[len(chain)-1].TreeSize2; last != signed {
+		return nil, fmt.Errorf("%w: signed tree-size-2 %d != chain tree-size-2 %d",
+			ErrSignedSizeMismatch, signed, last)
 	}
 	extras := map[int64]cbor.RawMessage{}
 	for label, value := range head.Extras {
@@ -138,12 +155,16 @@ func EncodeChainReceipt(headCheckpoint []byte, chain []ConsistencyProof) ([]byte
 }
 
 // CheckProofChainContiguous requires each link of a relayed chain to start
-// where its predecessor ends. The intermediate sizes carry no signature, so
-// this comparison is the only thing joining the links: a gap or an overlap
-// would present two unrelated extensions as one catch-up. The contract
-// (verifyConsistencyProofChain) and the go-merklelog verifier both reject
-// such a chain, so it is rejected here rather than encoded into a receipt
-// nothing will accept; the error matches massifs.ErrProofChainNotContiguous.
+// where its predecessor ends and to strictly increase in size. The
+// intermediate sizes carry no signature, so this comparison is the only
+// thing joining the links: a gap or an overlap would present two unrelated
+// extensions as one catch-up, and a zero-length link would let a chain
+// satisfy contiguity without proving anything at that step. The contract
+// (verifyConsistencyProofChain, which rejects treeSize2 <= treeSize1) and
+// the go-merklelog verifier both reject such a chain, so it is rejected here
+// rather than encoded into a receipt nothing will accept; the errors match
+// massifs.ErrProofChainNotContiguous and massifs.ErrConsistencyProofCheck /
+// mmr.ErrSizesNotIncreasing.
 func CheckProofChainContiguous(chain []ConsistencyProof) error {
 	if len(chain) == 0 {
 		return massifs.ErrProofChainEmpty
@@ -153,6 +174,13 @@ func CheckProofChainContiguous(chain []ConsistencyProof) error {
 			return fmt.Errorf("%w: proof %d starts at size %d, proof %d ends at size %d",
 				massifs.ErrProofChainNotContiguous,
 				i, chain[i].TreeSize1, i-1, chain[i-1].TreeSize2)
+		}
+	}
+	for i, p := range chain {
+		if p.TreeSize2 <= p.TreeSize1 {
+			return fmt.Errorf("%w: proof %d: %w: from=%d, to=%d",
+				massifs.ErrConsistencyProofCheck, i, mmr.ErrSizesNotIncreasing,
+				p.TreeSize1, p.TreeSize2)
 		}
 	}
 	return nil
