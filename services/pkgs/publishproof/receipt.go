@@ -69,15 +69,113 @@ func DecodeConsistencyProof(bstr []byte) (ConsistencyProof, error) {
 }
 
 // EncodeCheckpointReceipt encodes a format-v3 checkpoint object (COSE Receipt
-// of Consistency). Used by tests standing in for the sealer; the sealer itself
-// produces receipts via go-merklelog rootsigner.
+// of Consistency) carrying a single consistency proof. Used by tests standing
+// in for the sealer; the sealer itself produces receipts via go-merklelog
+// rootsigner. The single proof is written as the draft's
+// `consistency-proofs = [ + consistency-proof ]`, an array of one.
 func EncodeCheckpointReceipt(protectedHeader []byte, proof ConsistencyProof, signature []byte) ([]byte, error) {
 	return massifs.EncodeCheckpointReceipt(protectedHeader, toProfileProof(proof), signature)
 }
 
+// EncodeCheckpointReceiptChain encodes a format-v3 checkpoint object carrying
+// a chain of consistency proofs in fold order: the first starts at the size
+// its consumer already trusts and each later one at its predecessor's
+// tree-size-2, the last of which is the size protectedHeader signs. It is the
+// receipt form of the publisher's catch-up: one signature over the head
+// accumulator, one proof per sealed step relayed beneath it.
+func EncodeCheckpointReceiptChain(
+	protectedHeader []byte, proofs []ConsistencyProof, signature []byte,
+	extraUnprotected ...map[int64]cbor.RawMessage,
+) ([]byte, error) {
+	profile := make([]massifs.ConsistencyProof, len(proofs))
+	for i := range proofs {
+		profile[i] = toProfileProof(proofs[i])
+	}
+	return massifs.EncodeCheckpointReceiptChain(
+		protectedHeader, profile, signature, extraUnprotected...)
+}
+
+// EncodeChainReceipt re-encodes a stored checkpoint object as the relay
+// artefact a catch-up publish is derived from: the head checkpoint's signed
+// parts - the protected header and signature, which cover the head
+// accumulator and its tree-size-2 (ADR-0046, ADR-0066) - with the relayed
+// chain in place of the single embedded proof, and the head's unprotected
+// material (delegation proof, pre-signed peak receipts) carried over
+// verbatim. Nothing signed is rebuilt: the chain's intermediate sizes are
+// unsigned prover context, pinned by the consumer's own trusted size
+// (ADR-0066 D2, D5), which for publishCheckpoint is the contract's stored
+// size.
+//
+// DecodeCheckpointReceipt reverses it into exactly the ConsistencyReceipt the
+// calldata is packed from, so the submission has one source rather than a
+// receipt for the signature and a separately assembled chain for the proofs.
+func EncodeChainReceipt(headCheckpoint []byte, chain []ConsistencyProof) ([]byte, error) {
+	head, err := massifs.DecodeCheckpointReceipt(headCheckpoint)
+	if err != nil {
+		return nil, fmt.Errorf("decode head checkpoint: %w", err)
+	}
+	if err := CheckProofChainContiguous(chain); err != nil {
+		return nil, err
+	}
+	extras := map[int64]cbor.RawMessage{}
+	for label, value := range head.Extras {
+		extras[label] = value
+	}
+	// The massifs decoder lifts the peak receipts out of the unprotected
+	// header into their own field; put them back so the relay object is the
+	// head receipt with its chain extended, not a lossy copy of it.
+	if len(head.PeakReceipts) > 0 {
+		encoded, err := canonicalReceiptCBOR.Marshal(head.PeakReceipts)
+		if err != nil {
+			return nil, fmt.Errorf("encode peak receipts: %w", err)
+		}
+		extras[massifs.SealPeakReceiptsLabel] = encoded
+	}
+	if len(extras) == 0 {
+		return EncodeCheckpointReceiptChain(head.ProtectedHeader, chain, head.Signature)
+	}
+	return EncodeCheckpointReceiptChain(head.ProtectedHeader, chain, head.Signature, extras)
+}
+
+// CheckProofChainContiguous requires each link of a relayed chain to start
+// where its predecessor ends. The intermediate sizes carry no signature, so
+// this comparison is the only thing joining the links: a gap or an overlap
+// would present two unrelated extensions as one catch-up. The contract
+// (verifyConsistencyProofChain) and the go-merklelog verifier both reject
+// such a chain, so it is rejected here rather than encoded into a receipt
+// nothing will accept; the error matches massifs.ErrProofChainNotContiguous.
+func CheckProofChainContiguous(chain []ConsistencyProof) error {
+	if len(chain) == 0 {
+		return massifs.ErrProofChainEmpty
+	}
+	for i := 1; i < len(chain); i++ {
+		if chain[i].TreeSize1 != chain[i-1].TreeSize2 {
+			return fmt.Errorf("%w: proof %d starts at size %d, proof %d ends at size %d",
+				massifs.ErrProofChainNotContiguous,
+				i, chain[i].TreeSize1, i-1, chain[i-1].TreeSize2)
+		}
+	}
+	return nil
+}
+
+// canonicalReceiptCBOR matches the encoding go-merklelog writes checkpoint
+// material with, so a re-encoded unprotected value is byte-identical to the
+// one the sealer wrote.
+var canonicalReceiptCBOR = func() cbor.EncMode {
+	em, err := cbor.CanonicalEncOptions().EncMode()
+	if err != nil {
+		panic(fmt.Sprintf("publishproof: canonical cbor mode: %v", err))
+	}
+	return em
+}()
+
 // DecodeCheckpointReceipt decodes a format-v3 checkpoint object into the
-// pre-decoded ConsistencyReceipt parts publishCheckpoint takes. When the
-// sealer embedded the univocity on-chain delegation proof (Forestrie
+// pre-decoded ConsistencyReceipt parts publishCheckpoint takes. Every
+// consistency proof the object carries becomes one element of the calldata
+// chain, in order, so a single-proof seal and a relayed chain
+// (EncodeChainReceipt) both decode into the submission they describe.
+//
+// When the sealer embedded the univocity on-chain delegation proof (Forestrie
 // unprotected label, plan-0003 OnchainDelegationProof), it is wired into the
 // calldata delegationProof; otherwise the delegation proof is empty
 // (root/authority direct-signing path).
@@ -86,9 +184,17 @@ func DecodeCheckpointReceipt(data []byte) (ConsistencyReceipt, error) {
 	if err != nil {
 		return ConsistencyReceipt{}, err
 	}
-	proof, err := fromProfileProof(r.Proof)
-	if err != nil {
-		return ConsistencyReceipt{}, err
+	// A sealer-written checkpoint carries one proof; a relay receipt carries
+	// the whole chain, which is what the contract's consistencyProofs[] is.
+	// Both decode the same way - the last link is the one the protected
+	// header signs (CheckSignedSize).
+	proofs := make([]ConsistencyProof, len(r.Proofs))
+	for i := range r.Proofs {
+		proof, err := fromProfileProof(r.Proofs[i])
+		if err != nil {
+			return ConsistencyReceipt{}, fmt.Errorf("consistency proof %d: %w", i, err)
+		}
+		proofs[i] = proof
 	}
 	delegation := DelegationProof{
 		ProtectedHeader: []byte{},
@@ -121,7 +227,7 @@ func DecodeCheckpointReceipt(data []byte) (ConsistencyReceipt, error) {
 	return ConsistencyReceipt{
 		ProtectedHeader:   r.ProtectedHeader,
 		Signature:         r.Signature,
-		ConsistencyProofs: []ConsistencyProof{proof},
+		ConsistencyProofs: proofs,
 		DelegationProof:   delegation,
 	}, nil
 }

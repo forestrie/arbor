@@ -32,7 +32,9 @@ var ErrOwnerNotAnchored = errors.New("owner log not anchored over the grant leaf
 // matches its tree-size-1, and is otherwise rebuilt from the massif so a
 // lagging on-chain state catches up in one publish (the signature covers the
 // final accumulator and its size, ADR-0066, so intermediate proofs and the
-// base of a rebuilt segment need no signatures).
+// base of a rebuilt segment need no signatures). The steps a catch-up relays
+// are re-encoded as one chain receipt under the head checkpoint's signature,
+// and the calldata is derived from that object (EncodeChainReceipt).
 //
 // r is the forest root from ResolveForestContract; targetOnchain and
 // ownerOnchain are current logState reads from the resolved contract. owner
@@ -57,7 +59,7 @@ func AssemblePublish(
 	if err != nil {
 		return nil, SealedState{}, fmt.Errorf("read checkpoint %d: %w", massifIndex, err)
 	}
-	receipt, err := DecodeCheckpointReceipt(cp.Raw)
+	head, err := DecodeCheckpointReceipt(cp.Raw)
 	if err != nil {
 		return nil, SealedState{}, fmt.Errorf("decode checkpoint %d: %w", massifIndex, err)
 	}
@@ -81,7 +83,7 @@ func AssemblePublish(
 	// Invariant: on-chain size is always a sealed boundary (publishCheckpoint sets
 	// log.size = the final proof's treeSize2, a checkpoint's sealed size), so the
 	// chain always starts at some embedded proof's treeSize1.
-	chain, err := BuildEmbeddedProofChain(ctx, target, targetOnchain.Size, massifIndex, receipt.ConsistencyProofs)
+	chain, err := BuildEmbeddedProofChain(ctx, target, targetOnchain.Size, massifIndex, head.ConsistencyProofs)
 	if err != nil {
 		return nil, SealedState{}, fmt.Errorf("build catch-up proof chain: %w", err)
 	}
@@ -89,20 +91,37 @@ func AssemblePublish(
 		return nil, SealedState{}, fmt.Errorf(
 			"head proof treeSize2 %d != sealed size %d", last.TreeSize2, sealed.MMRSize)
 	}
-	receipt.ConsistencyProofs = chain
+
+	// The relay is itself a checkpoint receipt: the head checkpoint's signed
+	// parts over the chain (EncodeChainReceipt). Encoding it and decoding it
+	// back gives the submission a single source - the calldata carries
+	// exactly what that object says, protected header, signature, chain and
+	// delegation proof alike - rather than a receipt for the signature and a
+	// separately assembled chain for the proofs. It also runs the chain
+	// through the contiguity and shape checks a consumer of the object would
+	// apply, here, before any gas is spent.
+	chainReceipt, err := EncodeChainReceipt(cp.Raw, chain)
+	if err != nil {
+		return nil, SealedState{}, fmt.Errorf("checkpoint %d chain receipt: %w", massifIndex, err)
+	}
+	receipt, err := DecodeCheckpointReceipt(chainReceipt)
+	if err != nil {
+		return nil, SealedState{}, fmt.Errorf("checkpoint %d chain receipt: %w", massifIndex, err)
+	}
 
 	// The sealer signs the sealed size alongside the accumulator (ADR-0066)
 	// and the contract requires it to equal the chain's final treeSize2.
 	// Check it here so a mis-built receipt fails locally rather than with
 	// ConsistencyReceiptSizeMismatch / MissingSignedTreeSize on-chain. The
 	// chain's base is bound by the on-chain size, which BuildEmbeddedProofChain
-	// guarantees by construction; assert it for the same reason.
+	// guarantees by construction; assert it for the same reason. Both read
+	// the decoded chain receipt, so they check the bytes that are submitted.
 	if err := CheckSignedSize(receipt); err != nil {
 		return nil, SealedState{}, fmt.Errorf("checkpoint %d: %w", massifIndex, err)
 	}
-	if chain[0].TreeSize1 != targetOnchain.Size {
+	if base := receipt.ConsistencyProofs[0].TreeSize1; base != targetOnchain.Size {
 		return nil, SealedState{}, fmt.Errorf(
-			"checkpoint %d: chain base %d != on-chain size %d", massifIndex, chain[0].TreeSize1, targetOnchain.Size)
+			"checkpoint %d: chain base %d != on-chain size %d", massifIndex, base, targetOnchain.Size)
 	}
 
 	inclusion := InclusionProof{Index: 0, Path: [][32]byte{}}

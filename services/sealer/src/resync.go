@@ -379,7 +379,7 @@ func (r *ResyncManager) sealedSize(ctx context.Context, height uint8, logIDBytes
 	if err != nil {
 		return 0, fmt.Errorf("decode checkpoint %d: %w", cpIdx, err)
 	}
-	sealed := receipt.Proof.TreeSize2
+	sealed := checkpointSealedSize(receipt)
 	r.cacheSealed(logIDHex, sealed)
 	return sealed, nil
 }
