@@ -42,6 +42,19 @@ done
 For a brand-new machine, clone each repo listed above into `services/_deps/`
 and copy the `go.work` files from an existing checkout.
 
+`task bootstrap` clones the same repos itself (see each `.env.bootstrap`'s
+`GIT_CLONES`/`GIT_CHECKOUTS`). Most deps float on a default branch, but
+go-merklelog is pinned to a commit SHA via `GIT_CHECKOUTS` (in the root
+`.env.bootstrap` and in `services/{ranger,publisher,sealer}/.env.bootstrap`)
+so an arbor image tag identifies its sealer/verifier code (FOR-568 review
+finding O1). The pin uses `^<sha>`, not `@<sha>`: `git-bootstrap.v2.sh`
+strips up to the *first* `@` before looking for the ref marker (it expects
+`git@host:...` SSH URLs), so on our `https://` URLs an `@<ref>` suffix is
+silently ignored (NOOP) and never checked out — `^<ref>` works for both a
+branch and a bare commit SHA, since it ends up as `git checkout <ref>`. To
+bump go-merklelog, edit the `^<sha>` in every one of those files to the new
+commit and re-run `task bootstrap`.
+
 ## Services
 
 | Service | Role |
