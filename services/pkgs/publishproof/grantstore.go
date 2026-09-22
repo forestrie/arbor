@@ -43,6 +43,22 @@ const (
 	grantKeyGrantData      = 6
 )
 
+// grantKeyObsoleteSigner and grantKeyObsoleteKind are the retired grant keys
+// 7 (signer) and 8 (kind). The grant wire format is keys 0-6 only; grantData
+// is the sole signer binding (owner ruling 2026-09-22, devdocs plan-2609-09
+// decision P2; matches go-univocity's ErrGrantObsoleteKey,
+// https://github.com/forestrie/go-univocity/pull/2). decodeStoredGrant
+// rejects either key on sight instead of ignoring it.
+const (
+	grantKeyObsoleteSigner = 7
+	grantKeyObsoleteKind   = 8
+)
+
+// ErrGrantObsoleteKey is returned by decodeStoredGrant when the grant
+// payload map carries CBOR key 7 (the retired signer field) or key 8 (the
+// retired kind field). Callers can use errors.Is(err, ErrGrantObsoleteKey).
+var ErrGrantObsoleteKey = errors.New("grant carries an obsolete CBOR key (7 signer or 8 kind)")
+
 // Grant-class request values (univocity constants.sol: high 32 bits of the
 // caller-supplied request select the log kind for first checkpoints).
 var (
@@ -157,6 +173,12 @@ func decodeStoredGrant(raw []byte, request *big.Int) (StoredGrant, error) {
 	m := intKeyMap(inner)
 	if m == nil {
 		return StoredGrant{}, errors.New("grant payload must be an int-keyed CBOR map")
+	}
+	if _, ok := m[grantKeyObsoleteSigner]; ok {
+		return StoredGrant{}, fmt.Errorf("grant payload carries retired key %d (signer): %w", grantKeyObsoleteSigner, ErrGrantObsoleteKey)
+	}
+	if _, ok := m[grantKeyObsoleteKind]; ok {
+		return StoredGrant{}, fmt.Errorf("grant payload carries retired key %d (kind): %w", grantKeyObsoleteKind, ErrGrantObsoleteKey)
 	}
 	logWire, ok := paddedWire32(m, grantKeyLogID)
 	if !ok {

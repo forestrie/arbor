@@ -3,7 +3,11 @@ package publishproof
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
 	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
@@ -71,6 +75,23 @@ func encodeStoredGrant(t *testing.T, o storedGrantOpts) []byte {
 		doc = cbor.Tag{Number: 18, Content: sign1}
 	}
 	out, err := cbor.Marshal(doc)
+	require.NoError(t, err)
+	return out
+}
+
+// encodeStoredGrantFromEmbedded wraps a pre-built grant v0 CBOR body
+// (embedded) in a COSE Sign1 transparent statement, the way encodeStoredGrant
+// does from individual fields. Used to feed the forestrie/protocol grant
+// vectors (testdata/grant_vectors*.json) through decodeStoredGrant directly.
+func encodeStoredGrantFromEmbedded(t *testing.T, embedded, idts []byte) []byte {
+	t.Helper()
+	digest := sha256.Sum256(embedded)
+	unprotected := map[int64]any{tHeaderForestrieGrant: embedded}
+	if idts != nil {
+		unprotected[tHeaderIdtimestamp] = idts
+	}
+	sign1 := []any{[]byte{0xa1, 0x01, 0x26}, unprotected, digest[:], make([]byte, 64)}
+	out, err := cbor.Marshal(sign1)
 	require.NoError(t, err)
 	return out
 }
@@ -249,4 +270,95 @@ func TestGrantLeafMMRIndex(t *testing.T) {
 	boundSize := mmr.MMRIndex(3) // complete size covering only leaves 0..2
 	_, err = GrantLeafMMRIndex(mc, boundSize, idts251, leafFor(entries[3]))
 	require.ErrorIs(t, err, ErrGrantLeafNotFound)
+}
+
+// --- protocol grant-vector conformance (FOR-580: retired keys 7/8) ---
+//
+// grant_vectors.json and grant_vectors_negative.json under testdata/ are
+// forestrie/protocol's conformance vectors for the keys 0-6 grant wire
+// format (see testdata/SOURCE.grant_vectors for provenance). Their
+// expected_cbor_hex / cbor_hex is the go-univocity "response form" (key 0
+// idtimestamp present); decodeStoredGrant decodes only the embedded grant
+// body (keys 1-6) and ignores an unused key 0, so the same bytes exercise
+// both arbor decoders.
+
+type protocolGrantVector struct {
+	Description     string `json:"description"`
+	LogIDHex        string `json:"log_id_hex"`
+	OwnerLogIDHex   string `json:"owner_log_id_hex"`
+	GrantFlagsHex   string `json:"grant_flags_hex"`
+	MaxHeight       uint64 `json:"max_height"`
+	MinGrowth       uint64 `json:"min_growth"`
+	GrantDataHex    string `json:"grant_data_hex"`
+	ExpectedCBORHex string `json:"expected_cbor_hex"`
+}
+
+type protocolGrantNegativeVector struct {
+	Description  string `json:"description"`
+	CBORHex      string `json:"cbor_hex"`
+	MustReject   bool   `json:"must_reject"`
+	Reason       string `json:"reason"`
+	ObsoleteKeys []int  `json:"obsolete_keys"`
+}
+
+func loadProtocolGrantFixture(t *testing.T, name string, v interface{}) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, v))
+}
+
+func mustHexBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	require.NoError(t, err)
+	return b
+}
+
+// TestDecodeStoredGrant_ProtocolVectors decodes the protocol positive
+// vectors (keys 0-6) and checks every field.
+func TestDecodeStoredGrant_ProtocolVectors(t *testing.T) {
+	var vectors []protocolGrantVector
+	loadProtocolGrantFixture(t, "grant_vectors.json", &vectors)
+	require.NotEmpty(t, vectors, "fixture has no vectors")
+
+	for _, v := range vectors {
+		t.Run(v.Description, func(t *testing.T) {
+			stmt := encodeStoredGrantFromEmbedded(t, mustHexBytes(t, v.ExpectedCBORHex), nil)
+			got, err := decodeStoredGrant(stmt, requestAuthLog)
+			require.NoError(t, err)
+
+			wantLogID := logid.FromPaddedWire32(mustHexBytes(t, v.LogIDHex))
+			require.Equal(t, wantLogID, got.LogID)
+			wantOwnerLogID := logid.FromPaddedWire32(mustHexBytes(t, v.OwnerLogIDHex))
+			require.Equal(t, wantOwnerLogID, got.OwnerLogID)
+
+			wantFlags := new(big.Int).SetBytes(mustHexBytes(t, v.GrantFlagsHex))
+			require.Equal(t, wantFlags, got.Grant.Grant)
+			require.Equal(t, v.MaxHeight, got.Grant.MaxHeight)
+			require.Equal(t, v.MinGrowth, got.Grant.MinGrowth)
+			require.Equal(t, mustHexBytes(t, v.GrantDataHex), got.Grant.GrantData)
+		})
+	}
+}
+
+// TestDecodeStoredGrant_RejectsObsoleteKeys decodes the protocol negative
+// vectors and checks every one is rejected; entries whose reason is
+// obsolete_key must fail with ErrGrantObsoleteKey.
+func TestDecodeStoredGrant_RejectsObsoleteKeys(t *testing.T) {
+	var vectors []protocolGrantNegativeVector
+	loadProtocolGrantFixture(t, "grant_vectors_negative.json", &vectors)
+	require.NotEmpty(t, vectors, "fixture has no vectors")
+
+	for _, v := range vectors {
+		t.Run(v.Description, func(t *testing.T) {
+			require.True(t, v.MustReject, "vector must_reject flag")
+			stmt := encodeStoredGrantFromEmbedded(t, mustHexBytes(t, v.CBORHex), nil)
+			_, err := decodeStoredGrant(stmt, requestAuthLog)
+			require.Error(t, err)
+			if v.Reason == "obsolete_key" {
+				require.ErrorIs(t, err, ErrGrantObsoleteKey)
+			}
+		})
+	}
 }

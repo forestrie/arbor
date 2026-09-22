@@ -7,9 +7,13 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 
@@ -838,5 +842,127 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	mux.ServeHTTP(unkRec, unkReq)
 	if unkRec.Code != http.StatusNotFound {
 		t.Fatalf("unknown authority want 404 got %d", unkRec.Code)
+	}
+}
+
+// --- protocol grant-vector conformance (FOR-580: retired keys 7/8) ---
+//
+// grant_vectors.json and grant_vectors_negative.json under testdata/ are
+// forestrie/protocol's conformance vectors for the keys 0-6 grant wire
+// format (see testdata/SOURCE for provenance). Their expected_cbor_hex /
+// cbor_hex is the go-univocity "response form" (key 0 idtimestamp present);
+// decodeGrantPayload decodes only the embedded grant body (keys 1-6) and
+// ignores an unused key 0, so the same bytes exercise both decoders.
+
+type protocolGrantVector struct {
+	Description     string `json:"description"`
+	LogIDHex        string `json:"log_id_hex"`
+	OwnerLogIDHex   string `json:"owner_log_id_hex"`
+	GrantFlagsHex   string `json:"grant_flags_hex"`
+	MaxHeight       uint64 `json:"max_height"`
+	MinGrowth       uint64 `json:"min_growth"`
+	GrantDataHex    string `json:"grant_data_hex"`
+	ExpectedCBORHex string `json:"expected_cbor_hex"`
+}
+
+type protocolGrantNegativeVector struct {
+	Description  string `json:"description"`
+	CBORHex      string `json:"cbor_hex"`
+	MustReject   bool   `json:"must_reject"`
+	Reason       string `json:"reason"`
+	ObsoleteKeys []int  `json:"obsolete_keys"`
+}
+
+func loadProtocolGrantFixture(t *testing.T, name string, v interface{}) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	if err := json.Unmarshal(data, v); err != nil {
+		t.Fatalf("parse fixture %s: %v", name, err)
+	}
+}
+
+func mustHexBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("invalid hex %q: %v", s, err)
+	}
+	return b
+}
+
+func leftPadBytes(b []byte, n int) []byte {
+	if len(b) >= n {
+		return b
+	}
+	out := make([]byte, n)
+	copy(out[n-len(b):], b)
+	return out
+}
+
+// TestDecodeGrantPayload_ProtocolVectors decodes the protocol positive
+// vectors (keys 0-6) and checks every field.
+func TestDecodeGrantPayload_ProtocolVectors(t *testing.T) {
+	var vectors []protocolGrantVector
+	loadProtocolGrantFixture(t, "grant_vectors.json", &vectors)
+	if len(vectors) == 0 {
+		t.Fatal("fixture has no vectors")
+	}
+	for _, v := range vectors {
+		t.Run(v.Description, func(t *testing.T) {
+			g, err := decodeGrantPayload(mustHexBytes(t, v.ExpectedCBORHex))
+			if err != nil {
+				t.Fatalf("decodeGrantPayload: %v", err)
+			}
+			wantLogID := logid.FromPaddedWire32(mustHexBytes(t, v.LogIDHex))
+			if g.LogID != wantLogID {
+				t.Errorf("LogID = %s, want %s", g.LogID, wantLogID)
+			}
+			wantOwnerLogID := logid.FromPaddedWire32(mustHexBytes(t, v.OwnerLogIDHex))
+			if g.OwnerLogID != wantOwnerLogID {
+				t.Errorf("OwnerLogID = %s, want %s", g.OwnerLogID, wantOwnerLogID)
+			}
+			wantFlags := leftPadBytes(mustHexBytes(t, v.GrantFlagsHex), 8)
+			if !bytes.Equal(g.Flags, wantFlags) {
+				t.Errorf("Flags = %x, want %x", g.Flags, wantFlags)
+			}
+			if g.MaxHeight != v.MaxHeight {
+				t.Errorf("MaxHeight = %d, want %d", g.MaxHeight, v.MaxHeight)
+			}
+			if g.MinGrowth != v.MinGrowth {
+				t.Errorf("MinGrowth = %d, want %d", g.MinGrowth, v.MinGrowth)
+			}
+			wantGrantData := mustHexBytes(t, v.GrantDataHex)
+			if !bytes.Equal(g.GrantData, wantGrantData) {
+				t.Errorf("GrantData = %x, want %x", g.GrantData, wantGrantData)
+			}
+		})
+	}
+}
+
+// TestDecodeGrantPayload_RejectsObsoleteKeys decodes the protocol negative
+// vectors and checks every one is rejected; entries whose reason is
+// obsolete_key must fail with ErrGrantObsoleteKey.
+func TestDecodeGrantPayload_RejectsObsoleteKeys(t *testing.T) {
+	var vectors []protocolGrantNegativeVector
+	loadProtocolGrantFixture(t, "grant_vectors_negative.json", &vectors)
+	if len(vectors) == 0 {
+		t.Fatal("fixture has no vectors")
+	}
+	for _, v := range vectors {
+		t.Run(v.Description, func(t *testing.T) {
+			if !v.MustReject {
+				t.Fatalf("vector %q: must_reject is not true", v.Description)
+			}
+			_, err := decodeGrantPayload(mustHexBytes(t, v.CBORHex))
+			if err == nil {
+				t.Fatal("decodeGrantPayload: want error, got nil")
+			}
+			if v.Reason == "obsolete_key" && !errors.Is(err, ErrGrantObsoleteKey) {
+				t.Errorf("want errors.Is(err, ErrGrantObsoleteKey), got %v", err)
+			}
+		})
 	}
 }
