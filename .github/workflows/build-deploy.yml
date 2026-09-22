@@ -44,9 +44,12 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # go-univocity is public (plan-2609-02 P1); no App token is needed to build.
+      # This job builds and pushes deployable images, so bootstrap must pin
+      # go-merklelog (bootstrap:release), not float on main like plain
+      # bootstrap (FOR-568 O1).
       - name: Git Bootstrap
         run: |
-          task bootstrap
+          task bootstrap:release
 
       # publishproof's tracer-bullet test publishes against anvil; without
       # foundry installed the test self-skips and the extend path is untested.

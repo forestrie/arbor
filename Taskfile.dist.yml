@@ -8,6 +8,14 @@ vars:
     sh: echo "${CLUSTER_NAME:-forest-dev-1}"
   CLUSTER_ZONE:
     sh: echo "${CLUSTER_ZONE:-europe-west2-a}"
+  # go-merklelog commit that `task bootstrap:release` pins the sealer/verifier
+  # dep to for anything that gets built for deployment (FOR-568 O1). `task
+  # bootstrap` (dev/local) leaves it floating on `main`, per each
+  # .env.bootstrap. Bump a deployed arbor's go-merklelog by changing this one
+  # line; go-merklelog has no tag at or after this commit yet, so it is a
+  # commit SHA rather than a tag.
+  GO_MERKLELOG_PIN:
+    sh: echo "${GO_MERKLELOG_PIN:-620320d7611e612090f6ce613e1e240ffb5b274d}"
 
 includes:
   minio:
@@ -146,6 +154,32 @@ tasks:
           ../_deps/go-univocity
         )
         EOF
+
+
+  bootstrap:release:
+    desc: >-
+      like bootstrap, but additionally pins go-merklelog to
+      GO_MERKLELOG_PIN everywhere it was bootstrapped (FOR-568 O1) —
+      the path any workflow that builds a deployable image must use
+    cmds:
+      - task: bootstrap
+      - |
+        export GIT_BOOTSTRAP_SH=$(curl -fsSL https://raw.githubusercontent.com/robinbryce/git-bootstrap/refs/heads/main/git-bootstrap.v2.sh)
+        export ENV_SCOPE=.bootstrap.release
+        export GO_MERKLELOG_PIN={{.GO_MERKLELOG_PIN}}
+
+        # Each .env.bootstrap.release below sets GIT_CHECKOUTS to just the
+        # go-merklelog pin; ENV_SCOPE makes git-bootstrap.v2.sh source it
+        # instead of .env.bootstrap. This checkout pass runs after the
+        # ordinary bootstrap above (which already cloned every repo, incl.
+        # go-merklelog, and left it floating on main per .env.bootstrap), so
+        # it only needs to move go-merklelog's existing clone to the pin.
+        sh -c "$GIT_BOOTSTRAP_SH" - checkout .
+        (cd services/ranger && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
+        (cd services/sealer && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
+        (cd services/publisher && sh -c "$GIT_BOOTSTRAP_SH" - checkout .)
+
+        echo "go-merklelog pinned to $(git -C services/_deps/go-merklelog rev-parse HEAD)"
 
 
   test:

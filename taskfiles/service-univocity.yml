@@ -21,6 +21,12 @@ tasks:
         sh: echo "${COMMIT:-$(git rev-parse HEAD)}"
       BUILD_DATE:
         sh: echo "${BUILD_DATE:-$(date -u +'%Y-%m-%dT%H:%M:%SZ')}"
+      # The commit actually checked out by bootstrap (dev: floating main;
+      # release: pinned, see .env.bootstrap.release / FOR-568 O1) — read
+      # from the clone itself so the label can never drift from what was
+      # built, rather than repeating the Taskfile.dist.yml pin var.
+      GO_MERKLELOG_COMMIT:
+        sh: git -C services/_deps/go-merklelog rev-parse HEAD 2>/dev/null || echo unknown
     cmds:
       - |
         echo "Building univocity:{{.IMAGE_TAG}}"
@@ -31,6 +37,7 @@ tasks:
           --build-arg VERSION={{.VERSION}} \
           --build-arg COMMIT={{.COMMIT}} \
           --build-arg BUILD_DATE={{.BUILD_DATE}} \
+          --label org.opencontainers.image.revision.go-merklelog={{.GO_MERKLELOG_COMMIT}} \
           -t {{.IMAGE_URL}}/univocity:{{.IMAGE_TAG}} \
           -f ./services/univocity/Dockerfile \
           ./services
