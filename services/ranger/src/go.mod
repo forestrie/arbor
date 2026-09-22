@@ -11,7 +11,7 @@ require (
 	github.com/forestrie/go-merklelog-datatrails v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog-provider-testing v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
-	github.com/forestrie/go-merklelog/mmr v0.4.0
+	github.com/forestrie/go-merklelog/mmr v0.0.2
 	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/google/uuid v1.6.0
