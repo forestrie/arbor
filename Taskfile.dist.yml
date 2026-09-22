@@ -12,10 +12,10 @@ vars:
   # dep to for anything that gets built for deployment (FOR-568 O1). `task
   # bootstrap` (dev/local) leaves it floating on `main`, per each
   # .env.bootstrap. Bump a deployed arbor's go-merklelog by changing this one
-  # line; go-merklelog has no tag at or after this commit yet, so it is a
-  # commit SHA rather than a tag.
+  # line; go-merklelog now tags each module, so this is a tag ref rather than
+  # a bare commit SHA.
   GO_MERKLELOG_PIN:
-    sh: echo "${GO_MERKLELOG_PIN:-620320d7611e612090f6ce613e1e240ffb5b274d}"
+    sh: echo "${GO_MERKLELOG_PIN:-massifs/v0.7.0}"
 
 includes:
   minio:

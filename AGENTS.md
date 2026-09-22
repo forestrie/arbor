@@ -67,6 +67,10 @@ ignored (NOOP) and nothing is checked out — don't reintroduce it. `^<ref>`
 doesn't hit this and works for a branch, tag or bare commit SHA alike,
 since it ends up as a plain `git checkout <ref>`.
 
+go-merklelog now tags each module on release (e.g. `massifs/v0.7.0`,
+`mmr/v0.5.0`), so `GO_MERKLELOG_PIN` should track the relevant module tag
+rather than a bare commit SHA going forward.
+
 ## Services
 
 | Service | Role |
