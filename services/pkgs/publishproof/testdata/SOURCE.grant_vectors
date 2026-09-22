@@ -1,0 +1,17 @@
+Grant CBOR conformance vectors (FOR-580, keys 0-6; keys 7/8 retired).
+
+grant_vectors.json and grant_vectors_negative.json were copied unmodified
+from forestrie/protocol at the head of PR #4
+(https://github.com/forestrie/protocol/pull/4), branch
+plan-2609-09/phase-1-vectors, fetched 2026-09-22 because PR #4 was not yet
+merged to main:
+
+  https://raw.githubusercontent.com/forestrie/protocol/plan-2609-09/phase-1-vectors/vectors/fixtures/grant_vectors.json
+  https://raw.githubusercontent.com/forestrie/protocol/plan-2609-09/phase-1-vectors/vectors/fixtures/grant_vectors_negative.json
+
+sha256:
+  03ef03ebc39e5582041f87d4457b99faec54e1851274f9429c198b741908cdb8  grant_vectors.json
+  f5d388ca020c67d73c70318b65be2e1f901342edbad867b1147765e624621996  grant_vectors_negative.json
+
+Once protocol#4 merges to main, re-fetch from main and confirm the bytes
+(and these hashes) are unchanged; if they differ, update this note.
