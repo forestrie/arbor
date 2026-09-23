@@ -11,6 +11,7 @@ require (
 	github.com/forestrie/go-univocity v0.0.0-00010101000000-000000000000
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/stretchr/testify v1.11.1
+	github.com/veraison/go-cose v1.1.0
 )
 
 require (
@@ -41,7 +42,6 @@ require (
 	github.com/supranational/blst v0.3.16 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
-	github.com/veraison/go-cose v1.1.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect

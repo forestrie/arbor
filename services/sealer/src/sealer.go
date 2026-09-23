@@ -128,8 +128,7 @@ func CheckpointLog(
 		}
 		startMassifIndex = lastCheckpointIndex
 		hasCheckpoint = true
-		// v3 checkpoint: the sealed size is the proof's tree-size-2.
-		lastSealedSize = receipt.Proof.TreeSize2
+		lastSealedSize = checkpointSealedSize(receipt)
 	}
 
 	// Process each massif from the last checkpoint to head. carried holds
@@ -316,7 +315,7 @@ func putCheckpoint(ctx context.Context, store *merklelog.Store, massifIndex uint
 		// If someone else already wrote a checkpoint at an equal-or-newer size, we can stop.
 		if existingData, rerr := store.CheckpointRead(ctx, massifIndex); rerr == nil {
 			if receipt, derr := massifs.DecodeCheckpointReceipt(existingData); derr == nil &&
-				receipt.Proof.TreeSize2 >= mmrSize {
+				checkpointSealedSize(receipt) >= mmrSize {
 				return nil
 			}
 		}
@@ -541,4 +540,19 @@ func requireEqualPeaks(carried, rehydrated [][]byte) error {
 		}
 	}
 	return nil
+}
+
+// checkpointSealedSize is the size a v3 checkpoint object attests: the
+// tree-size-2 of the last link of its consistency proof chain, which is the
+// size the protected header signs (ADR-0066 D2). The sealer writes one proof
+// per seal, so the chain is a chain of one here; reading the last link keeps
+// the sealer correct for a relayed multi-proof receipt as well. The decoder
+// rejects a receipt carrying no proof (ErrProofChainEmpty), and accepts both
+// the array wire form and the bare byte string older objects carry, so this
+// is total for anything that decoded.
+func checkpointSealedSize(receipt massifs.CheckpointReceipt) uint64 {
+	if len(receipt.Proofs) == 0 {
+		return 0
+	}
+	return receipt.Proofs[len(receipt.Proofs)-1].TreeSize2
 }
