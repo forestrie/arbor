@@ -15,7 +15,7 @@ vars:
   # line; go-merklelog now tags each module, so this is a tag ref rather than
   # a bare commit SHA.
   GO_MERKLELOG_PIN:
-    sh: echo "${GO_MERKLELOG_PIN:-massifs/v0.7.0}"
+    sh: echo "${GO_MERKLELOG_PIN:-massifs/v0.8.0}"
 
 includes:
   minio:
