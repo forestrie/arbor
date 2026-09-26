@@ -107,6 +107,25 @@ func (s *DelegateKeySet) Current() *ecdsa.PrivateKey { return s.current }
 // PreviousRetired reports whether epoch N-1 was refused as retired at load.
 func (s *DelegateKeySet) PreviousRetired() bool { return s != nil && s.previousRetired }
 
+// HeldPubkeyHashes returns the coordinator identities (delegated_pubkey_hash)
+// of every key in the set, epoch N first, for the issue request's
+// heldPublicKeyHashes (FOR-586): the coordinator must not serve a certificate
+// bound to a key the sealer cannot sign with.
+func (s *DelegateKeySet) HeldPubkeyHashes() []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.entries))
+	for _, e := range s.entries {
+		h, err := pubkeyHashHex(&e.priv.PublicKey)
+		if err != nil {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 // KeyFor returns the private key for a certificate-bound public key, or nil.
 func (s *DelegateKeySet) KeyFor(pub *ecdsa.PublicKey) *ecdsa.PrivateKey {
 	if s == nil {
