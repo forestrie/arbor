@@ -173,7 +173,7 @@ func TestCustodianSeedProvider(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		body, _ := io.ReadAll(r.Body)
 		_ = cbor.Unmarshal(body, &gotReq)
-		out, _ := cbor.Marshal(delegateSeedResponse{Seed: wantSeed[:], KMSKeyVersion: fmt.Sprintf("v/cryptoKeyVersions/%d", gotReq.Epoch)})
+		out, _ := cbor.Marshal(delegateSeedResponse{Seed: wantSeed[:], KMSKeyVersion: "v/1", APIVersion: delegateSeedAPIVersion})
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write(out)
 	}))
@@ -218,7 +218,7 @@ func fakeCustodian(t *testing.T, retired, failing map[uint32]bool) custodianSeed
 			return
 		}
 		seed := sha256.Sum256([]byte(fmt.Sprintf("seed/%d", req.Epoch)))
-		out, _ := cbor.Marshal(delegateSeedResponse{Seed: seed[:], KMSKeyVersion: fmt.Sprintf("k/cryptoKeyVersions/%d", req.Epoch)})
+		out, _ := cbor.Marshal(delegateSeedResponse{Seed: seed[:], KMSKeyVersion: fmt.Sprintf("k/cryptoKeyVersions/%d", req.Epoch), APIVersion: delegateSeedAPIVersion})
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write(out)
 	}))
@@ -266,15 +266,14 @@ func TestLoadDelegateKeys_TransientPreviousFails(t *testing.T) {
 	}
 }
 
-// TestCustodianSeedProvider_VersionMustMatchEpoch: a seed derived under any
-// version other than the epoch's own is refused (not as retired), so a
-// pre-FOR-584 custodian that picks "newest enabled" cannot hand a bumped
-// sealer an epoch N-1 key derived under version N.
-func TestCustodianSeedProvider_VersionMustMatchEpoch(t *testing.T) {
-	for _, version := range []string{"k/cryptoKeyVersions/5", "", "k/cryptoKeyVersions/x"} {
+// TestCustodianSeedProvider_RequiresAPIVersion2: a response without
+// apiVersion (a custodian that predates FOR-584 and signs every epoch under
+// the newest enabled version) or below 2 is refused, and not as retired.
+func TestCustodianSeedProvider_RequiresAPIVersion2(t *testing.T) {
+	for _, v := range []uint32{0, 1} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			seed := sha256.Sum256([]byte("seed"))
-			out, _ := cbor.Marshal(delegateSeedResponse{Seed: seed[:], KMSKeyVersion: version})
+			out, _ := cbor.Marshal(delegateSeedResponse{Seed: seed[:], KMSKeyVersion: "k/cryptoKeyVersions/1", APIVersion: v})
 			_, _ = w.Write(out)
 		}))
 		logger, _ := NewLogger(0)
@@ -282,14 +281,11 @@ func TestCustodianSeedProvider_VersionMustMatchEpoch(t *testing.T) {
 		_, err := p.Seed(context.Background(), 4)
 		srv.Close()
 		if err == nil {
-			t.Fatalf("version %q for epoch 4 must be refused", version)
+			t.Fatalf("apiVersion %d must be refused", v)
 		}
 		if errors.Is(err, errDelegateSeedEpochRetired) {
-			t.Fatalf("version mismatch must not be reported as retired: %v", err)
+			t.Fatalf("apiVersion mismatch must not be reported as retired: %v", err)
 		}
-	}
-	if n, ok := kmsKeyVersionNumber("projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/12"); !ok || n != 12 {
-		t.Fatalf("parse = %d,%v", n, ok)
 	}
 }
 
