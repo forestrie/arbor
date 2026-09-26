@@ -51,6 +51,10 @@ tasks:
       - |
         MINIO_DATA_DIR=$(mkdir -p {{.MINIO_DATA_DIR}} && cd {{.MINIO_DATA_DIR}} && pwd)
         echo "MINIO_DATA_DIR: ${MINIO_DATA_DIR}"
+        # The status check above only passes for a RUNNING, healthy container.
+        # A stopped one with the same name would make docker run fail forever,
+        # so clear it first (data lives on the host bind mount, not in it).
+        docker rm -f {{.MINIO_CONTAINER_NAME}} >/dev/null 2>&1 || true
         docker run \
           --name {{.MINIO_CONTAINER_NAME}} \
           -p {{.MINIO_API_PORT}}:9000 \
