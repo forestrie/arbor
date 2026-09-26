@@ -106,6 +106,21 @@ func TestDelegateSeed_ValidatesEpochAndConfig(t *testing.T) {
 	}
 }
 
+// TestDelegateSeed_APIVersion: the response always carries apiVersion 2 (the
+// sealer's transition marker for epoch-is-version); a request without the
+// field is served as version 1 and one above 2 is refused.
+func TestDelegateSeed_APIVersion(t *testing.T) {
+	api := delegateSeedAPI(t)
+	resp := decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}))
+	if resp.APIVersion != 2 {
+		t.Fatalf("apiVersion = %d, want 2", resp.APIVersion)
+	}
+	decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 2}))
+	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 3}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("apiVersion 3: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestDelegateSeed_EpochIsKeyVersion pins the plan-2609-11 binding: epoch e is
 // signed under CryptoKeyVersion e of the configured MAC key, and the version
 // used is reported back to the sealer.

@@ -41,10 +41,19 @@ func delegateSeedMacKeyVersion(cryptoKeyName string, epoch uint32) string {
 	return cryptoKeyName + "/cryptoKeyVersions/" + strconv.FormatUint(uint64(epoch), 10)
 }
 
+// delegateSeedAPIVersion is the contract version of POST /api/delegate-seed.
+// Version 2: the epoch IS the MAC key version number (plan-2609-11); a sealer
+// that requires 2 refuses a response from a custodian that predates it. The
+// field is the internal-API versioning convention (plan-2609-12 slice 02):
+// absent means 1, per endpoint, client refuses a response below its minimum.
+const delegateSeedAPIVersion = 2
+
 // DelegateSeedRequest is the CBOR body for POST /api/delegate-seed.
 type DelegateSeedRequest struct {
 	SealerID string `cbor:"sealerId"`
 	Epoch    uint32 `cbor:"epoch"`
+	// APIVersion is the contract version the sealer speaks; absent means 1.
+	APIVersion uint32 `cbor:"apiVersion,omitempty"`
 }
 
 // DelegateSeedResponse carries the deterministically derived seed. MacSign
@@ -55,6 +64,8 @@ type DelegateSeedRequest struct {
 type DelegateSeedResponse struct {
 	Seed          []byte `cbor:"seed"`
 	KMSKeyVersion string `cbor:"kmsKeyVersion"`
+	// APIVersion is always delegateSeedAPIVersion on this custodian.
+	APIVersion uint32 `cbor:"apiVersion"`
 }
 
 // handleDelegateSeed derives the sealer delegate-key seed inside KMS.
@@ -95,6 +106,11 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SealerID == "" {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "sealerId is required")
+		return
+	}
+	if req.APIVersion > delegateSeedAPIVersion {
+		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "unsupported apiVersion",
+			fmt.Sprintf("apiVersion %d is not supported; this custodian serves up to %d", req.APIVersion, delegateSeedAPIVersion))
 		return
 	}
 	if req.Epoch == 0 {
@@ -143,7 +159,7 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 			"sealerId", req.SealerID, "epoch", req.Epoch, "error", err)
 	}
 
-	a.writeCBOR(w, http.StatusOK, DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion})
+	a.writeCBOR(w, http.StatusOK, DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion, APIVersion: delegateSeedAPIVersion})
 }
 
 // kmsMacSignVersion computes the HMAC of data under one explicit
