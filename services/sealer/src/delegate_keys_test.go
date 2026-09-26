@@ -112,6 +112,34 @@ func TestLoadDelegateKeys_OverlapAndResolution(t *testing.T) {
 	}
 }
 
+// TestDelegateKeySet_HeldPubkeyHashes: the issue request's heldPublicKeyHashes
+// (FOR-586) must name exactly the keys KeyFor can resolve, epoch N first, so
+// the coordinator never serves a certificate the sealer cannot sign with.
+func TestDelegateKeySet_HeldPubkeyHashes(t *testing.T) {
+	local := localSeedProvider{secret: testSeed(t)}
+	keys, err := LoadDelegateKeys(context.Background(), local, 5)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	held := keys.HeldPubkeyHashes()
+	if len(held) != 2 {
+		t.Fatalf("want 2 held hashes (epochs 5 and 4), got %d", len(held))
+	}
+	currentHash, _ := pubkeyHashHex(&keys.Current().PublicKey)
+	if held[0] != currentHash {
+		t.Fatal("epoch N must be advertised first")
+	}
+	for _, h := range held {
+		if _, ok := keys.byPubkeyHash[h]; !ok {
+			t.Fatalf("held hash %s does not resolve to a held key", h)
+		}
+	}
+	var nilSet *DelegateKeySet
+	if got := nilSet.HeldPubkeyHashes(); got != nil {
+		t.Fatal("nil set (on-demand model) must advertise no held keys")
+	}
+}
+
 func TestLoadDelegateKeys_Epoch1NoPrevious(t *testing.T) {
 	local := localSeedProvider{secret: testSeed(t)}
 	keys, err := LoadDelegateKeys(context.Background(), local, 1)
