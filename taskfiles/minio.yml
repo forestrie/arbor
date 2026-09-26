@@ -10,7 +10,14 @@ version: "3"
 vars:
   MINIO_DATA_DIR: '{{.MINIO_DATA_DIR | default "$HOME/.local/state/minio"}}'
   MINIO_CONTAINER_NAME: '{{.MINIO_CONTAINER_NAME | default "forestrie-minio"}}'
-  MINIO_IMAGE: '{{.MINIO_IMAGE | default "quay.io/minio/minio:latest"}}'
+  # MinIO withdrew its public images in September 2026: quay.io/minio/{minio,mc}
+  # answer 401 to anonymous pulls and docker.io/minio/* is gone. Bitnami's
+  # legacy builds are the remaining public multi-arch MinIO images. Both are
+  # pinned; the server image runs its own entrypoint (no `server` args) and
+  # stores data under /bitnami/minio/data; the client image execs its
+  # arguments verbatim, so every invocation names `mc` explicitly.
+  MINIO_IMAGE: '{{.MINIO_IMAGE | default "docker.io/bitnamilegacy/minio:2025.7.23-debian-12-r5"}}'
+  MINIO_CLIENT_IMAGE: '{{.MINIO_CLIENT_IMAGE | default "docker.io/bitnamilegacy/minio-client:2025.7.21-debian-12-r3"}}'
   MINIO_API_PORT: '{{.MINIO_API_PORT | default "9000"}}'
   MINIO_CONSOLE_PORT: '{{.MINIO_CONSOLE_PORT | default "9001"}}'
   MINIO_ROOT_USER: '{{.MINIO_ROOT_USER | default "minioadmin"}}'
@@ -25,6 +32,7 @@ tasks:
         echo "DATA DIR: {{.MINIO_DATA_DIR}}"
         echo "CONTAINER: {{.MINIO_CONTAINER_NAME}}"
         echo "IMAGE: {{.MINIO_IMAGE}}"
+        echo "CLIENT IMAGE: {{.MINIO_CLIENT_IMAGE}}"
         echo "API PORT: {{.MINIO_API_PORT}}"
         echo "CONSOLE PORT: {{.MINIO_CONSOLE_PORT}}"
         echo "BUCKET: {{.MINIO_BUCKET}}"
@@ -49,11 +57,12 @@ tasks:
           -p {{.MINIO_CONSOLE_PORT}}:9001 \
           -dt \
           -u $(id -u):$(id -g) \
-          --mount type=bind,src=${MINIO_DATA_DIR},dst=/data \
+          --mount type=bind,src=${MINIO_DATA_DIR},dst=/bitnami/minio/data \
           -e MINIO_ROOT_USER={{.MINIO_ROOT_USER}} \
           -e MINIO_ROOT_PASSWORD={{.MINIO_ROOT_PASSWORD}} \
-          {{.MINIO_IMAGE}} \
-            server /data --console-address ":9001"
+          -e MINIO_API_PORT_NUMBER=9000 \
+          -e MINIO_CONSOLE_PORT_NUMBER=9001 \
+          {{.MINIO_IMAGE}}
       - |
         echo "Waiting for MinIO to become ready..."
         for i in {1..30}; do
@@ -71,13 +80,13 @@ tasks:
         echo "Configuring bucket {{.MINIO_BUCKET}}"
         docker run --rm --network container:{{.MINIO_CONTAINER_NAME}} \
           -e MC_HOST_minio=http://{{.MINIO_ROOT_USER}}:{{.MINIO_ROOT_PASSWORD}}@localhost:9000 \
-          quay.io/minio/mc:latest \
-            mb --ignore-existing minio/{{.MINIO_BUCKET}}
+          {{.MINIO_CLIENT_IMAGE}} \
+            mc mb --ignore-existing minio/{{.MINIO_BUCKET}}
       - |
         docker run --rm --network container:{{.MINIO_CONTAINER_NAME}} \
           -e MC_HOST_minio=http://{{.MINIO_ROOT_USER}}:{{.MINIO_ROOT_PASSWORD}}@localhost:9000 \
-          quay.io/minio/mc:latest \
-            anonymous set public minio/{{.MINIO_BUCKET}}
+          {{.MINIO_CLIENT_IMAGE}} \
+            mc anonymous set public minio/{{.MINIO_BUCKET}}
 
   stop:
     desc: Stop and remove the MinIO container
