@@ -23,6 +23,13 @@ type DelegationIssueRequest struct {
 	DelegatedPublicKey  []byte `cbor:"delegatedPublicKey"`
 	RequestedTTLSeconds uint64 `cbor:"requestedTtlSeconds"`
 	RequestID           []byte `cbor:"requestId,omitempty"`
+	// HeldPublicKeyHashes lists hex(sha256(canonical COSE_Key)) for every
+	// delegate key the sealer currently holds the private half of (its standing
+	// keys, epochs N and N-1). The coordinator's coverage retrieval then serves
+	// only certificates bound to one of these keys, never one bound to a
+	// registered key the sealer has since dropped (FOR-586). Omitted in the
+	// on-demand ephemeral model, where the request key is the only key.
+	HeldPublicKeyHashes []string `cbor:"heldPublicKeyHashes,omitempty"`
 }
 
 // DelegationIssueResponse is the CBOR response from POST /api/delegations.
