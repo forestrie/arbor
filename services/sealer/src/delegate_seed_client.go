@@ -3,12 +3,22 @@ package sealer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 )
+
+// errDelegateSeedEpochRetired reports the custodian's 409: the KMS MAC key
+// version named by the epoch is disabled or gone, so the epoch can never be
+// derived again (plan-2609-11: the epoch IS the key version number). It is
+// final for this boot, unlike a transport or 5xx failure which is retried.
+var errDelegateSeedEpochRetired = errors.New("delegate seed epoch retired")
 
 // custodianSeedProvider derives the delegate-key seed via the custodian's
 // POST /api/delegate-seed (KMS-MAC; ADR-0050 phase A). The seed is never at
@@ -18,6 +28,7 @@ type custodianSeedProvider struct {
 	token      string
 	sealerID   string
 	httpClient *HTTPClient
+	logger     *slog.Logger // optional; logs the KMS key version each seed derived under
 }
 
 type delegateSeedRequest struct {
@@ -49,6 +60,9 @@ func (p custodianSeedProvider) Seed(ctx context.Context, epoch uint32) ([]byte, 
 	}
 	defer resp.Body.Close()
 	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusConflict {
+		return nil, fmt.Errorf("%w: epoch %d (custodian status=409)", errDelegateSeedEpochRetired, epoch)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("delegate-seed status=%d", resp.StatusCode)
 	}
@@ -59,18 +73,53 @@ func (p custodianSeedProvider) Seed(ctx context.Context, epoch uint32) ([]byte, 
 	if len(out.Seed) == 0 {
 		return nil, fmt.Errorf("delegate-seed response missing seed")
 	}
+	// The epoch IS the MAC key version number (plan-2609-11). A custodian that
+	// predates FOR-584 signs every epoch under the newest enabled version, so
+	// once a second version exists it would hand back an epoch N-1 seed that
+	// derives the wrong key and silently strand every certificate bound to the
+	// real one. Refuse the seed instead: the load fails, the boot retry keeps
+	// trying, and the mismatch is in the log until the custodian is upgraded.
+	if got, ok := kmsKeyVersionNumber(out.KMSKeyVersion); !ok || got != epoch {
+		return nil, fmt.Errorf("delegate-seed for epoch %d derived under %q, want cryptoKeyVersions/%d (custodian predates FOR-584?)",
+			epoch, out.KMSKeyVersion, epoch)
+	}
+	if p.logger != nil {
+		// Warn, like the other boot-time delegation lines: lanes run the
+		// sealer above info, and ops-0016 verifies a rotation from this line
+		// (epoch N under version N, epoch N-1 under version N-1).
+		p.logger.Warn("delegate seed derived", "epoch", epoch, "kmsKeyVersion", out.KMSKeyVersion)
+	}
 	return out.Seed, nil
+}
+
+// kmsKeyVersionNumber parses the trailing number of a KMS CryptoKeyVersion
+// resource name (".../cryptoKeyVersions/<n>").
+func kmsKeyVersionNumber(name string) (uint32, bool) {
+	i := strings.LastIndex(name, "/cryptoKeyVersions/")
+	if i < 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(name[i+len("/cryptoKeyVersions/"):], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n), true
 }
 
 // NewSeedProvider selects the seed source: the custodian KMS-MAC endpoint
 // when a base URL is configured, else the local escape hatch (self-hosted).
 func NewSeedProvider(cfg Config, httpClient *HTTPClient) (SeedProvider, error) {
+	return newSeedProvider(cfg, httpClient, nil)
+}
+
+func newSeedProvider(cfg Config, httpClient *HTTPClient, logger *slog.Logger) (SeedProvider, error) {
 	if cfg.DelegateSeedCustodianURL != "" {
 		return custodianSeedProvider{
 			baseURL:    cfg.DelegateSeedCustodianURL,
 			token:      cfg.DelegateSeedCustodianToken,
 			sealerID:   cfg.SealerID,
 			httpClient: httpClient,
+			logger:     logger,
 		}, nil
 	}
 	if len(cfg.DelegateSeedLocal) > 0 {

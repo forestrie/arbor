@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -94,10 +95,36 @@ type DelegateKeySet struct {
 	entries      []delegateKeyEntry // epoch N then N-1, in advertise order
 	current      *ecdsa.PrivateKey  // epoch N, index 0 — the advertised key
 	currentEpoch uint32
+	// previousRetired records that the custodian refused epoch N-1 as retired
+	// (its MAC key version is disabled or destroyed), so the set holds epoch N
+	// only. Certificates still bound to the N-1 key cannot be signed with.
+	previousRetired bool
 }
 
 // Current returns the advertised delegate key (epoch N, index 0).
 func (s *DelegateKeySet) Current() *ecdsa.PrivateKey { return s.current }
+
+// PreviousRetired reports whether epoch N-1 was refused as retired at load.
+func (s *DelegateKeySet) PreviousRetired() bool { return s != nil && s.previousRetired }
+
+// HeldPubkeyHashes returns the coordinator identities (delegated_pubkey_hash)
+// of every key in the set, epoch N first, for the issue request's
+// heldPublicKeyHashes (FOR-586): the coordinator must not serve a certificate
+// bound to a key the sealer cannot sign with.
+func (s *DelegateKeySet) HeldPubkeyHashes() []string {
+	if s == nil {
+		return nil
+	}
+	out := make([]string, 0, len(s.entries))
+	for _, e := range s.entries {
+		h, err := pubkeyHashHex(&e.priv.PublicKey)
+		if err != nil {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
 
 // KeyFor returns the private key for a certificate-bound public key, or nil.
 func (s *DelegateKeySet) KeyFor(pub *ecdsa.PublicKey) *ecdsa.PrivateKey {
@@ -113,6 +140,12 @@ func (s *DelegateKeySet) KeyFor(pub *ecdsa.PublicKey) *ecdsa.PrivateKey {
 
 // LoadDelegateKeys derives epochs N and N-1 (overlap so rotation never
 // strands unexpired certificates) from the seed provider.
+//
+// A retired epoch N-1 (the custodian's 409: its KMS key version has been
+// disabled after the overlap ran its course, plan-2609-11) is not an error:
+// the set loads with epoch N alone and PreviousRetired reports it. Any other
+// N-1 failure, and any failure for epoch N, fails the load so the boot-time
+// retry keeps trying.
 func LoadDelegateKeys(ctx context.Context, provider SeedProvider, epoch uint32) (*DelegateKeySet, error) {
 	if epoch == 0 {
 		return nil, fmt.Errorf("delegate key epoch must be >= 1")
@@ -125,6 +158,10 @@ func LoadDelegateKeys(ctx context.Context, provider SeedProvider, epoch uint32) 
 	for _, e := range epochs {
 		seed, err := provider.Seed(ctx, e)
 		if err != nil {
+			if e != epoch && errors.Is(err, errDelegateSeedEpochRetired) {
+				s.previousRetired = true
+				continue
+			}
 			return nil, fmt.Errorf("seed for epoch %d: %w", e, err)
 		}
 		k, err := deriveDelegateKey(seed, e, 0)
