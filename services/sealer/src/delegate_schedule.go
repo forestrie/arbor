@@ -96,13 +96,19 @@ func StartDelegateKeySchedule(ctx context.Context, httpClient *HTTPClient, logge
 		logger.Info("delegation-in-advance explicitly disabled (DELEGATE_KEY_EPOCH=0)")
 		return nil, nil
 	}
-	provider, err := NewSeedProvider(cfg, httpClient)
+	provider, err := newSeedProvider(cfg, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("delegate seed provider: %w", err)
 	}
 	keys, err := LoadDelegateKeys(ctx, provider, cfg.DelegateKeyEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("load delegate keys: %w", err)
+	}
+	if keys.PreviousRetired() {
+		logger.Warn("previous delegate epoch retired by the custodian; running with the current epoch only",
+			"epoch", cfg.DelegateKeyEpoch,
+			"retiredEpoch", cfg.DelegateKeyEpoch-1,
+		)
 	}
 	currentHash, err := pubkeyHashHex(&keys.Current().PublicKey)
 	if err != nil {
