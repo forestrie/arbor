@@ -32,8 +32,11 @@ type API struct {
 	// ensureKeyOverride is a test-only seam for POST /api/keys without GCP KMS.
 	ensureKeyOverride func(ctx context.Context, keyOwnerID, selfLogID, alg, protectionLevel string, labels map[string]string) (keyName, publicKeyPEM string, created bool, err error)
 	// macSignOverride is a test-only seam for POST /api/delegate-seed without
-	// GCP KMS. Returns (mac, keyVersionName, error).
-	macSignOverride func(ctx context.Context, keyName string, data []byte) ([]byte, string, error)
+	// GCP KMS. It receives the resolved CryptoKeyVersion name (the epoch
+	// selects the version, see delegateSeedMacKeyVersion) so a fake can key
+	// its MAC per version and simulate a rotation or a retired epoch.
+	// Returns (mac, keyVersionName, error).
+	macSignOverride func(ctx context.Context, keyVersionName string, data []byte) ([]byte, string, error)
 }
 
 // NewAPI builds an API with the given logger and config.

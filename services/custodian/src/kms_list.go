@@ -96,11 +96,13 @@ func keyIDFromName(name string) string {
 	return strings.TrimPrefix(name[i:], prefix)
 }
 
-// getKeyVersionAndCount returns the latest version number and total version count for the key.
+// getKeyVersionAndCount returns the highest version number and total version
+// count for the key. Versions are compared numerically: the resource names
+// sort lexically (".../10" < ".../9"), so neither OrderBy nor a string compare
+// finds the latest once a key has ten or more versions (FOR-584).
 func (a *API) getKeyVersionAndCount(ctx context.Context, client *kms.KeyManagementClient, keyName string) (version int, count int, err error) {
 	it := client.ListCryptoKeyVersions(ctx, &kmspb.ListCryptoKeyVersionsRequest{
-		Parent:  keyName,
-		OrderBy: "name desc",
+		Parent: keyName,
 	})
 	for {
 		ver, nerr := it.Next()
@@ -111,9 +113,17 @@ func (a *API) getKeyVersionAndCount(ctx context.Context, client *kms.KeyManageme
 			return 0, 0, nerr
 		}
 		count++
-		if version == 0 {
-			version, _ = versionIDFromName(ver.Name)
-		}
+		version = maxVersionID(version, ver.Name)
 	}
 	return version, count, nil
+}
+
+// maxVersionID returns the larger of current and the numeric version id in
+// name; an unparseable name leaves current unchanged.
+func maxVersionID(current int, name string) int {
+	n, err := versionIDFromName(name)
+	if err != nil || n <= current {
+		return current
+	}
+	return n
 }
