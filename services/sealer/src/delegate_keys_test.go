@@ -6,6 +6,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -168,6 +170,79 @@ func TestCustodianSeedProvider(t *testing.T) {
 	}
 	if gotAuth != "Bearer app-token" {
 		t.Fatalf("auth = %q", gotAuth)
+	}
+}
+
+// fakeCustodian serves deterministic per-epoch seeds and answers the epochs
+// in retired with the custodian's 409, and those in failing with a 500.
+func fakeCustodian(t *testing.T, retired, failing map[uint32]bool) custodianSeedProvider {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req delegateSeedRequest
+		body, _ := io.ReadAll(r.Body)
+		_ = cbor.Unmarshal(body, &req)
+		switch {
+		case retired[req.Epoch]:
+			w.WriteHeader(http.StatusConflict)
+			return
+		case failing[req.Epoch]:
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		seed := sha256.Sum256([]byte(fmt.Sprintf("seed/%d", req.Epoch)))
+		out, _ := cbor.Marshal(delegateSeedResponse{Seed: seed[:], KMSKeyVersion: fmt.Sprintf("k/cryptoKeyVersions/%d", req.Epoch)})
+		w.Header().Set("Content-Type", "application/cbor")
+		_, _ = w.Write(out)
+	}))
+	t.Cleanup(srv.Close)
+	logger, _ := NewLogger(0)
+	return custodianSeedProvider{baseURL: srv.URL, token: "t", sealerID: "sealer-a", httpClient: NewHTTPClient(logger), logger: logger}
+}
+
+// TestLoadDelegateKeys_RetiredPrevious: once the operator disables the N-1
+// key version (plan-2609-11 runbook step 4) the sealer must still boot, with
+// epoch N alone.
+func TestLoadDelegateKeys_RetiredPrevious(t *testing.T) {
+	p := fakeCustodian(t, map[uint32]bool{4: true}, nil)
+	keys, err := LoadDelegateKeys(context.Background(), p, 5)
+	if err != nil {
+		t.Fatalf("load with retired N-1 must succeed: %v", err)
+	}
+	if keys.Current() == nil || len(keys.byPubkeyHash) != 1 {
+		t.Fatalf("want epoch N only; got %d keys, current=%v", len(keys.byPubkeyHash), keys.Current() != nil)
+	}
+	if !keys.PreviousRetired() {
+		t.Fatal("PreviousRetired must report the refused N-1")
+	}
+}
+
+// A retired CURRENT epoch is an operator error (the sealer was bumped to an
+// epoch whose version does not exist or is disabled): fail the load.
+func TestLoadDelegateKeys_RetiredCurrentFails(t *testing.T) {
+	p := fakeCustodian(t, map[uint32]bool{5: true}, nil)
+	if _, err := LoadDelegateKeys(context.Background(), p, 5); err == nil {
+		t.Fatal("retired current epoch must fail the load")
+	}
+}
+
+// A transient failure for N-1 is NOT retirement: fail the load so the boot
+// retry runs again rather than silently dropping the overlap.
+func TestLoadDelegateKeys_TransientPreviousFails(t *testing.T) {
+	p := fakeCustodian(t, nil, map[uint32]bool{4: true})
+	_, err := LoadDelegateKeys(context.Background(), p, 5)
+	if err == nil {
+		t.Fatal("transient N-1 failure must fail the load")
+	}
+	if errors.Is(err, errDelegateSeedEpochRetired) {
+		t.Fatal("a 500 must not be reported as retired")
+	}
+}
+
+func TestCustodianSeedProvider_RetiredIs409(t *testing.T) {
+	p := fakeCustodian(t, map[uint32]bool{3: true}, nil)
+	_, err := p.Seed(context.Background(), 3)
+	if !errors.Is(err, errDelegateSeedEpochRetired) {
+		t.Fatalf("409 must map to errDelegateSeedEpochRetired, got %v", err)
 	}
 }
 
