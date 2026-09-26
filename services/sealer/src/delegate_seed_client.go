@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 )
@@ -71,12 +73,37 @@ func (p custodianSeedProvider) Seed(ctx context.Context, epoch uint32) ([]byte, 
 	if len(out.Seed) == 0 {
 		return nil, fmt.Errorf("delegate-seed response missing seed")
 	}
+	// The epoch IS the MAC key version number (plan-2609-11). A custodian that
+	// predates FOR-584 signs every epoch under the newest enabled version, so
+	// once a second version exists it would hand back an epoch N-1 seed that
+	// derives the wrong key and silently strand every certificate bound to the
+	// real one. Refuse the seed instead: the load fails, the boot retry keeps
+	// trying, and the mismatch is in the log until the custodian is upgraded.
+	if got, ok := kmsKeyVersionNumber(out.KMSKeyVersion); !ok || got != epoch {
+		return nil, fmt.Errorf("delegate-seed for epoch %d derived under %q, want cryptoKeyVersions/%d (custodian predates FOR-584?)",
+			epoch, out.KMSKeyVersion, epoch)
+	}
 	if p.logger != nil {
-		// Makes a key-version rotation visible in the boot log: epoch N under
-		// version N and epoch N-1 under version N-1.
-		p.logger.Info("delegate seed derived", "epoch", epoch, "kmsKeyVersion", out.KMSKeyVersion)
+		// Warn, like the other boot-time delegation lines: lanes run the
+		// sealer above info, and ops-0016 verifies a rotation from this line
+		// (epoch N under version N, epoch N-1 under version N-1).
+		p.logger.Warn("delegate seed derived", "epoch", epoch, "kmsKeyVersion", out.KMSKeyVersion)
 	}
 	return out.Seed, nil
+}
+
+// kmsKeyVersionNumber parses the trailing number of a KMS CryptoKeyVersion
+// resource name (".../cryptoKeyVersions/<n>").
+func kmsKeyVersionNumber(name string) (uint32, bool) {
+	i := strings.LastIndex(name, "/cryptoKeyVersions/")
+	if i < 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(name[i+len("/cryptoKeyVersions/"):], 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(n), true
 }
 
 // NewSeedProvider selects the seed source: the custodian KMS-MAC endpoint

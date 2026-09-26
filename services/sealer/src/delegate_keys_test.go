@@ -173,7 +173,7 @@ func TestCustodianSeedProvider(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		body, _ := io.ReadAll(r.Body)
 		_ = cbor.Unmarshal(body, &gotReq)
-		out, _ := cbor.Marshal(delegateSeedResponse{Seed: wantSeed[:], KMSKeyVersion: "v/1"})
+		out, _ := cbor.Marshal(delegateSeedResponse{Seed: wantSeed[:], KMSKeyVersion: fmt.Sprintf("v/cryptoKeyVersions/%d", gotReq.Epoch)})
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write(out)
 	}))
@@ -263,6 +263,33 @@ func TestLoadDelegateKeys_TransientPreviousFails(t *testing.T) {
 	}
 	if errors.Is(err, errDelegateSeedEpochRetired) {
 		t.Fatal("a 500 must not be reported as retired")
+	}
+}
+
+// TestCustodianSeedProvider_VersionMustMatchEpoch: a seed derived under any
+// version other than the epoch's own is refused (not as retired), so a
+// pre-FOR-584 custodian that picks "newest enabled" cannot hand a bumped
+// sealer an epoch N-1 key derived under version N.
+func TestCustodianSeedProvider_VersionMustMatchEpoch(t *testing.T) {
+	for _, version := range []string{"k/cryptoKeyVersions/5", "", "k/cryptoKeyVersions/x"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			seed := sha256.Sum256([]byte("seed"))
+			out, _ := cbor.Marshal(delegateSeedResponse{Seed: seed[:], KMSKeyVersion: version})
+			_, _ = w.Write(out)
+		}))
+		logger, _ := NewLogger(0)
+		p := custodianSeedProvider{baseURL: srv.URL, token: "t", sealerID: "sealer-a", httpClient: NewHTTPClient(logger)}
+		_, err := p.Seed(context.Background(), 4)
+		srv.Close()
+		if err == nil {
+			t.Fatalf("version %q for epoch 4 must be refused", version)
+		}
+		if errors.Is(err, errDelegateSeedEpochRetired) {
+			t.Fatalf("version mismatch must not be reported as retired: %v", err)
+		}
+	}
+	if n, ok := kmsKeyVersionNumber("projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/12"); !ok || n != 12 {
+		t.Fatalf("parse = %d,%v", n, ok)
 	}
 }
 
