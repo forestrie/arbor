@@ -25,6 +25,9 @@ type IssuerLeaseRequest struct {
 	DelegatedPublicKey  []byte
 	RequestedTTLSeconds uint64
 	RequestID           []byte
+	// HeldPublicKeyHashes: the standing delegate keys the sealer can sign with
+	// (see delegationcert.DelegationIssueRequest.HeldPublicKeyHashes).
+	HeldPublicKeyHashes []string
 }
 
 // IssuerLeaseResponse is the untrusted issuer response (verified locally).
@@ -81,6 +84,7 @@ func (h *HTTPDelegationIssuer) IssueForLog(
 		DelegatedPublicKey:  req.DelegatedPublicKey,
 		RequestedTTLSeconds: req.RequestedTTLSeconds,
 		RequestID:           req.RequestID,
+		HeldPublicKeyHashes: req.HeldPublicKeyHashes,
 	}
 	body, err := canonicalCBOR.Marshal(issueReq)
 	if err != nil {

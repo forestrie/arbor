@@ -142,6 +142,7 @@ func requestLogDelegationLeaseWithKeyPair(
 		Algorithm:           algorithm,
 		DelegatedPublicKey:  delegatedPubCBOR,
 		RequestedTTLSeconds: uint64(ttl.Seconds()),
+		HeldPublicKeyHashes: heldKeys.HeldPubkeyHashes(),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("delegation issuer: %w", err)
