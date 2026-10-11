@@ -1,6 +1,7 @@
 package custodian
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -35,17 +36,22 @@ func TestMaxVersionID(t *testing.T) {
 	}
 }
 
-func TestKmsErrIsRetiredVersion(t *testing.T) {
-	if !kmsErrIsRetiredVersion(status.Error(codes.FailedPrecondition, "disabled")) {
-		t.Fatal("FailedPrecondition (disabled version) must be retired")
+// TestKmsMacSignError: FailedPrecondition (version not ENABLED) is a retired
+// epoch; NotFound is left ambiguous for the parent-key check (plan-2609-12
+// ruling 2); anything else is neither.
+func TestKmsMacSignError(t *testing.T) {
+	const v = "projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+	if err := kmsMacSignError(v, status.Error(codes.FailedPrecondition, "disabled")); !errors.Is(err, errDelegateSeedEpochRetired) {
+		t.Fatalf("FailedPrecondition: %v, want epoch retired", err)
 	}
-	if !kmsErrIsRetiredVersion(status.Error(codes.NotFound, "destroyed")) {
-		t.Fatal("NotFound (missing version) must be retired")
+	err := kmsMacSignError(v, status.Error(codes.NotFound, "missing"))
+	if !errors.Is(err, errDelegateSeedVersionNotFound) || errors.Is(err, errDelegateSeedEpochRetired) {
+		t.Fatalf("NotFound: %v, want version-not-found only", err)
 	}
-	if kmsErrIsRetiredVersion(status.Error(codes.Unavailable, "down")) {
-		t.Fatal("Unavailable must not be retired")
-	}
-	if kmsErrIsRetiredVersion(fmt.Errorf("plain")) {
-		t.Fatal("non-status error must not be retired")
+	for _, e := range []error{status.Error(codes.Unavailable, "down"), fmt.Errorf("plain")} {
+		err := kmsMacSignError(v, e)
+		if errors.Is(err, errDelegateSeedEpochRetired) || errors.Is(err, errDelegateSeedVersionNotFound) {
+			t.Fatalf("%v classified as %v", e, err)
+		}
 	}
 }

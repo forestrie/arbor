@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // publicKeyCacheEntry caches PEM + alg after a successful KMS GetPublicKey (short crypto key id key).
@@ -37,16 +38,44 @@ type API struct {
 	// its MAC per version and simulate a rotation or a retired epoch.
 	// Returns (mac, keyVersionName, error).
 	macSignOverride func(ctx context.Context, keyVersionName string, data []byte) ([]byte, string, error)
+	// getDelegateSeedKeyOverride is a test-only seam for the delegate-seed MAC
+	// key probe and the NotFound parent-key check without GCP KMS.
+	getDelegateSeedKeyOverride func(ctx context.Context, keyName string) (delegateSeedKeyInfo, error)
+
+	// delegateSeedVerified is set once the boot probe has confirmed
+	// DELEGATE_SEED_MAC_KEY is an HMAC_SHA256 MAC key (plan-2609-12 ruling 2).
+	// Until then seed requests answer 501 before any MacSign.
+	delegateSeedVerified atomic.Bool
+	// registrations is the coordinator registration outbox (plan-2609-12
+	// ruling 1); nil unless REGISTRAR_VOUCHER_KEY and the coordinator are
+	// both configured.
+	registrations *registrationOutbox
 }
 
 // NewAPI builds an API with the given logger and config.
 func NewAPI(logger *slog.Logger, cfg Config) *API {
-	return &API{
+	a := &API{
 		Logger:         logger,
 		cfg:            cfg,
 		store:          NewKeyStore(),
 		logIDKeyCache:  newLogIDKeyLRU(cfg.LogIDCacheSize),
 		publicKeyCache: make(map[string]publicKeyCacheEntry),
+	}
+	if cfg.RegistrarVoucherKey != "" && a.coordinatorConfigured() {
+		a.registrations = newRegistrationOutbox(logger, a.signRegistrarVoucher, a.postDelegateKeyRegistration)
+	}
+	return a
+}
+
+// Start runs the background work the API needs until ctx ends: the
+// delegate-seed MAC key boot probe (retried until it verifies) and the
+// registration outbox worker. Neither ever stops the process.
+func (a *API) Start(ctx context.Context) {
+	if a.cfg.DelegateSeedMacKey != "" {
+		go a.runDelegateSeedProbe(ctx)
+	}
+	if a.registrations != nil {
+		go a.registrations.run(ctx)
 	}
 }
 
