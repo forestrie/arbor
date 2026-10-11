@@ -56,6 +56,7 @@ func main() {
 
 	api := custodian.NewAPI(logger, cfg)
 	api.RegisterRoutes(mux)
+	api.Start(ctx)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

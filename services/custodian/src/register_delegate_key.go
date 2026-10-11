@@ -3,7 +3,6 @@ package custodian
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
-	"github.com/forestrie/arbor/services/pkgs/delegatekeys"
 	"google.golang.org/api/option"
 )
 
@@ -35,99 +33,43 @@ type RegisterDelegateKeysBody struct {
 	Keys     []RegisterDelegateKeyEntry `json:"keys"`
 }
 
-// buildDelegateKeyRegistration derives the standing public key for
-// (sealerID, epoch) from the seed, encodes it as canonical COSE_Key (via the
-// shared delegatekeys package, so it matches the sealer's key and the
-// coordinator's delegated_pubkey_hash), and signs a voucher over it with
-// voucherSign. Pure — no KMS or HTTP — so it is unit-testable.
-func buildDelegateKeyRegistration(
-	sealerID string,
-	epoch uint32,
-	notAfter int64,
-	seed []byte,
-	voucherSign func(DelegateKeyVoucherClaims) ([]byte, error),
-) (RegisterDelegateKeysBody, error) {
-	priv, err := delegatekeys.DeriveKey(seed, epoch, 0)
-	if err != nil {
-		return RegisterDelegateKeysBody{}, fmt.Errorf("derive delegate key: %w", err)
-	}
-	pub := &priv.PublicKey
-	coseBytes, err := delegatekeys.CoseKeyBytes(pub)
-	if err != nil {
-		return RegisterDelegateKeysBody{}, fmt.Errorf("encode delegate key: %w", err)
-	}
-	voucher, err := voucherSign(DelegateKeyVoucherClaims{SealerID: sealerID, Epoch: epoch, PublicKey: pub})
-	if err != nil {
-		return RegisterDelegateKeysBody{}, fmt.Errorf("sign voucher: %w", err)
-	}
-	return RegisterDelegateKeysBody{
-		SealerID: sealerID,
-		Keys: []RegisterDelegateKeyEntry{{
-			Alg:       "ES256",
-			PublicKey: base64.StdEncoding.EncodeToString(coseBytes),
-			Epoch:     epoch,
-			NotAfter:  notAfter,
-			Voucher:   base64.StdEncoding.EncodeToString(voucher),
-		}},
-	}, nil
-}
-
-// registerStandingDelegateKey derives the standing key for (sealerID, epoch),
-// signs a voucher with the KMS registrar voucher key, and registers both with
-// the coordinator. Best-effort: called from the seed handler after the seed is
-// derived, and a failure is logged (not returned to the sealer) — the sealer
-// re-requests on boot and registration is an idempotent upsert. No-op unless
-// the registrar voucher key AND the coordinator are configured.
-func (a *API) registerStandingDelegateKey(ctx context.Context, sealerID string, epoch uint32, seed []byte) error {
-	if a.cfg.RegistrarVoucherKey == "" || !a.coordinatorConfigured() {
-		return nil
-	}
-	notAfter := time.Now().Add(defaultDelegateKeyTTL).Unix()
-
+// signRegistrarVoucher signs a delegate-key voucher with the KMS registrar
+// voucher key's current signing version. The outbox calls it once per entry.
+func (a *API) signRegistrarVoucher(ctx context.Context, claims DelegateKeyVoucherClaims) ([]byte, error) {
 	client, err := kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
 	if err != nil {
-		return fmt.Errorf("kms client: %w", err)
+		return nil, fmt.Errorf("kms client: %w", err)
 	}
 	defer client.Close()
 	versionName, versionAlg, err := kmsResolveSigningVersion(ctx, client, a.cfg.RegistrarVoucherKey)
 	if err != nil {
-		return fmt.Errorf("resolve registrar voucher key version: %w", err)
+		return nil, fmt.Errorf("resolve registrar voucher key version: %w", err)
 	}
-
-	body, err := buildDelegateKeyRegistration(sealerID, epoch, notAfter, seed,
-		func(claims DelegateKeyVoucherClaims) ([]byte, error) {
-			return BuildDelegateKeyVoucher(ctx, client, versionName, versionAlg, claims, "registrar")
-		})
-	if err != nil {
-		return err
-	}
-	return a.postDelegateKeyRegistration(ctx, body)
+	return BuildDelegateKeyVoucher(ctx, client, versionName, versionAlg, claims, "registrar")
 }
 
-// postDelegateKeyRegistration POSTs the registration to the coordinator's
-// delegate-key endpoint with the coordinator bearer token.
-func (a *API) postDelegateKeyRegistration(ctx context.Context, body RegisterDelegateKeysBody) error {
+// postDelegateKeyRegistration POSTs one registration to the coordinator's
+// delegate-key endpoint with the coordinator bearer token and reports the
+// status and (bounded) body; classifying them is the outbox's job.
+func (a *API) postDelegateKeyRegistration(ctx context.Context, body RegisterDelegateKeysBody) registrationOutcome {
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return registrationOutcome{err: err}
 	}
 	url := a.coordinatorBaseURL() + "/api/sealer/delegate-keys"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return registrationOutcome{err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token := a.coordinatorAuthToken(); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return registrationOutcome{err: err}
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("coordinator register returned %d: %s", resp.StatusCode, string(b))
-	}
-	return nil
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return registrationOutcome{status: resp.StatusCode, body: b}
 }

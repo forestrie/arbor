@@ -5,12 +5,18 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"cloud.google.com/go/kms/apiv1/kmspb"
 	"github.com/fxamacker/cbor/v2"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func delegateSeedAPI(t *testing.T) *API {
@@ -22,7 +28,25 @@ func delegateSeedAPI(t *testing.T) *API {
 		DelegateSeedSealers: []string{"sealer-a", "sealer-b"},
 	})
 	api.macSignOverride = fakeMacSign(nil)
+	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(goodMacKey, nil)
+	if err := api.probeDelegateSeedKey(context.Background()); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
 	return api
+}
+
+var goodMacKey = delegateSeedKeyInfo{
+	Purpose:         kmspb.CryptoKey_MAC,
+	Algorithm:       kmspb.CryptoKeyVersion_HMAC_SHA256,
+	EnabledVersions: []string{"projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed/cryptoKeyVersions/1"},
+}
+
+// fakeDelegateSeedKey answers the probe / parent-key check with info, or err
+// when set.
+func fakeDelegateSeedKey(info delegateSeedKeyInfo, err error) func(context.Context, string) (delegateSeedKeyInfo, error) {
+	return func(context.Context, string) (delegateSeedKeyInfo, error) {
+		return info, err
+	}
 }
 
 // fakeMacSign is a deterministic fake KMS: the HMAC key is derived from the
@@ -229,5 +253,176 @@ func TestDelegateSeed_FixedPrefixAndDeterminism(t *testing.T) {
 	}
 	if bytes.Equal(resp1.Seed, resp3.Seed) {
 		t.Fatal("epoch bump must change the seed")
+	}
+}
+
+// TestDelegateSeed_ProbeGatesSeedRequests: until the boot probe verifies the
+// MAC key, seed requests answer 501 before any MacSign (ruling 2).
+func TestDelegateSeed_ProbeGatesSeedRequests(t *testing.T) {
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, Config{
+		AppToken:            "app-token",
+		DelegateSeedMacKey:  "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed",
+		DelegateSeedSealers: []string{"sealer-a"},
+	})
+	var macSigns atomic.Int32
+	api.macSignOverride = func(ctx context.Context, v string, d []byte) ([]byte, string, error) {
+		macSigns.Add(1)
+		return fakeMacSign(nil)(ctx, v, d)
+	}
+	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("unverified: got %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+	if macSigns.Load() != 0 {
+		t.Fatal("MacSign must not run while the key is unverified")
+	}
+	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(goodMacKey, nil)
+	if err := api.probeDelegateSeedKey(context.Background()); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}))
+}
+
+// TestDelegateSeed_ProbeRejectsWrongKey: wrong purpose, wrong algorithm and a
+// missing key are misconfigurations and leave the custodian unverified.
+func TestDelegateSeed_ProbeRejectsWrongKey(t *testing.T) {
+	cases := map[string]func(context.Context, string) (delegateSeedKeyInfo, error){
+		"wrong purpose": fakeDelegateSeedKey(delegateSeedKeyInfo{
+			Purpose: kmspb.CryptoKey_ASYMMETRIC_SIGN, Algorithm: kmspb.CryptoKeyVersion_EC_SIGN_P256_SHA256,
+		}, nil),
+		"wrong algorithm": fakeDelegateSeedKey(delegateSeedKeyInfo{
+			Purpose: kmspb.CryptoKey_MAC, Algorithm: kmspb.CryptoKeyVersion_HMAC_SHA512,
+		}, nil),
+		"missing key": fakeDelegateSeedKey(delegateSeedKeyInfo{},
+			fmt.Errorf("%w: does not exist", errDelegateSeedKeyMisconfigured)),
+	}
+	for name, get := range cases {
+		t.Run(name, func(t *testing.T) {
+			logger, _ := NewLogger(0)
+			api := NewAPI(logger, Config{DelegateSeedMacKey: "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed"})
+			api.getDelegateSeedKeyOverride = get
+			if err := api.probeDelegateSeedKey(context.Background()); !errors.Is(err, errDelegateSeedKeyMisconfigured) {
+				t.Fatalf("probe = %v, want misconfigured", err)
+			}
+			if api.delegateSeedVerified.Load() {
+				t.Fatal("must stay unverified")
+			}
+		})
+	}
+}
+
+// TestDelegateSeed_ProbeRetriesTransientFailure: a KMS outage at boot heals
+// on the probe's timer without a restart.
+func TestDelegateSeed_ProbeRetriesTransientFailure(t *testing.T) {
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, Config{DelegateSeedMacKey: "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed"})
+	var calls atomic.Int32
+	api.getDelegateSeedKeyOverride = func(context.Context, string) (delegateSeedKeyInfo, error) {
+		if calls.Add(1) == 1 {
+			return delegateSeedKeyInfo{}, errors.New("get crypto key: Unavailable")
+		}
+		return goodMacKey, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go api.runDelegateSeedProbe(ctx)
+	deadline := time.Now().Add(10 * time.Second)
+	for !api.delegateSeedVerified.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("probe did not recover after a transient failure")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("probe calls = %d, want 2", calls.Load())
+	}
+}
+
+// TestDelegateSeed_NotFoundDisambiguation: MacSign NotFound with the parent
+// key missing is 501 (misconfigured); with the parent present it is 409
+// (epoch retired); a failed parent check is 502.
+func TestDelegateSeed_NotFoundDisambiguation(t *testing.T) {
+	api := delegateSeedAPI(t)
+	api.macSignOverride = func(_ context.Context, v string, _ []byte) ([]byte, string, error) {
+		return nil, "", kmsMacSignError(v, status.Error(codes.NotFound, "not found"))
+	}
+
+	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(delegateSeedKeyInfo{},
+		fmt.Errorf("%w: does not exist", errDelegateSeedKeyMisconfigured))
+	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("parent missing: got %d, want 501: %s", rec.Code, rec.Body.String())
+	}
+
+	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(goodMacKey, nil)
+	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 7}); rec.Code != http.StatusConflict {
+		t.Fatalf("version missing: got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+
+	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(delegateSeedKeyInfo{}, errors.New("get crypto key: Unavailable"))
+	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}); rec.Code != http.StatusBadGateway {
+		t.Fatalf("parent check failed: got %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDelegateSeed_RespondsBeforeRegistration: the seed is answered without
+// waiting on the coordinator (ruling 1). The registration POST hangs until the
+// test ends, yet the handler returns promptly, and the POST is attempted only
+// after the response was written.
+func TestDelegateSeed_RespondsBeforeRegistration(t *testing.T) {
+	logger, _ := NewLogger(0)
+	api := NewAPI(logger, Config{
+		AppToken:                 "app-token",
+		DelegateSeedMacKey:       "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed",
+		DelegateSeedSealers:      []string{"sealer-a"},
+		RegistrarVoucherKey:      "projects/p/locations/l/keyRings/r/cryptoKeys/registrar-voucher",
+		DelegationCoordinatorURL: "https://coordinator.invalid",
+	})
+	api.macSignOverride = fakeMacSign(nil)
+	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(goodMacKey, nil)
+	if err := api.probeDelegateSeedKey(context.Background()); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if api.registrations == nil {
+		t.Fatal("outbox must exist when the registrar key and coordinator are configured")
+	}
+	_, signer, kid := registrarKey(t)
+	api.registrations.signVoucher = func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
+		return BuildDelegateKeyVoucherWithSigner(c, kid, signer)
+	}
+	var responded atomic.Bool
+	posted := make(chan bool, 1)
+	hang := make(chan struct{})
+	defer close(hang)
+	api.registrations.post = func(ctx context.Context, _ RegisterDelegateKeysBody) registrationOutcome {
+		posted <- responded.Load()
+		select {
+		case <-hang:
+		case <-ctx.Done():
+		}
+		return registrationOutcome{err: ctx.Err()}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api.Start(ctx)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1})
+		responded.Store(true)
+		done <- rec
+	}()
+	select {
+	case rec := <-done:
+		decodeSeed(t, rec)
+	case <-time.After(5 * time.Second):
+		t.Fatal("seed response waited on the coordinator")
+	}
+	select {
+	case <-posted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("registration was never attempted")
+	}
+	if api.registrations.len() != 1 {
+		t.Fatalf("outbox len = %d, want 1 pending", api.registrations.len())
 	}
 }

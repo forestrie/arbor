@@ -30,6 +30,12 @@ const delegateSeedPrefix = "forestrie/sealer-delegate-seed/v1"
 // "KMS is unavailable" (502) and stop retrying the former.
 var errDelegateSeedEpochRetired = errors.New("delegate seed epoch retired: no enabled MAC key version")
 
+// errDelegateSeedVersionNotFound reports KMS NotFound for the epoch's
+// CryptoKeyVersion. KMS answers NotFound for a missing key as well as a missing
+// version, so the handler checks the parent key before answering: key present
+// means the epoch is retired (409), key missing means misconfiguration (501).
+var errDelegateSeedVersionNotFound = errors.New("delegate seed MAC key version not found")
+
 // delegateSeedMacKeyVersion names the CryptoKeyVersion that derives seeds for
 // an epoch. The epoch IS the MAC key version number (plan-2609-11): epoch e is
 // always signed under <DELEGATE_SEED_MAC_KEY>/cryptoKeyVersions/<e>. That makes
@@ -93,6 +99,13 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 			"DELEGATE_SEED_MAC_KEY must name a CryptoKey, not a CryptoKeyVersion")
 		return
 	}
+	if !a.delegateSeedVerified.Load() {
+		// The boot probe has not yet confirmed the key is an HMAC_SHA256 MAC
+		// key (plan-2609-12 ruling 2); it retries on a timer.
+		a.writeProblem(w, r, http.StatusNotImplemented, "about:blank", "misconfigured",
+			"DELEGATE_SEED_MAC_KEY has not been verified as an HMAC_SHA256 MAC key")
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4096))
 	if err != nil {
@@ -132,6 +145,16 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	seed, keyVersion, err := macSign(r.Context(), versionName, data)
+	if errors.Is(err, errDelegateSeedVersionNotFound) {
+		err = a.disambiguateVersionNotFound(r.Context(), err)
+		if errors.Is(err, errDelegateSeedKeyMisconfigured) {
+			a.Logger.Error("delegate seed MAC key missing", "key", a.cfg.DelegateSeedMacKey,
+				"sealerId", req.SealerID, "epoch", req.Epoch, "error", err)
+			a.writeProblem(w, r, http.StatusNotImplemented, "about:blank", "misconfigured",
+				"DELEGATE_SEED_MAC_KEY does not exist")
+			return
+		}
+	}
 	if err != nil {
 		if errors.Is(err, errDelegateSeedEpochRetired) {
 			a.Logger.Warn("delegate seed epoch retired", "sealerId", req.SealerID, "epoch", req.Epoch, "kmsKeyVersion", versionName, "error", err)
@@ -150,21 +173,42 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 		"kmsKeyVersion", keyVersion,
 	)
 
-	// Register the standing delegate key + custodian voucher with the
-	// coordinator (FOR-390 phase G3). Best-effort: a failure must not fail the
-	// seed response (the sealer needs the seed to boot); the sealer re-requests
-	// on boot and registration is idempotent.
-	if err := a.registerStandingDelegateKey(r.Context(), req.SealerID, req.Epoch, seed); err != nil {
-		a.Logger.Warn("delegate key registration failed (non-fatal)",
-			"sealerId", req.SealerID, "epoch", req.Epoch, "error", err)
-	}
-
+	// Answer first (plan-2609-12 ruling 1): the sealer needs only the seed.
+	// Registering the standing key with the coordinator is the outbox's job,
+	// off this request's context and deadline.
 	a.writeCBOR(w, http.StatusOK, DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion, APIVersion: delegateSeedAPIVersion})
+
+	if a.registrations != nil {
+		if err := a.registrations.enqueue(req.SealerID, req.Epoch, keyVersion, seed); err != nil {
+			a.Logger.Error("delegate key registration not queued",
+				"sealerId", req.SealerID, "epoch", req.Epoch, "kmsKeyVersion", keyVersion, "error", err)
+		}
+	}
+}
+
+// disambiguateVersionNotFound resolves a MacSign NotFound by checking the
+// parent CryptoKey. Parent missing: errDelegateSeedKeyMisconfigured. Parent
+// present: errDelegateSeedEpochRetired, so 409 means exactly "the key exists
+// and version e is unusable". Any other failure of the check is returned
+// as-is (502).
+func (a *API) disambiguateVersionNotFound(ctx context.Context, notFound error) error {
+	get := a.getDelegateSeedKeyOverride
+	if get == nil {
+		get = kmsGetDelegateSeedKey
+	}
+	if _, err := get(ctx, a.cfg.DelegateSeedMacKey); err != nil {
+		if errors.Is(err, errDelegateSeedKeyMisconfigured) {
+			return err
+		}
+		return fmt.Errorf("check parent key after %v: %w", notFound, err)
+	}
+	return fmt.Errorf("%w: %v", errDelegateSeedEpochRetired, notFound)
 }
 
 // kmsMacSignVersion computes the HMAC of data under one explicit
-// CryptoKeyVersion. KMS refuses a version that is not ENABLED (FailedPrecondition)
-// or does not exist (NotFound); both mean the epoch is retired.
+// CryptoKeyVersion. KMS refuses a version that is not ENABLED
+// (FailedPrecondition: the epoch is retired) or does not exist (NotFound:
+// ambiguous until the parent key is checked, see disambiguateVersionNotFound).
 func kmsMacSignVersion(ctx context.Context, versionName string, data []byte) ([]byte, string, error) {
 	client, err := kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
 	if err != nil {
@@ -173,24 +217,21 @@ func kmsMacSignVersion(ctx context.Context, versionName string, data []byte) ([]
 	defer client.Close()
 	resp, err := client.MacSign(ctx, &kmspb.MacSignRequest{Name: versionName, Data: data})
 	if err != nil {
-		if kmsErrIsRetiredVersion(err) {
-			return nil, "", fmt.Errorf("%w: %s: %v", errDelegateSeedEpochRetired, versionName, err)
-		}
-		return nil, "", fmt.Errorf("kms MacSign: %w", err)
+		return nil, "", kmsMacSignError(versionName, err)
 	}
 	return resp.Mac, resp.Name, nil
 }
 
-// kmsErrIsRetiredVersion reports whether a MacSign error means the named
-// version cannot be used at all (as opposed to a transient or auth failure).
-func kmsErrIsRetiredVersion(err error) bool {
-	st, ok := status.FromError(err)
-	if !ok {
-		return false
+// kmsMacSignError classifies a MacSign failure for one version: NotFound is
+// errDelegateSeedVersionNotFound (ambiguous between key and version),
+// FailedPrecondition (version not ENABLED) is errDelegateSeedEpochRetired, and
+// anything else is a KMS failure the handler answers with 502.
+func kmsMacSignError(versionName string, err error) error {
+	switch status.Code(err) {
+	case codes.NotFound:
+		return fmt.Errorf("%w: %s: %v", errDelegateSeedVersionNotFound, versionName, err)
+	case codes.FailedPrecondition:
+		return fmt.Errorf("%w: %s: %v", errDelegateSeedEpochRetired, versionName, err)
 	}
-	switch st.Code() {
-	case codes.NotFound, codes.FailedPrecondition:
-		return true
-	}
-	return false
+	return fmt.Errorf("kms MacSign: %w", err)
 }
