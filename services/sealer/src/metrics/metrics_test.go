@@ -44,3 +44,22 @@ func TestObserveCheckpointLag(t *testing.T) {
 		t.Fatalf("expected 1 registered histogram series, got %d", count)
 	}
 }
+
+// TestSetDelegateKeyRegistered covers the plan-2609-12 slice 05 gauge: one
+// series per epoch, 1 when registered on every coordinator shard, else 0.
+func TestSetDelegateKeyRegistered(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+
+	m.SetDelegateKeyRegistered(2, false)
+	if got := testutil.ToFloat64(m.DelegateKeyRegistered.WithLabelValues("2")); got != 0 {
+		t.Errorf("epoch 2 = %v, want 0", got)
+	}
+	m.SetDelegateKeyRegistered(2, true)
+	if got := testutil.ToFloat64(m.DelegateKeyRegistered.WithLabelValues("2")); got != 1 {
+		t.Errorf("epoch 2 = %v, want 1", got)
+	}
+	if n := testutil.CollectAndCount(m.DelegateKeyRegistered, "sealer_delegate_key_registered"); n != 1 {
+		t.Errorf("series = %d, want 1", n)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/forestrie/arbor/services/sealer"
@@ -98,8 +99,12 @@ func main() {
 	metricsRegistry := prometheus.NewRegistry()
 	metricsHandles := metrics.NewMetrics(metricsRegistry)
 
+	// The health server starts before the first delegate key load (which can
+	// block on an unreachable custodian), so /readyz reads the readiness
+	// handle through a pointer that is nil, and not ready, until then.
+	var delegateKeyReadiness atomic.Pointer[sealer.DelegateKeyReadiness]
 	healthMux := http.NewServeMux()
-	setupHealthChecks(healthMux)
+	setupHealthChecks(healthMux, &delegateKeyReadiness)
 	healthMux.Handle("/metrics", metrics.Handler(metricsRegistry))
 
 	healthServer := &http.Server{
@@ -123,7 +128,11 @@ func main() {
 	// the custodian is not yet up, so sealer and custodian start in any order
 	// (Phase J1). Deterministic re-derivation means a restart re-loads the same
 	// keys, so outstanding advance certificates stay valid.
-	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr)
+	//
+	// /readyz answers 503 until the standing keys are installed and the
+	// coordinator reports the current key registered (plan-2609-12 slice 05),
+	// so a rollout whose new pod cannot seal keeps the previous pod.
+	delegateKeyReadiness.Store(sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr, metricsHandles))
 
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	go queueConsumer.ConsumeQueue(ctx)
@@ -150,13 +159,22 @@ func main() {
 	slog.Warn("service stopped")
 }
 
-func setupHealthChecks(mux *http.ServeMux) {
+func setupHealthChecks(mux *http.ServeMux, delegateKeys *atomic.Pointer[sealer.DelegateKeyReadiness]) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		ready, reason := false, "starting"
+		if dk := delegateKeys.Load(); dk != nil {
+			ready, reason = dk.Ready()
+		}
+		if !ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready: " + reason))
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})

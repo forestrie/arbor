@@ -104,10 +104,12 @@ type Config struct {
 	DelegateSeedCustodianToken string
 	DelegateSeedLocal          []byte
 
-	// CoordinatorRegisterURL is where the sealer POSTs its advertised delegate
-	// key (POST /api/sealer/delegate-keys). Best-effort; falls back to
-	// TrustRootURL (the coordinator seam). Registration failure never blocks
-	// boot — the coordinator can also learn the key at issuance time.
+	// CoordinatorRegisterURL/Token address the delegation coordinator; they
+	// fall back to TrustRootURL/Token (the coordinator seam). The sealer never
+	// registers its delegate keys (the custodian does, with a voucher); it
+	// reads GET /api/sealer/delegate-keys/{pubkeyHash} to gate readiness on
+	// that registration (plan-2609-12 slice 05) and pages
+	// /api/delegations/active for resync.
 	CoordinatorRegisterURL   string
 	CoordinatorRegisterToken string
 

@@ -73,7 +73,14 @@ func (p custodianSeedProvider) Seed(ctx context.Context, epoch uint32) ([]byte, 
 		return nil, fmt.Errorf("%w: epoch %d (custodian status=409)", errDelegateSeedEpochRetired, epoch)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("delegate-seed status=%d", resp.StatusCode)
+		// The problem says which hold this is, e.g. 501 while the custodian
+		// has not verified its MAC key (plan-2609-12 ruling 2).
+		var problem struct {
+			Title  string `cbor:"title"`
+			Detail string `cbor:"detail"`
+		}
+		_ = cbor.Unmarshal(respBytes, &problem)
+		return nil, fmt.Errorf("delegate-seed status=%d title=%q detail=%q", resp.StatusCode, problem.Title, problem.Detail)
 	}
 	var out delegateSeedResponse
 	if err := cbor.Unmarshal(respBytes, &out); err != nil {
