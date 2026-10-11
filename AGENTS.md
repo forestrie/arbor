@@ -2,7 +2,7 @@
 
 Arbor: Go microservices for Forestrie (ranger, sealer, custodian, univocity
 HTTP service). Human setup: [README.md](README.md), [DEVELOPMENT.md](DEVELOPMENT.md).
-Platform glossary: [devdocs/glossary.md](../devdocs/glossary.md).
+Platform glossary: [protocol/glossary.md](https://github.com/forestrie/protocol/blob/main/glossary.md).
 
 ## Git worktrees
 
@@ -87,12 +87,12 @@ Sibling repos: **canopy** (SCRAPI Workers), **forest-1** (GKE/Flux), **univocity
 
 - **Build/test a service**: `cd services/<name> && go test ./...`
 - **Ranger locally**: configure env per `services/ranger/config.go`; health on `:9090`
-- **Deploy**: GitOps via arbor-flux; see [devdocs ops](../devdocs/ops/README.md)
+- **Deploy**: GitOps via arbor-flux; see [devdocs ops](https://github.com/forestrie/devdocs/blob/main/ops/README.md) (private)
 
 ## Gotchas (critical)
 
 - Platform ADRs/ARCs live in **devdocs**, not this repo — see stubs under `docs/adr/`.
-- Grant store and `logId → R` uniqueness: [devdocs ADR-0035–0037](../devdocs/adr/).
+- Grant store and `logId → R` uniqueness: devdocs [ADR-0035](https://github.com/forestrie/devdocs/blob/main/archive/2603/adr/adr-0035-univocity-owned-grant-store-and-authority-correspondence.md), [ADR-0036](https://github.com/forestrie/devdocs/blob/main/archive/2603/adr/adr-0036-global-logid-r-uniqueness.md), [ADR-0037](https://github.com/forestrie/devdocs/blob/main/adr/adr-0037-forests-storage-and-uuid-log-ids.md) (private).
 - Never log raw secrets; ranger logs SHA-256 digests only.
 - Sealer resolves contract via univocity `GET /api/logs/{logId}/public-root`.
 
@@ -100,6 +100,7 @@ Sibling repos: **canopy** (SCRAPI Workers), **forest-1** (GKE/Flux), **univocity
 
 - **Agent index**: [docs/agents/README.md](docs/agents/README.md)
 - **Plans**: [docs/plans/README.md](docs/plans/README.md) (flat `docs/plan-*.md` today)
-- **Platform**: [../devdocs/](../devdocs/)
+- **Platform**: [devdocs](https://github.com/forestrie/devdocs) — architecture, arc/, adr/ (private)
 - **Extended layout / service detail**: [docs/agents/services.md](docs/agents/services.md)
-- **Cursor rules**: [branch-naming](.cursor/rules/branch-naming.mdc), [go-comments](.cursor/rules/go-comments.mdc), [types-single-responsibility](.cursor/rules/types-single-responsibility.mdc)
+- **Team rules and skills**: synced from [forestrie-agents](https://github.com/forestrie/forestrie-agents) (private) by `agentfiles sync` with `sync/arbor.manifest`. Rules in [.claude/rules/](.claude/rules/), skills in [.agents/skills/](.agents/skills/). Do not edit the copies; change forestrie-agents and re-sync.
+- **Cursor rules**: [.cursor/rules/](.cursor/rules/) (Cursor only; some are older hand-written copies of the team rules). Repo-specific: [types-single-responsibility](.cursor/rules/types-single-responsibility.mdc)
