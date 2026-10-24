@@ -70,9 +70,9 @@ func TestRequestLogDelegationLease_UnivocityAuthority(t *testing.T) {
 		HTTPClient: NewHTTPClient(nil),
 	}
 
-	lease, err := requestLogDelegationLeaseWithKeyPair(
+	lease, err := requestLogDelegationLease(
 		context.Background(), NewHTTPClient(nil), nil, resolver, issuer, nil,
-		"secp256r1", 30*time.Minute, logID, 7, 21, nil, nil,
+		"secp256r1", 30*time.Minute, logID, 7, 21, standingKeys(t),
 	)
 	if err != nil {
 		t.Fatalf("expected authority lease, got %v", err)
@@ -96,12 +96,12 @@ func TestRequestLogDelegationLease_UnivocityAuthorityUnresolved(t *testing.T) {
 	authSrv := newAuthorityServer(t, &rootPriv.PublicKey, http.StatusServiceUnavailable)
 	defer authSrv.Close()
 
-	_, err = requestLogDelegationLeaseWithKeyPair(
+	_, err = requestLogDelegationLease(
 		context.Background(), NewHTTPClient(nil), nil,
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		nil,
-		"secp256r1", 30*time.Minute, logID, 7, 21, nil, nil,
+		"secp256r1", 30*time.Minute, logID, 7, 21, standingKeys(t),
 	)
 	if err == nil {
 		t.Fatal("expected unresolved authority to fail")
@@ -124,12 +124,12 @@ func TestRequestLogDelegationLease_UnivocityAuthorityWrongKey(t *testing.T) {
 	authSrv := newAuthorityServer(t, &wrong.PublicKey, 0)
 	defer authSrv.Close()
 
-	_, err = requestLogDelegationLeaseWithKeyPair(
+	_, err = requestLogDelegationLease(
 		context.Background(), NewHTTPClient(nil), nil,
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		nil,
-		"secp256r1", 30*time.Minute, logID, 7, 21, nil, nil,
+		"secp256r1", 30*time.Minute, logID, 7, 21, standingKeys(t),
 	)
 	if err == nil {
 		t.Fatal("expected mismatched authority key to fail local verification")
@@ -167,12 +167,12 @@ func TestResolveAuthority_StatusClassification(t *testing.T) {
 func TestRequestLogDelegationLease_AuthorityNotFoundClassified(t *testing.T) {
 	srv := newAuthorityServer(t, nil, http.StatusNotFound)
 	defer srv.Close()
-	_, err := requestLogDelegationLeaseWithKeyPair(
+	_, err := requestLogDelegationLease(
 		context.Background(), NewHTTPClient(nil), nil,
 		&HTTPAuthorityResolver{BaseURL: srv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: srv.URL, Token: "x", HTTPClient: NewHTTPClient(nil)},
 		nil,
-		"secp256r1", 30*time.Minute, "2123456789abcdef0123456789abcdef", 7, 21, nil, nil,
+		"secp256r1", 30*time.Minute, "2123456789abcdef0123456789abcdef", 7, 21, standingKeys(t),
 	)
 	if err == nil {
 		t.Fatal("expected error")

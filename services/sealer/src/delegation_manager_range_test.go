@@ -54,6 +54,7 @@ func TestEnsureValidForLog_RejectsCachedLeaseOutsideRange(t *testing.T) {
 		time.Hour,
 		time.Minute,
 	)
+	mgr.SetDelegateKeys(standingKeys(t))
 	lease := &DelegationLease{
 		OnchainProof: &delegationcert.OnchainDelegationProof{
 			MMRStart: 0,

@@ -55,7 +55,7 @@ type ResyncManager struct {
 
 // activeLog mirrors one row of the coordinator GET /api/delegations/active
 // response. mmrEnd is the furthest authorized index (a hint), not necessarily
-// the head — with DELEGATION_RANGE_PAD it can sit ahead of the true head.
+// the head — an advance certificate's range can sit ahead of the true head.
 type activeLog struct {
 	LogIDHex32 string `json:"logIdHex32"`
 	ExpiresAt  int64  `json:"expiresAt"`

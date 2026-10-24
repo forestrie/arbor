@@ -64,7 +64,6 @@ func main() {
 		HTTPClient: httpClient,
 	}
 	leaseMgr := sealer.NewDelegationLeaseManager(trustRoot, issuer, 0, 0)
-	leaseMgr.SetRangePad(cfg.DelegationRangePad)
 	leaseMgr.SetMaxLeases(cfg.DelegationMaxLeases)
 	if cfg.ContractRPCURL != "" {
 		if v, err := sealer.NewRPCERC1271Verifier(cfg.ContractRPCURL); err != nil {
@@ -98,8 +97,11 @@ func main() {
 	metricsRegistry := prometheus.NewRegistry()
 	metricsHandles := metrics.NewMetrics(metricsRegistry)
 
+	// /readyz answers 503 until the standing delegate keys are installed.
+	keysInstalled := sealer.NewDelegateKeysInstalled()
+
 	healthMux := http.NewServeMux()
-	setupHealthChecks(healthMux)
+	setupHealthChecks(healthMux, keysInstalled)
 	healthMux.Handle("/metrics", metrics.Handler(metricsRegistry))
 
 	healthServer := &http.Server{
@@ -114,29 +116,40 @@ func main() {
 		}
 	}()
 
-	// Delegation-in-advance (ADR-0050 / plan-2607-20). DELEGATE_KEY_EPOCH is
-	// required and has no default (Validate rejects it unset, FOR-390): 0 is
-	// an explicit off, >= 1 an explicit on. When enabled, derive the standing delegate keys
-	// (epoch N and N-1) at boot from the custodian-gated seed and route lease
-	// issuance through them (Phase D). The custodian is required at boot (no
-	// on-demand degrade); StartDelegateKeysWithRetry retries in the background if
-	// the custodian is not yet up, so sealer and custodian start in any order
-	// (Phase J1). Deterministic re-derivation means a restart re-loads the same
-	// keys, so outstanding advance certificates stay valid.
-	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr)
+	// Delegation-in-advance (ADR-0050 / plan-2607-20) is the only delegation
+	// model: derive the standing delegate keys (epoch N and N-1) from the
+	// custodian-gated seed and route lease issuance through them (Phase D).
+	// StartDelegateKeysWithRetry retries in the background if the custodian is
+	// not yet up, so sealer and custodian start in any order (Phase J1).
+	// Deterministic re-derivation means a restart re-loads the same keys, so
+	// outstanding advance certificates stay valid.
+	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr, keysInstalled)
 
+	// Consume only once the standing keys are installed (devdocs plan-2609-12
+	// ruling D1 (a), slice 10). Until then the pod is not Ready and does no
+	// work, so a rollout whose new pod cannot load keys keeps the old pod
+	// sealing alone instead of running two consumers.
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
-	go queueConsumer.ConsumeQueue(ctx)
-
-	// Level-triggered resync (ADR-0007 phase-3 / plan-2607-04): the correctness
-	// backstop to the edge-triggered queue above. Disabled unless
-	// RESYNC_MASSIF_HEIGHTS is set; stays strictly pull-only (re-drives seals
-	// in-process, never publishes to the queue).
-	if resyncMgr, err := sealer.NewResyncManager(cfg, httpClient, logger, leaseMgr, metricsHandles); err != nil {
+	resyncMgr, err := sealer.NewResyncManager(cfg, httpClient, logger, leaseMgr, metricsHandles)
+	if err != nil {
 		slog.Error("failed to build resync manager; resync disabled", "error", err)
-	} else {
-		go resyncMgr.Run(ctx)
 	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keysInstalled.Done():
+		}
+		slog.Info("standing delegate keys installed; starting queue consumer")
+		go queueConsumer.ConsumeQueue(ctx)
+		// Level-triggered resync (ADR-0007 phase-3 / plan-2607-04): the
+		// correctness backstop to the edge-triggered queue. Disabled unless
+		// RESYNC_MASSIF_HEIGHTS is set; stays strictly pull-only (re-drives
+		// seals in-process, never publishes to the queue).
+		if resyncMgr != nil {
+			go resyncMgr.Run(ctx)
+		}
+	}()
 
 	<-ctx.Done()
 	slog.Info("shutdown signal received")
@@ -150,16 +163,13 @@ func main() {
 	slog.Warn("service stopped")
 }
 
-func setupHealthChecks(mux *http.ServeMux) {
+func setupHealthChecks(mux *http.ServeMux, keysInstalled *sealer.DelegateKeysInstalled) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ready"))
-	})
+	mux.HandleFunc("/readyz", keysInstalled.ReadyzHandler())
 
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{

@@ -68,11 +68,11 @@ func TestRequestLogDelegationLease_BYOKCoordinatorStretch(t *testing.T) {
 	}
 
 	curve := delegationcert.Secp256r1
-	_, delegatedPub, err := generateEphemeralKey(curve)
+	delegatedPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	delegatedPubCBOR, err := delegatedPublicKeyCBOR(curve, delegatedPub)
+	delegatedPubCBOR, err := delegatedPublicKeyCBOR(curve, &delegatedPriv.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestRequestLogDelegationLease_BYOKCoordinatorStretch(t *testing.T) {
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,
-		DelegatedPublicKey:  delegatedPub,
+		DelegatedPublicKey:  &delegatedPriv.PublicKey,
 		RequestedTTLSeconds: 1800,
 	}, nil); err != nil {
 		t.Fatalf("verify delegation lease: %v", err)

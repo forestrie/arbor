@@ -141,7 +141,7 @@ func VerifyDelegationLease(
 			return nil, fmt.Errorf("delegation cert is not bound to a held delegate key")
 		}
 	} else if !delegationcert.DelegatedKeyMatches(delegated, req.DelegatedPublicKey) {
-		return nil, fmt.Errorf("delegated public key does not match ephemeral key")
+		return nil, fmt.Errorf("delegated public key does not match the requested key")
 	}
 
 	now := time.Now().UTC()

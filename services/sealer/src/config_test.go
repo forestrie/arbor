@@ -57,7 +57,8 @@ func TestConfigValidate_requiresTrustRootTokenForCoordinator(t *testing.T) {
 		DelegationIssuerURL:   "http://custodian:9092",
 		DelegationIssuerToken: "issuer",
 		DelegationKeyCurve:    "secp256r1",
-		DelegateKeyEpochRaw:   "0",
+		DelegateKeyEpochRaw:   "1",
+		DelegateSeedLocal:     []byte("seed"),
 		R2URL:                 "https://r2.example",
 		AWSAccessKeyID:        "key",
 		AWSSecretAccessKey:    "secret",
@@ -71,9 +72,9 @@ func TestConfigValidate_requiresTrustRootTokenForCoordinator(t *testing.T) {
 	}
 }
 
-// FOR-390: DELEGATE_KEY_EPOCH has no in-code default. A deployment that never
-// states it must fail to start rather than silently inherit "disabled" — 0 and
-// >= 1 are both deliberate operational postures.
+// FOR-390: DELEGATE_KEY_EPOCH has no in-code default, and since on-demand
+// delegation was removed (devdocs plan-2609-12 slice 10) it must be >= 1:
+// unset, 0 and unparseable all refuse to start.
 func TestConfigValidate_requiresDelegateKeyEpoch(t *testing.T) {
 	base := func() Config {
 		return Config{
@@ -88,6 +89,7 @@ func TestConfigValidate_requiresDelegateKeyEpoch(t *testing.T) {
 			R2URL:                 "https://r2.example",
 			AWSAccessKeyID:        "key",
 			AWSSecretAccessKey:    "secret",
+			DelegateSeedLocal:     []byte("seed"),
 		}
 	}
 
@@ -104,9 +106,15 @@ func TestConfigValidate_requiresDelegateKeyEpoch(t *testing.T) {
 		t.Fatal("expected error when DELEGATE_KEY_EPOCH is unparseable")
 	}
 
-	// Explicit 0 (delegation-in-advance off) is valid: the point is that it be
-	// stated, not that it be non-zero.
-	for _, raw := range []string{"0", "1", "7"} {
+	cfg = base()
+	cfg.DelegateKeyEpochRaw = "0"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error when DELEGATE_KEY_EPOCH is 0")
+	} else if !strings.Contains(err.Error(), "on-demand delegation was removed") {
+		t.Fatalf("error should say why 0 is refused, got: %v", err)
+	}
+
+	for _, raw := range []string{"1", "7"} {
 		cfg = base()
 		cfg.DelegateKeyEpochRaw = raw
 		if err := cfg.Validate(); err != nil {
@@ -133,5 +141,31 @@ func TestLoadConfig_delegateKeyEpochNotDefaulted(t *testing.T) {
 	t.Setenv("DELEGATE_KEY_EPOCH", "2")
 	if got := LoadConfig().DelegateKeyEpoch; got != 2 {
 		t.Fatalf("DelegateKeyEpoch=%d want 2", got)
+	}
+}
+
+// Epoch >= 1 needs a seed source; without one the sealer could never install
+// keys, so it refuses to start rather than retry forever.
+func TestConfigValidate_requiresDelegateSeedSource(t *testing.T) {
+	cfg := Config{
+		QueueURL:              "https://queue.example/pull",
+		QueueToken:            "qt",
+		QueueBatchSize:        1,
+		TrustRootURL:          "http://custodian:9092",
+		CustodianURL:          "http://custodian:9092",
+		DelegationIssuerURL:   "http://custodian:9092",
+		DelegationIssuerToken: "issuer",
+		DelegationKeyCurve:    "secp256r1",
+		DelegateKeyEpochRaw:   "1",
+		R2URL:                 "https://r2.example",
+		AWSAccessKeyID:        "key",
+		AWSSecretAccessKey:    "secret",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error with no delegate seed source")
+	}
+	cfg.DelegateSeedCustodianURL = "http://custodian:9092"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("custodian seed source should be valid, got: %v", err)
 	}
 }

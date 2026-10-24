@@ -6,98 +6,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
+// pendingIssuerStub records every issuance request and answers each with
+// ErrDelegationPending, as the coordinator does while an owner has not signed.
 type pendingIssuerStub struct {
-	requests [][]byte
+	requests []IssuerLeaseRequest
 }
 
 func (s *pendingIssuerStub) IssueForLog(_ context.Context, req IssuerLeaseRequest) (*IssuerLeaseResponse, error) {
-	cp := append([]byte(nil), req.DelegatedPublicKey...)
-	s.requests = append(s.requests, cp)
+	s.requests = append(s.requests, req)
 	return nil, ErrDelegationPending
-}
-
-func TestDelegationLeaseManager_ReusesPendingEphemeralKey(t *testing.T) {
-	logID := "0123456789abcdef0123456789abcdef"
-	issuer := &pendingIssuerStub{}
-	mgr := NewDelegationLeaseManager(
-		&stubTrustRootClient{},
-		issuer,
-		time.Hour,
-		time.Minute,
-	)
-
-	for i := 0; i < 2; i++ {
-		_, err := mgr.EnsureValidForLog(
-			context.Background(),
-			NewHTTPClient(nil),
-			nil,
-			"secp256r1",
-			logID,
-			0,
-			1,
-		)
-		if !errors.Is(err, ErrDelegationPending) {
-			t.Fatalf("attempt %d: got %v want ErrDelegationPending", i, err)
-		}
-	}
-
-	if len(issuer.requests) != 2 {
-		t.Fatalf("issuer calls = %d want 2", len(issuer.requests))
-	}
-	if string(issuer.requests[0]) != string(issuer.requests[1]) {
-		t.Fatal("expected pending retry to reuse delegated public key")
-	}
-}
-
-func TestDelegationLeaseManager_RefreshesPendingKeyAfterTTL(t *testing.T) {
-	logID := "1123456789abcdef0123456789abcdef"
-	issuer := &pendingIssuerStub{}
-	mgr := NewDelegationLeaseManager(
-		&stubTrustRootClient{},
-		issuer,
-		time.Hour,
-		time.Minute,
-	)
-
-	_, err := mgr.EnsureValidForLog(
-		context.Background(),
-		NewHTTPClient(nil),
-		nil,
-		"secp256r1",
-		logID,
-		0,
-		1,
-	)
-	if !errors.Is(err, ErrDelegationPending) {
-		t.Fatalf("got %v want ErrDelegationPending", err)
-	}
-
-	mgr.pendingKeys[logID].createdAt = time.Now().Add(-2 * time.Hour)
-
-	_, err = mgr.EnsureValidForLog(
-		context.Background(),
-		NewHTTPClient(nil),
-		nil,
-		"secp256r1",
-		logID,
-		0,
-		1,
-	)
-	if !errors.Is(err, ErrDelegationPending) {
-		t.Fatalf("got %v want ErrDelegationPending", err)
-	}
-
-	if len(issuer.requests) != 2 {
-		t.Fatalf("issuer calls = %d want 2", len(issuer.requests))
-	}
-	if string(issuer.requests[0]) == string(issuer.requests[1]) {
-		t.Fatal("expected expired pending key to be replaced")
-	}
 }
 
 func TestHTTPDelegationIssuer_MapsMaterialMissing503ToPending(t *testing.T) {

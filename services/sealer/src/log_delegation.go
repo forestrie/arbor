@@ -2,9 +2,6 @@ package sealer
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,32 +11,11 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// RequestLogDelegationLease obtains a verified delegation lease via issuer + trust root seams.
-func RequestLogDelegationLease(
-	ctx context.Context,
-	httpClient *HTTPClient,
-	trustRoot TrustRootClient,
-	issuer DelegationIssuer,
-	curveRaw string,
-	ttl time.Duration,
-	logIdHex string,
-	mmrStart, mmrEnd uint64,
-) (*DelegationLease, error) {
-	return requestLogDelegationLeaseWithKeyPair(
-		ctx, httpClient, trustRoot, nil, issuer, nil, curveRaw, ttl,
-		logIdHex, mmrStart, mmrEnd, nil, nil,
-	)
-}
-
-// DelegatedKeyPair is the private/public checkpoint keypair submitted for
-// issuer authorization. BYOK pending retries reuse this process-local keypair
-// until a lease is issued or the pending cache expires.
-type DelegatedKeyPair struct {
-	Private *ecdsa.PrivateKey
-	Public  *ecdsa.PublicKey
-}
-
-func requestLogDelegationLeaseWithKeyPair(
+// requestLogDelegationLease obtains a verified delegation lease for the
+// current standing key in heldKeys over [mmrStart, mmrEnd], via the issuer
+// and trust root (or authority resolver) seams. The returned certificate may
+// be bound to any held key (rotation overlap); the lease signs with that one.
+func requestLogDelegationLease(
 	ctx context.Context,
 	httpClient *HTTPClient,
 	trustRoot TrustRootClient,
@@ -50,7 +26,6 @@ func requestLogDelegationLeaseWithKeyPair(
 	ttl time.Duration,
 	logIdHex string,
 	mmrStart, mmrEnd uint64,
-	keyPair *DelegatedKeyPair,
 	heldKeys *DelegateKeySet,
 ) (*DelegationLease, error) {
 	if httpClient == nil {
@@ -68,27 +43,24 @@ func requestLogDelegationLeaseWithKeyPair(
 	if strings.TrimSpace(logIdHex) == "" {
 		return nil, fmt.Errorf("log ID is empty")
 	}
+	if heldKeys == nil || heldKeys.Current() == nil {
+		return nil, ErrNoStandingDelegateKeys
+	}
 
 	curve, err := delegationcert.ParseCurve(curveRaw)
 	if err != nil {
 		return nil, err
 	}
 
-	if keyPair == nil {
-		priv, pub, err := generateEphemeralKey(curve)
-		if err != nil {
-			return nil, err
-		}
-		keyPair = &DelegatedKeyPair{Private: priv, Public: pub}
+	if curve != delegationcert.Secp256r1 {
+		return nil, fmt.Errorf("unsupported curve %q (only secp256r1)", curve)
 	}
-	if keyPair.Private == nil || keyPair.Public == nil {
-		return nil, fmt.Errorf("delegated keypair is incomplete")
-	}
+	requested := &heldKeys.Current().PublicKey
 
 	x := make([]byte, 32)
 	y := make([]byte, 32)
-	keyPair.Public.X.FillBytes(x)
-	keyPair.Public.Y.FillBytes(y)
+	requested.X.FillBytes(x)
+	requested.Y.FillBytes(y)
 	delegatedKey, err := delegationcert.NewDelegatedCoseKey(curve, x, y)
 	if err != nil {
 		return nil, fmt.Errorf("build delegated key: %w", err)
@@ -153,36 +125,30 @@ func requestLogDelegationLeaseWithKeyPair(
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,
-		DelegatedPublicKey:  keyPair.Public,
+		DelegatedPublicKey:  requested,
 		RequestedTTLSeconds: uint64(ttl.Seconds()),
-		CoverageOK:          heldKeys != nil,
+		CoverageOK:          true,
 		HeldKeys:            heldKeys,
 	}, erc1271)
 	if err != nil {
 		return nil, fmt.Errorf("verify delegation lease: %w", err)
 	}
 
-	// Signing key resolution (B4): in delegation-in-advance mode the returned
-	// certificate may be bound to a standing key other than the one requested
-	// (rotation overlap), so resolve the private key from the certificate's own
-	// bound key rather than assuming the request keypair.
-	signingPriv := keyPair.Private
-	signingPub := keyPair.Public
-	if heldKeys != nil {
-		delegated, _, err := delegationcert.DelegatedKeyFromCertificate(issuerResp.Certificate)
-		if err != nil {
-			return nil, fmt.Errorf("read cert delegated key: %w", err)
-		}
-		certPub, err := ecdsaFromDelegatedCoseKey(delegated)
-		if err != nil {
-			return nil, fmt.Errorf("decode cert delegated key: %w", err)
-		}
-		resolved := heldKeys.KeyFor(certPub)
-		if resolved == nil {
-			return nil, fmt.Errorf("no held delegate key for the issued certificate")
-		}
-		signingPriv = resolved
-		signingPub = &resolved.PublicKey
+	// Signing key resolution (B4): the returned certificate may be bound to a
+	// standing key other than the one requested (rotation overlap), so resolve
+	// the private key from the certificate's own bound key rather than
+	// assuming the requested one.
+	delegated, _, err := delegationcert.DelegatedKeyFromCertificate(issuerResp.Certificate)
+	if err != nil {
+		return nil, fmt.Errorf("read cert delegated key: %w", err)
+	}
+	certPub, err := ecdsaFromDelegatedCoseKey(delegated)
+	if err != nil {
+		return nil, fmt.Errorf("decode cert delegated key: %w", err)
+	}
+	signingPriv := heldKeys.KeyFor(certPub)
+	if signingPriv == nil {
+		return nil, fmt.Errorf("no held delegate key for the issued certificate")
 	}
 
 	return &DelegationLease{
@@ -191,7 +157,7 @@ func requestLogDelegationLeaseWithKeyPair(
 		Info:            info,
 		Curve:           curve,
 		PrivateKey:      signingPriv,
-		PublicKey:       signingPub,
+		PublicKey:       &signingPriv.PublicKey,
 		IssuedAt:        issuerResp.IssuedAt,
 		ExpiresAt:       issuerResp.ExpiresAt,
 		RootLogIDHex:    binding.RootLogIDHex,
@@ -209,17 +175,6 @@ func marshalDelegatedPublicKeyCBOR(key *delegationcert.DelegatedCoseKey) ([]byte
 		return nil, fmt.Errorf("create delegated key cbor mode: %w", err)
 	}
 	return encMode.Marshal(key.ToCBORMap())
-}
-
-func generateEphemeralKey(curve delegationcert.Curve) (*ecdsa.PrivateKey, *ecdsa.PublicKey, error) {
-	if curve != delegationcert.Secp256r1 {
-		return nil, nil, fmt.Errorf("unsupported curve %q (only secp256r1)", curve)
-	}
-	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("generate P-256 key: %w", err)
-	}
-	return k, &k.PublicKey, nil
 }
 
 // algMatchesCurve checks if a trust-root algorithm string matches the delegated curve.
