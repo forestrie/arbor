@@ -28,7 +28,7 @@ import (
 // protocol and re-copy.
 const (
 	voucherVectorPath   = "testdata/delegate-key-voucher.json"
-	voucherVectorSHA256 = "48e7b6b12e3f0f82bc83ee1ce2a36b8947a7a1359390d51ef0f0849b6e57727d"
+	voucherVectorSHA256 = "9dce83715cbdacb23c5f71e4e1fc63fb6e7c57b34ab84c80e80f601f1eb7b8c1"
 )
 
 type voucherVector struct {
@@ -45,11 +45,18 @@ type voucherVector struct {
 		PublicKeyXYHex string `json:"public_key_xy_hex"`
 		PrivateKeyDHex string `json:"private_key_d_hex"`
 	} `json:"registrar"`
+	Vouchers []voucherVectorEntry `json:"vouchers"`
+}
+
+// voucherVectorEntry is one voucher. Claims.NotAfter is nil when the voucher
+// has no claim 4, and points at 0 for an explicit 4: 0.
+type voucherVectorEntry struct {
+	Name   string `json:"name"`
 	Claims struct {
 		SealerID         string `json:"sealer_id"`
 		Epoch            uint32 `json:"epoch"`
 		PublicKeyCoseHex string `json:"public_key_cose_hex"`
-		NotAfter         int64  `json:"not_after"`
+		NotAfter         *int64 `json:"not_after,omitempty"`
 	} `json:"claims"`
 	PayloadHex string              `json:"payload_hex"`
 	VoucherHex string              `json:"voucher_hex"`
@@ -61,6 +68,19 @@ type voucherVectorCase struct {
 	Now             int64  `json:"now"`
 	RequireNotAfter bool   `json:"require_not_after"`
 	Result          string `json:"result"`
+}
+
+// vectorClaimsPayload encodes an entry's claims the way the vector states
+// them: claim 4 only when present.
+func vectorClaimsPayload(t *testing.T, e voucherVectorEntry) []byte {
+	t.Helper()
+	m := map[int]any{1: e.Claims.SealerID, 2: e.Claims.Epoch, 3: mustHex(t, e.Claims.PublicKeyCoseHex)}
+	if e.Claims.NotAfter != nil {
+		m[4] = uint64(*e.Claims.NotAfter)
+	}
+	b, err := canonicalVoucherCBOR.Marshal(m)
+	require.NoError(t, err)
+	return b
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -97,35 +117,47 @@ func TestDelegateKeyVoucherVector(t *testing.T) {
 	require.Len(t, xy, 64)
 	registrar := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(xy[:32]), Y: new(big.Int).SetBytes(xy[32:])}
 
-	coseKey := mustHex(t, v.Claims.PublicKeyCoseHex)
-	delegate := coseKeyToECDSA(t, coseKey)
-	canonical, err := delegatekeys.CoseKeyBytes(delegate)
-	require.NoError(t, err)
-	require.Equal(t, coseKey, canonical, "the vector's COSE_Key is the canonical encoding")
+	require.Len(t, v.Vouchers, 3, "claim 4 set, absent, and explicit 0")
+	for _, e := range v.Vouchers {
+		coseKey := mustHex(t, e.Claims.PublicKeyCoseHex)
+		delegate := coseKeyToECDSA(t, coseKey)
+		canonical, err := delegatekeys.CoseKeyBytes(delegate)
+		require.NoError(t, err)
+		require.Equal(t, coseKey, canonical, "%s: the COSE_Key is the canonical encoding", e.Name)
 
-	claims := DelegateKeyVoucherClaims{SealerID: v.Claims.SealerID, Epoch: v.Claims.Epoch, PublicKey: delegate, NotAfter: v.Claims.NotAfter}
-	payload, err := encodeVoucherClaims(claims)
-	require.NoError(t, err)
-	require.Equal(t, v.PayloadHex, hex.EncodeToString(payload), "builder payload matches the vector")
+		payload := vectorClaimsPayload(t, e)
+		require.Equal(t, e.PayloadHex, hex.EncodeToString(payload), "%s: claims re-encode to the payload", e.Name)
+		want := DelegateKeyVoucherClaims{SealerID: e.Claims.SealerID, Epoch: e.Claims.Epoch, PublicKey: delegate}
+		if e.Claims.NotAfter != nil && *e.Claims.NotAfter > 0 {
+			// The production builder issues only this shape.
+			want.NotAfter = *e.Claims.NotAfter
+			built, err := encodeVoucherClaims(want)
+			require.NoError(t, err)
+			require.Equal(t, e.PayloadHex, hex.EncodeToString(built), "%s: builder payload matches", e.Name)
+		}
 
-	var u cose.UntaggedSign1Message
-	require.NoError(t, u.UnmarshalCBOR(mustHex(t, v.VoucherHex)))
-	require.Equal(t, v.PayloadHex, hex.EncodeToString(u.Payload), "voucher signs the vector payload")
+		var u cose.UntaggedSign1Message
+		require.NoError(t, u.UnmarshalCBOR(mustHex(t, e.VoucherHex)))
+		require.Equal(t, e.PayloadHex, hex.EncodeToString(u.Payload), "%s: voucher signs the payload", e.Name)
 
-	require.NotEmpty(t, v.Cases)
-	for _, c := range v.Cases {
-		notAfter, err := VerifyDelegateKeyVoucher(mustHex(t, v.VoucherHex), registrar, claims,
-			time.Unix(c.Now, 0), VerifyDelegateKeyVoucherOptions{RequireNotAfter: c.RequireNotAfter})
-		switch c.Result {
-		case "ok":
-			require.NoError(t, err, c.Name)
-			require.Equal(t, v.Claims.NotAfter, notAfter, c.Name)
-		case "expired":
-			require.True(t, errors.Is(err, ErrVoucherExpired), "%s: %v", c.Name, err)
-		case "not_after_missing":
-			require.True(t, errors.Is(err, ErrVoucherNotAfterMissing), "%s: %v", c.Name, err)
-		default:
-			t.Fatalf("%s: unknown result %q", c.Name, c.Result)
+		require.NotEmpty(t, e.Cases)
+		for _, c := range e.Cases {
+			name := e.Name + ": " + c.Name
+			notAfter, err := VerifyDelegateKeyVoucher(mustHex(t, e.VoucherHex), registrar, want,
+				time.Unix(c.Now, 0), VerifyDelegateKeyVoucherOptions{RequireNotAfter: c.RequireNotAfter})
+			switch c.Result {
+			case "ok":
+				require.NoError(t, err, name)
+				if e.Claims.NotAfter != nil {
+					require.Equal(t, *e.Claims.NotAfter, notAfter, name)
+				}
+			case "expired":
+				require.True(t, errors.Is(err, ErrVoucherExpired), "%s: %v", name, err)
+			case "not_after_missing":
+				require.True(t, errors.Is(err, ErrVoucherNotAfterMissing), "%s: %v", name, err)
+			default:
+				t.Fatalf("%s: unknown result %q", name, c.Result)
+			}
 		}
 	}
 }
@@ -151,34 +183,57 @@ func TestGenerateDelegateKeyVoucherVector(t *testing.T) {
 	require.NoError(t, err)
 
 	const notAfter = int64(1_800_086_400)
-	claims := DelegateKeyVoucherClaims{SealerID: "sealer-vector", Epoch: 2, PublicKey: delegatePub(t, 2), NotAfter: notAfter}
-	voucher, err := BuildDelegateKeyVoucherWithSigner(claims, kid, signer)
+	pub := delegatePub(t, 2)
+	coseKey, err := delegatekeys.CoseKeyBytes(pub)
 	require.NoError(t, err)
-	payload, err := encodeVoucherClaims(claims)
-	require.NoError(t, err)
-	coseKey, err := delegatekeys.CoseKeyBytes(claims.PublicKey)
-	require.NoError(t, err)
+	entry := func(name string, claim4 *int64, cases []voucherVectorCase) voucherVectorEntry {
+		var e voucherVectorEntry
+		e.Name = name
+		e.Claims.SealerID = "sealer-vector"
+		e.Claims.Epoch = 2
+		e.Claims.PublicKeyCoseHex = hex.EncodeToString(coseKey)
+		e.Claims.NotAfter = claim4
+		payload := vectorClaimsPayload(t, e)
+		var voucher []byte
+		if claim4 != nil && *claim4 > 0 {
+			// The production path, for the voucher the custodian issues.
+			voucher, err = BuildDelegateKeyVoucherWithSigner(
+				DelegateKeyVoucherClaims{SealerID: "sealer-vector", Epoch: 2, PublicKey: pub, NotAfter: *claim4}, kid, signer)
+			require.NoError(t, err)
+		} else {
+			voucher = signRawVoucher(t, signer, kid, payload)
+		}
+		e.PayloadHex = hex.EncodeToString(payload)
+		e.VoucherHex = hex.EncodeToString(voucher)
+		e.Cases = cases
+		return e
+	}
+	na, zero := notAfter, int64(0)
 
 	var v voucherVector
 	v.Version = 1
-	v.Description = "Delegate-key registrar voucher: an untagged COSE_Sign1 (ES256) over the canonical int-keyed claims map {1: sealerId, 2: epoch, 3: delegate COSE_Key, 4: notAfter}, with the registrar key that signed it and expiry cases (plan-2609-12 slice 07)."
-	v.Generator = "forestrie/arbor services/custodian/src/voucher_vector_test.go TestGenerateDelegateKeyVoucherVector (BuildDelegateKeyVoucherWithSigner)"
+	v.Description = "Delegate-key registrar vouchers: untagged COSE_Sign1 (ES256) over the canonical int-keyed claims map {1: sealerId, 2: epoch, 3: delegate COSE_Key, 4: notAfter}, with the registrar key that signed them and expiry cases: claim 4 set, claim 4 absent (issued before it existed), and an explicit claim 4 of 0 (present, so expired) (plan-2609-12 slice 07)."
+	v.Generator = "forestrie/arbor services/custodian/src/voucher_vector_test.go TestGenerateDelegateKeyVoucherVector"
 	v.Conventions.Hex = "unprefixed lowercase"
-	v.Conventions.NotAfter = "claim 4, Unix seconds"
-	v.Conventions.Now = "Unix seconds; a voucher is expired when now >= not_after"
+	v.Conventions.NotAfter = "claim 4, Unix seconds; omitted from claims when the voucher has no claim 4"
+	v.Conventions.Now = "Unix seconds; a voucher with claim 4 is expired when now >= not_after"
 	v.Registrar.Alg = "ES256"
 	v.Registrar.PublicKeyXYHex = hex.EncodeToString(append(priv.PublicKey.X.FillBytes(make([]byte, 32)), priv.PublicKey.Y.FillBytes(make([]byte, 32))...))
 	v.Registrar.PrivateKeyDHex = hex.EncodeToString(d[:])
-	v.Claims.SealerID = claims.SealerID
-	v.Claims.Epoch = claims.Epoch
-	v.Claims.PublicKeyCoseHex = hex.EncodeToString(coseKey)
-	v.Claims.NotAfter = notAfter
-	v.PayloadHex = hex.EncodeToString(payload)
-	v.VoucherHex = hex.EncodeToString(voucher)
-	v.Cases = []voucherVectorCase{
-		{Name: "one second before not_after", Now: notAfter - 1, RequireNotAfter: true, Result: "ok"},
-		{Name: "at not_after", Now: notAfter, RequireNotAfter: true, Result: "expired"},
-		{Name: "after not_after, claim 4 not required", Now: notAfter + 1, RequireNotAfter: false, Result: "expired"},
+	v.Vouchers = []voucherVectorEntry{
+		entry("claim 4 set", &na, []voucherVectorCase{
+			{Name: "one second before not_after", Now: notAfter - 1, RequireNotAfter: true, Result: "ok"},
+			{Name: "at not_after", Now: notAfter, RequireNotAfter: true, Result: "expired"},
+			{Name: "after not_after, claim 4 not required", Now: notAfter + 1, RequireNotAfter: false, Result: "expired"},
+		}),
+		entry("claim 4 absent", nil, []voucherVectorCase{
+			{Name: "claim 4 not required", Now: notAfter, RequireNotAfter: false, Result: "ok"},
+			{Name: "claim 4 required", Now: notAfter, RequireNotAfter: true, Result: "not_after_missing"},
+		}),
+		entry("claim 4 explicitly 0", &zero, []voucherVectorCase{
+			{Name: "claim 4 not required", Now: notAfter, RequireNotAfter: false, Result: "expired"},
+			{Name: "claim 4 required", Now: notAfter, RequireNotAfter: true, Result: "expired"},
+		}),
 	}
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)

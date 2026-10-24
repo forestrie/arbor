@@ -127,13 +127,7 @@ func TestVoucherWithoutNotAfter(t *testing.T) {
 	require.NoError(t, err)
 	payload, err := canonicalVoucherCBOR.Marshal(map[int]any{1: "sealer-a", 2: uint32(3), 3: keyBytes})
 	require.NoError(t, err)
-	msg := cose.NewSign1Message()
-	msg.Headers.Protected = cose.ProtectedHeader{cose.HeaderLabelAlgorithm: signer.Algorithm(), cose.HeaderLabelKeyID: kid}
-	msg.Payload = payload
-	require.NoError(t, msg.Sign(rand.Reader, nil, signer))
-	u := cose.UntaggedSign1Message(*msg)
-	legacy, err := u.MarshalCBOR()
-	require.NoError(t, err)
+	legacy := signRawVoucher(t, signer, kid, payload)
 
 	want := DelegateKeyVoucherClaims{SealerID: "sealer-a", Epoch: 3, PublicKey: pub}
 	notAfter, err := VerifyDelegateKeyVoucher(legacy, &reg.PublicKey, want, testNow, VerifyDelegateKeyVoucherOptions{})
@@ -141,4 +135,68 @@ func TestVoucherWithoutNotAfter(t *testing.T) {
 	require.Zero(t, notAfter, "absent claim 4 decodes as 0")
 	_, err = VerifyDelegateKeyVoucher(legacy, &reg.PublicKey, want, testNow, VerifyDelegateKeyVoucherOptions{RequireNotAfter: true})
 	require.True(t, errors.Is(err, ErrVoucherNotAfterMissing), "got %v", err)
+}
+
+// TestVoucherExplicitZeroNotAfter: an explicit claim 4 of 0 is present, so
+// it is expired, never treated as absent (agreeing with the TS verifier).
+func TestVoucherExplicitZeroNotAfter(t *testing.T) {
+	reg, signer, kid := registrarKey(t)
+	pub := delegatePub(t, 3)
+	keyBytes, err := delegatekeys.CoseKeyBytes(pub)
+	require.NoError(t, err)
+	payload, err := canonicalVoucherCBOR.Marshal(map[int]any{1: "sealer-a", 2: uint32(3), 3: keyBytes, 4: uint64(0)})
+	require.NoError(t, err)
+	v := signRawVoucher(t, signer, kid, payload)
+
+	want := DelegateKeyVoucherClaims{SealerID: "sealer-a", Epoch: 3, PublicKey: pub}
+	for _, opts := range []VerifyDelegateKeyVoucherOptions{{}, {RequireNotAfter: true}} {
+		_, err = VerifyDelegateKeyVoucher(v, &reg.PublicKey, want, testNow, opts)
+		require.True(t, errors.Is(err, ErrVoucherExpired), "claim 4 = 0 must be expired: %v", err)
+	}
+}
+
+// TestVoucherStrictClaimsDecoding: an unknown claim or a duplicated claim
+// key fails closed (platform P16: strict deterministic decoding).
+func TestVoucherStrictClaimsDecoding(t *testing.T) {
+	reg, signer, kid := registrarKey(t)
+	pub := delegatePub(t, 3)
+	keyBytes, err := delegatekeys.CoseKeyBytes(pub)
+	require.NoError(t, err)
+	want := DelegateKeyVoucherClaims{SealerID: "sealer-a", Epoch: 3, PublicKey: pub}
+
+	unknown, err := canonicalVoucherCBOR.Marshal(map[int]any{1: "sealer-a", 2: uint32(3), 3: keyBytes, 4: uint64(testNotAfter), 5: "extra"})
+	require.NoError(t, err)
+	_, err = VerifyDelegateKeyVoucher(signRawVoucher(t, signer, kid, unknown), &reg.PublicKey, want, testNow, VerifyDelegateKeyVoucherOptions{})
+	require.Error(t, err, "unknown claim 5 must be refused")
+
+	// {1: "sealer-a", 1: "sealer-a", 2: 3, 3: key}: claim 1 twice.
+	sealer, err := canonicalVoucherCBOR.Marshal("sealer-a")
+	require.NoError(t, err)
+	key, err := canonicalVoucherCBOR.Marshal(keyBytes)
+	require.NoError(t, err)
+	dup := append([]byte{0xa4, 0x01}, sealer...)
+	dup = append(append(dup, 0x01), sealer...)
+	dup = append(dup, 0x02, 0x03, 0x03)
+	dup = append(dup, key...)
+	_, err = VerifyDelegateKeyVoucher(signRawVoucher(t, signer, kid, dup), &reg.PublicKey, want, testNow, VerifyDelegateKeyVoucherOptions{})
+	require.Error(t, err, "a duplicated claim key must be refused")
+}
+
+// signRawVoucher signs an arbitrary claims payload with the voucher's
+// protected header, so tests and the vector generator can build vouchers the
+// production builder refuses to issue.
+func signRawVoucher(t *testing.T, signer cose.Signer, kid, payload []byte) []byte {
+	t.Helper()
+	msg := cose.NewSign1Message()
+	msg.Headers.Protected = cose.ProtectedHeader{
+		cose.HeaderLabelAlgorithm:   signer.Algorithm(),
+		cose.HeaderLabelContentType: delegateKeyVoucherCTY,
+		cose.HeaderLabelKeyID:       kid,
+	}
+	msg.Payload = payload
+	require.NoError(t, msg.Sign(rand.Reader, nil, signer))
+	u := cose.UntaggedSign1Message(*msg)
+	out, err := u.MarshalCBOR()
+	require.NoError(t, err)
+	return out
 }

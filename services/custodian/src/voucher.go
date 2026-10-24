@@ -33,17 +33,18 @@ const delegateKeyVoucherCTY = "application/forestrie.delegate-key-voucher+cbor"
 // voucherClaimsWire is the canonical int-keyed CBOR payload of a voucher:
 // {1: sealerId, 2: epoch, 3: delegateKeyCoseCbor, 4: notAfter}. Claim 4 is
 // Unix seconds (plan-2609-12 slice 07, ruling 7); vouchers issued before it
-// lack the claim, which decodes as 0.
+// lack the claim. NotAfter is a pointer so an explicit 4: 0 (present, and
+// expired) is told apart from an absent claim.
 // The delegate key is the shared canonical COSE_Key bytes (delegatekeys.
 // CoseKeyBytes), so it is byte-identical to the coordinator's
 // delegated_pubkey_hash preimage. Verification decodes and field-compares
 // (no re-canonicalisation), so the TS kit can mirror it without a cross-impl
 // canonical-CBOR equivalence requirement on the voucher envelope.
 type voucherClaimsWire struct {
-	SealerID string `cbor:"1,keyasint"`
-	Epoch    uint32 `cbor:"2,keyasint"`
-	Key      []byte `cbor:"3,keyasint"`
-	NotAfter uint64 `cbor:"4,keyasint,omitempty"`
+	SealerID string  `cbor:"1,keyasint"`
+	Epoch    uint32  `cbor:"2,keyasint"`
+	Key      []byte  `cbor:"3,keyasint"`
+	NotAfter *uint64 `cbor:"4,keyasint,omitempty"`
 }
 
 // DelegateKeyVoucherClaims is the attested tuple in decoded form.
@@ -72,7 +73,13 @@ var (
 	ErrVoucherExpired = errors.New("voucher: expired")
 )
 
-var canonicalVoucherCBOR cbor.EncMode
+var (
+	canonicalVoucherCBOR cbor.EncMode
+	// strictVoucherCBOR decodes claims fail-closed (platform P16): a
+	// duplicated key or a claim outside 1..4 is an error, as in the TS
+	// verifier.
+	strictVoucherCBOR cbor.DecMode
+)
 
 func init() {
 	em, err := cbor.EncOptions{Sort: cbor.SortCoreDeterministic}.EncMode()
@@ -80,6 +87,14 @@ func init() {
 		panic(fmt.Errorf("custodian: build voucher CBOR EncMode: %w", err))
 	}
 	canonicalVoucherCBOR = em
+	dm, err := cbor.DecOptions{
+		DupMapKey:         cbor.DupMapKeyEnforcedAPF,
+		ExtraReturnErrors: cbor.ExtraDecErrorUnknownField,
+	}.DecMode()
+	if err != nil {
+		panic(fmt.Errorf("custodian: build voucher CBOR DecMode: %w", err))
+	}
+	strictVoucherCBOR = dm
 }
 
 // encodeVoucherClaims canonically encodes the claims as the COSE_Sign1 payload.
@@ -98,11 +113,12 @@ func encodeVoucherClaims(c DelegateKeyVoucherClaims) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("voucher: encode delegate key: %w", err)
 	}
+	notAfter := uint64(c.NotAfter)
 	return canonicalVoucherCBOR.Marshal(voucherClaimsWire{
 		SealerID: c.SealerID,
 		Epoch:    c.Epoch,
 		Key:      keyBytes,
-		NotAfter: uint64(c.NotAfter),
+		NotAfter: &notAfter,
 	})
 }
 
@@ -132,7 +148,8 @@ func BuildDelegateKeyVoucherWithSigner(claims DelegateKeyVoucherClaims, kid []by
 
 // VerifyDelegateKeyVoucher verifies the voucher signature against pinnedKey,
 // confirms the decoded claims equal `want` (NotAfter only when want sets it)
-// and returns claim 4 (0 when absent). Claim 4, when present, must be after
+// and returns claim 4 (0 when absent). Claims decode strictly: a duplicated
+// key or unknown claim fails. Claim 4, when present (even 0), must be after
 // now (ErrVoucherExpired); opts.RequireNotAfter refuses its absence
 // (ErrVoucherNotAfterMissing). Mirrors canopy @forestrie/encoding
 // verifyDelegateKeyVoucher; the protocol vector delegate-key-voucher.json
@@ -157,7 +174,7 @@ func VerifyDelegateKeyVoucher(
 		return 0, fmt.Errorf("voucher: signature: %w", err)
 	}
 	var got voucherClaimsWire
-	if err := cbor.Unmarshal(msg.Payload, &got); err != nil {
+	if err := strictVoucherCBOR.Unmarshal(msg.Payload, &got); err != nil {
 		return 0, fmt.Errorf("voucher: decode claims: %w", err)
 	}
 	wantKey, err := delegatekeys.CoseKeyBytes(want.PublicKey)
@@ -167,18 +184,18 @@ func VerifyDelegateKeyVoucher(
 	if got.SealerID != want.SealerID || got.Epoch != want.Epoch || !bytes.Equal(got.Key, wantKey) {
 		return 0, fmt.Errorf("voucher: claims mismatch (sealerId/epoch/key)")
 	}
-	if got.NotAfter > math.MaxInt64 {
-		return 0, fmt.Errorf("voucher: notAfter %d out of range", got.NotAfter)
-	}
-	notAfter := int64(got.NotAfter)
-	if want.NotAfter != 0 && notAfter != want.NotAfter {
-		return 0, fmt.Errorf("voucher: claims mismatch (notAfter %d, want %d)", notAfter, want.NotAfter)
-	}
-	if notAfter == 0 {
+	if got.NotAfter == nil {
 		if opts.RequireNotAfter {
 			return 0, ErrVoucherNotAfterMissing
 		}
 		return 0, nil
+	}
+	if *got.NotAfter > math.MaxInt64 {
+		return 0, fmt.Errorf("voucher: notAfter %d out of range", *got.NotAfter)
+	}
+	notAfter := int64(*got.NotAfter)
+	if want.NotAfter != 0 && notAfter != want.NotAfter {
+		return 0, fmt.Errorf("voucher: claims mismatch (notAfter %d, want %d)", notAfter, want.NotAfter)
 	}
 	if now.Unix() >= notAfter {
 		return notAfter, fmt.Errorf("%w: notAfter %d, now %d", ErrVoucherExpired, notAfter, now.Unix())
