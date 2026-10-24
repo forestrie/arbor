@@ -89,12 +89,11 @@ func verifyCoverage(t *testing.T, custodyPriv *ecdsa.PrivateKey, keys *DelegateK
 			ExpiresAt:   time.Now().Add(time.Hour).UTC(),
 		},
 		LeaseVerificationInput{
-			LogIdHex:   phaseDLogID,
-			MMRStart:   mmrStart,
-			MMREnd:     mmrEnd,
-			Curve:      delegationcert.Secp256r1,
-			CoverageOK: true,
-			HeldKeys:   keys,
+			LogIdHex: phaseDLogID,
+			MMRStart: mmrStart,
+			MMREnd:   mmrEnd,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: keys,
 		},
 		nil,
 	)

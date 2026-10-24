@@ -2,6 +2,7 @@ package sealer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -50,9 +51,9 @@ func startDelegateKeys(
 	onReady := func(keys *DelegateKeySet) {
 		leaseMgr.SetDelegateKeys(keys)
 		installed.fire()
-		logger.Warn("delegation-in-advance enabled")
+		logger.Warn("delegation-in-advance enabled", "delegate_key_epoch", keys.currentEpoch)
 	}
-	keys, err := load()
+	keys, err := loadKeys(load)
 	if err == nil {
 		onReady(keys)
 		return
@@ -78,7 +79,7 @@ func loadDelegateKeysWithRetry(
 			return
 		case <-time.After(backoff):
 		}
-		keys, err := load()
+		keys, err := loadKeys(load)
 		if err == nil {
 			onReady(keys)
 			return
@@ -86,6 +87,16 @@ func loadDelegateKeysWithRetry(
 		logger.Warn("delegate key schedule not ready (will retry)", "error", err)
 		backoff = min(backoff*2, backoffMax)
 	}
+}
+
+// loadKeys runs load and treats a successful load with no keys as a failure,
+// so the installed gate can never open without keys.
+func loadKeys(load func() (*DelegateKeySet, error)) (*DelegateKeySet, error) {
+	keys, err := load()
+	if err == nil && keys == nil {
+		err = errors.New("delegate key load returned no keys")
+	}
+	return keys, err
 }
 
 // StartDelegateKeySchedule loads the sealer's standing delegate keys (epoch N

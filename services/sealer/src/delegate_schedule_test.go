@@ -147,3 +147,32 @@ func readyzStatus(t *testing.T, installed *DelegateKeysInstalled) int {
 	installed.ReadyzHandler()(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	return rec.Code
 }
+
+// A loader that reports success with no keys must not open the gate: it is
+// retried like a failure, so the consumer never starts without keys.
+func TestStartDelegateKeys_NilKeysRetried(t *testing.T) {
+	logger, _ := NewLogger(0)
+	keys := standingKeys(t)
+	calls := 0
+	load := func() (*DelegateKeySet, error) {
+		calls++
+		if calls < 3 {
+			return nil, nil
+		}
+		return keys, nil
+	}
+	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, &pendingIssuerStub{}, time.Hour, time.Minute)
+	installed := NewDelegateKeysInstalled()
+	startDelegateKeys(context.Background(), logger, load, mgr, installed, time.Millisecond, 5*time.Millisecond)
+	if installed.Installed() {
+		t.Fatal("installed after a load returned no keys")
+	}
+	select {
+	case <-installed.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("never installed")
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+}

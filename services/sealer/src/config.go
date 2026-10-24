@@ -410,7 +410,7 @@ func (c Config) Validate() error {
 		return fmt.Errorf("DELEGATE_KEY_EPOCH must be >= 1 (on-demand delegation was removed, plan-2609-12 slice 10)")
 	}
 	if c.DelegateSeedCustodianURL == "" && len(c.DelegateSeedLocal) == 0 {
-		return fmt.Errorf("no delegate seed source: set DELEGATE_SEED_CUSTODIAN_URL (or CUSTODIAN_URL) or DELEGATE_SEED")
+		return fmt.Errorf("no delegate seed source: set DELEGATE_SEED_CUSTODIAN_URL (or CUSTODIAN_URL); DELEGATE_SEED is for tests only")
 	}
 
 	if c.R2URL == "" {

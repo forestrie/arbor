@@ -134,12 +134,7 @@ func main() {
 	if err != nil {
 		slog.Error("failed to build resync manager; resync disabled", "error", err)
 	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-keysInstalled.Done():
-		}
+	keysInstalled.RunWhenInstalled(ctx, func() {
 		slog.Info("standing delegate keys installed; starting queue consumer")
 		go queueConsumer.ConsumeQueue(ctx)
 		// Level-triggered resync (ADR-0007 phase-3 / plan-2607-04): the
@@ -149,7 +144,7 @@ func main() {
 		if resyncMgr != nil {
 			go resyncMgr.Run(ctx)
 		}
-	}()
+	})
 
 	<-ctx.Done()
 	slog.Info("shutdown signal received")

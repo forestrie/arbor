@@ -2,6 +2,7 @@ package sealer
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"testing"
 	"time"
@@ -93,4 +94,63 @@ func requestLeaseForTest(
 		ctx, httpClient, trustRoot, nil, issuer, nil, curve, ttl,
 		logIdHex, mmrStart, mmrEnd, standingKeys(t),
 	)
+}
+
+// heldKeysFor is a key set holding only priv, for verifier tests that sign a
+// certificate to a key of their own choosing.
+func heldKeysFor(t *testing.T, priv *ecdsa.PrivateKey) *DelegateKeySet {
+	t.Helper()
+	h, err := pubkeyHashHex(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &DelegateKeySet{
+		byPubkeyHash: map[string]*ecdsa.PrivateKey{h: priv},
+		entries:      []delegateKeyEntry{{epoch: 1, priv: priv}},
+		current:      priv,
+		currentEpoch: 1,
+	}
+}
+
+// TestEnsureValidForLog_CachedWideLeaseServesGrownWindows is the FOR-386
+// regression, carried over from the removed range-pad tests: the cache must
+// be consulted with the caller's TRUE seal window (the first cut widened the
+// lookup window itself, advancing the requested end past the cached cert on
+// every append and defeating the cache by construction). A cached wide lease,
+// such as one from a standing key's advance certificate, must serve
+// subsequent grown windows with ZERO issuer calls until the log outgrows it;
+// an outgrown window goes to issuance over the true window.
+func TestEnsureValidForLog_CachedWideLeaseServesGrownWindows(t *testing.T) {
+	logID := "abcdef0123456789abcdef0123456789"
+	issuer := &pendingIssuerStub{}
+	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, issuer, time.Hour, time.Minute)
+	mgr.SetDelegateKeys(standingKeys(t))
+
+	cached := &DelegationLease{
+		OnchainProof: &delegationcert.OnchainDelegationProof{MMRStart: 0, MMREnd: 1000},
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	elem := mgr.lru.PushFront(&leaseEntry{key: logID, lease: cached})
+	mgr.leases[logID] = elem
+
+	for _, w := range [][2]uint64{{7, 9}, {9, 12}, {12, 1000}} {
+		lease, err := mgr.EnsureValidForLog(t.Context(), NewHTTPClient(nil), nil, "secp256r1", logID, w[0], w[1])
+		if err != nil {
+			t.Fatalf("window [%d,%d]: %v", w[0], w[1], err)
+		}
+		if lease != cached {
+			t.Fatalf("window [%d,%d]: expected cached lease", w[0], w[1])
+		}
+	}
+	if len(issuer.requests) != 0 {
+		t.Fatalf("issuer called %d times for covered windows, want 0", len(issuer.requests))
+	}
+
+	_, err := mgr.EnsureValidForLog(t.Context(), NewHTTPClient(nil), nil, "secp256r1", logID, 1000, 1002)
+	if !errors.Is(err, ErrDelegationPending) || len(issuer.requests) != 1 {
+		t.Fatalf("outgrown window: expected pending issuance, err=%v calls=%d", err, len(issuer.requests))
+	}
+	if r := issuer.requests[0]; r.MMRStart != 1000 || r.MMREnd != 1002 {
+		t.Errorf("issuance request [%d,%d], want true window [1000,1002]", r.MMRStart, r.MMREnd)
+	}
 }

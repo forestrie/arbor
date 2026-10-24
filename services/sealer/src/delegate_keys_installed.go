@@ -1,6 +1,7 @@
 package sealer
 
 import (
+	"context"
 	"net/http"
 	"sync"
 )
@@ -37,6 +38,25 @@ func (l *DelegateKeysInstalled) Installed() bool {
 	default:
 		return false
 	}
+}
+
+// RunWhenInstalled calls start once, in a new goroutine, after the keys are
+// installed, unless ctx is cancelled first. The returned channel is closed
+// when that goroutine exits, whether or not start ran. main uses it to start
+// the queue consumer and resync.
+func (l *DelegateKeysInstalled) RunWhenInstalled(ctx context.Context, start func()) <-chan struct{} {
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+		case <-l.done:
+			if ctx.Err() == nil {
+				start()
+			}
+		}
+	}()
+	return exited
 }
 
 // ReadyzHandler answers 200 once the keys are installed and 503 before.

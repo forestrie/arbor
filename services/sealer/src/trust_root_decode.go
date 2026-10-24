@@ -91,7 +91,7 @@ func (k LogSigningKey) IsKS256Root() bool {
 	return k.AlgInt == coseAlgKS256 || strings.EqualFold(k.Alg, "KS256")
 }
 
-// DelegatedCurveForRoot returns the expected delegated ephemeral curve.
+// DelegatedCurve returns the curve of the delegated (standing) key.
 func (k LogSigningKey) DelegatedCurve() delegationcert.Curve {
 	return delegationcert.Secp256r1
 }

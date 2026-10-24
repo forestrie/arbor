@@ -176,12 +176,13 @@ func CheckpointLog(
 		// Obtain per-log delegation lease from Custodian.
 		//
 		// Pass the TRUE seal window. The lease manager checks its cache
-		// against this window (coverage), and the standing key's advance
-		// certificate is already wide, so one certificate covers subsequent
-		// seals. Widening the window here would advance the requested end
-		// past the cached cert on every append and defeat the cache by
-		// construction (the first-cut #55 bug). The consistency proof and
-		// checkpoint below bind this true window either way.
+		// against this window (coverage). An advance certificate for the
+		// standing key is signed to the owner's horizon, so one certificate
+		// covers subsequent seals; a certificate signed for a demanded window
+		// covers only that window. Widening the window here would advance the
+		// requested end past the cached cert on every append and defeat the
+		// cache by construction (the first-cut #55 bug). The consistency
+		// proof and checkpoint below bind this true window either way.
 		lease, err := svc.LeaseManager.EnsureValidForLog(
 			ctx,
 			svc.HTTPClient,

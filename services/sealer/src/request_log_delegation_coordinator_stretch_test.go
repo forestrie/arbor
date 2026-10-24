@@ -134,7 +134,7 @@ func TestRequestLogDelegationLease_BYOKCoordinatorStretch(t *testing.T) {
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,
-		DelegatedPublicKey:  &delegatedPriv.PublicKey,
+		HeldKeys:            heldKeysFor(t, delegatedPriv),
 		RequestedTTLSeconds: 1800,
 	}, nil); err != nil {
 		t.Fatalf("verify delegation lease: %v", err)

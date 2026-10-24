@@ -79,11 +79,11 @@ func TestVerifyDelegationLease_acceptsValidCert(t *testing.T) {
 		LogSigningKey{PublicKeyPEM: pemStr, Alg: "ES256", AlgInt: coseAlgES256},
 		issuerResp,
 		LeaseVerificationInput{
-			LogIdHex:           logIdHex,
-			MMRStart:           1,
-			MMREnd:             10,
-			Curve:              delegationcert.Secp256r1,
-			DelegatedPublicKey: &delegPriv.PublicKey,
+			LogIdHex: logIdHex,
+			MMRStart: 1,
+			MMREnd:   10,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, delegPriv),
 		},
 		nil,
 	)
@@ -162,11 +162,11 @@ func TestVerifyDelegationLease_rejectsWrongDelegatedKey(t *testing.T) {
 		LogSigningKey{PublicKeyPEM: pemStr, Alg: "ES256", AlgInt: coseAlgES256},
 		issuerResp,
 		LeaseVerificationInput{
-			LogIdHex:           logIdHex,
-			MMRStart:           1,
-			MMREnd:             10,
-			Curve:              delegationcert.Secp256r1,
-			DelegatedPublicKey: &otherPriv.PublicKey,
+			LogIdHex: logIdHex,
+			MMRStart: 1,
+			MMREnd:   10,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, otherPriv),
 		},
 		nil,
 	)

@@ -125,9 +125,7 @@ func requestLogDelegationLease(
 		MMRStart:            mmrStart,
 		MMREnd:              mmrEnd,
 		Curve:               curve,
-		DelegatedPublicKey:  requested,
 		RequestedTTLSeconds: uint64(ttl.Seconds()),
-		CoverageOK:          true,
 		HeldKeys:            heldKeys,
 	}, erc1271)
 	if err != nil {

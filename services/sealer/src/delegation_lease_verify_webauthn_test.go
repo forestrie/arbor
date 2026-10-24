@@ -171,11 +171,11 @@ func TestVerifyDelegationLeaseAcceptsWebauthnCert(t *testing.T) {
 		ExpiresAt:   time.Now().Add(time.Hour),
 	}
 	req := LeaseVerificationInput{
-		LogIdHex:           logIdHex,
-		MMRStart:           1,
-		MMREnd:             10,
-		Curve:              delegationcert.Secp256r1,
-		DelegatedPublicKey: &delegPriv.PublicKey,
+		LogIdHex: logIdHex,
+		MMRStart: 1,
+		MMREnd:   10,
+		Curve:    delegationcert.Secp256r1,
+		HeldKeys: heldKeysFor(t, delegPriv),
 	}
 
 	info, err := VerifyDelegationLease(trustRoot, issuerResp, req, nil)
@@ -219,11 +219,11 @@ func TestVerifyDelegationLeaseAcceptsWebauthnCertWithoutUV(t *testing.T) {
 			ExpiresAt:   time.Now().Add(time.Hour),
 		},
 		LeaseVerificationInput{
-			LogIdHex:           logIdHex,
-			MMRStart:           1,
-			MMREnd:             10,
-			Curve:              delegationcert.Secp256r1,
-			DelegatedPublicKey: &delegPriv.PublicKey,
+			LogIdHex: logIdHex,
+			MMRStart: 1,
+			MMREnd:   10,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, delegPriv),
 		},
 		nil,
 	)
@@ -261,11 +261,11 @@ func TestVerifyDelegationLeaseRejectsWebauthnCertWithoutUP(t *testing.T) {
 			ExpiresAt:   time.Now().Add(time.Hour),
 		},
 		LeaseVerificationInput{
-			LogIdHex:           logIdHex,
-			MMRStart:           1,
-			MMREnd:             10,
-			Curve:              delegationcert.Secp256r1,
-			DelegatedPublicKey: &delegPriv.PublicKey,
+			LogIdHex: logIdHex,
+			MMRStart: 1,
+			MMREnd:   10,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, delegPriv),
 		},
 		nil,
 	)
@@ -307,11 +307,11 @@ func TestVerifyDelegationLeaseRejectsWebauthnCertWrongRoot(t *testing.T) {
 			ExpiresAt:   time.Now().Add(time.Hour),
 		},
 		LeaseVerificationInput{
-			LogIdHex:           logIdHex,
-			MMRStart:           1,
-			MMREnd:             10,
-			Curve:              delegationcert.Secp256r1,
-			DelegatedPublicKey: &delegPriv.PublicKey,
+			LogIdHex: logIdHex,
+			MMRStart: 1,
+			MMREnd:   10,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, delegPriv),
 		},
 		nil,
 	)
