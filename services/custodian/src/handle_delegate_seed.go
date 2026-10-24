@@ -11,6 +11,7 @@ import (
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
+	"github.com/forestrie/arbor/services/pkgs/delegatekeys"
 	"github.com/fxamacker/cbor/v2"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
@@ -47,12 +48,23 @@ func delegateSeedMacKeyVersion(cryptoKeyName string, epoch uint32) string {
 	return cryptoKeyName + "/cryptoKeyVersions/" + strconv.FormatUint(uint64(epoch), 10)
 }
 
-// delegateSeedAPIVersion is the contract version of POST /api/delegate-seed.
-// Version 2: the epoch IS the MAC key version number (plan-2609-11); a sealer
-// that requires 2 refuses a response from a custodian that predates it. The
-// field is the internal-API versioning convention (plan-2609-12 slice 02):
-// absent means 1, per endpoint, client refuses a response below its minimum.
-const delegateSeedAPIVersion = 2
+// Contract versions of POST /api/delegate-seed, per the internal-API
+// versioning convention (plan-2609-12 slice 02): absent means 1, per
+// endpoint, the client refuses a response below its minimum, and the server
+// echoes the version served and answers 400 above the newest it serves.
+//
+//   - 2: the epoch IS the MAC key version number (plan-2609-11); a sealer
+//     that requires 2 refuses a response from a custodian that predates it.
+//     Requests at 1, 2 or absent are all served as 2.
+//   - 3: the response also carries the registrar voucher for the derived
+//     key and its claim 4, voucherNotAfter (plan-2609-12 slice 07). A
+//     response without a voucher means signing failed; the sealer installs
+//     the key and asks again.
+const (
+	delegateSeedAPIVersionEpochIsVersion = 2
+	delegateSeedAPIVersionVoucher        = 3
+	delegateSeedAPIVersionMax            = delegateSeedAPIVersionVoucher
+)
 
 // DelegateSeedRequest is the CBOR body for POST /api/delegate-seed.
 type DelegateSeedRequest struct {
@@ -67,11 +79,22 @@ type DelegateSeedRequest struct {
 // (sealerId, epoch) always yields the same seed, so sealer delegate keys —
 // and every advance delegation certificate bound to them — survive process
 // restarts with no private material at rest anywhere (ADR-0050 Q3).
+//
+// Wire shape (CBOR map, text keys): {seed: bstr, kmsKeyVersion: tstr,
+// apiVersion: uint} at version 2, plus {voucher: bstr, voucherNotAfter: uint}
+// at version 3 when a voucher was signed. The sealer's decoder in arbor
+// services/sealer mirrors it.
 type DelegateSeedResponse struct {
 	Seed          []byte `cbor:"seed"`
 	KMSKeyVersion string `cbor:"kmsKeyVersion"`
-	// APIVersion is always delegateSeedAPIVersion on this custodian.
+	// APIVersion is the version served: 2 for a request at 2 or below, else 3.
 	APIVersion uint32 `cbor:"apiVersion"`
+	// Voucher is the registrar voucher (untagged COSE_Sign1, ES256) for the
+	// standing key derived from Seed; version 3 only, absent when signing
+	// failed.
+	Voucher []byte `cbor:"voucher,omitempty"`
+	// VoucherNotAfter is the voucher's claim 4, Unix seconds; set with Voucher.
+	VoucherNotAfter int64 `cbor:"voucherNotAfter,omitempty"`
 }
 
 // handleDelegateSeed derives the sealer delegate-key seed inside KMS.
@@ -121,9 +144,9 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "bad request", "sealerId is required")
 		return
 	}
-	if req.APIVersion > delegateSeedAPIVersion {
+	if req.APIVersion > delegateSeedAPIVersionMax {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "unsupported apiVersion",
-			fmt.Sprintf("apiVersion %d is not supported; this custodian serves up to %d", req.APIVersion, delegateSeedAPIVersion))
+			fmt.Sprintf("apiVersion %d is not supported; this custodian serves 1 to %d", req.APIVersion, delegateSeedAPIVersionMax))
 		return
 	}
 	if req.Epoch == 0 {
@@ -173,17 +196,54 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 		"kmsKeyVersion", keyVersion,
 	)
 
-	// Answer first (plan-2609-12 ruling 1): the sealer needs only the seed.
-	// Registering the standing key with the coordinator is the outbox's job,
-	// off this request's context and deadline.
-	a.writeCBOR(w, http.StatusOK, DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion, APIVersion: delegateSeedAPIVersion})
+	resp := DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion, APIVersion: delegateSeedAPIVersionEpochIsVersion}
+	var issued *issuedVoucher
+	if req.APIVersion >= delegateSeedAPIVersionVoucher {
+		resp.APIVersion = delegateSeedAPIVersionVoucher
+		// Signed only after this epoch's MacSign succeeded, on the
+		// custodian's own deadline rather than the sealer's request context.
+		v, err := a.voucherForSeed(context.WithoutCancel(r.Context()), req.SealerID, req.Epoch, keyVersion, seed)
+		if err != nil {
+			a.Logger.Warn("delegate key voucher not issued; answering the seed without it",
+				"sealerId", req.SealerID, "epoch", req.Epoch, "kmsKeyVersion", keyVersion, "error", err)
+		} else {
+			resp.Voucher, resp.VoucherNotAfter = v.bytes, v.notAfter
+			issued = &v
+		}
+	}
+
+	// Answer first (plan-2609-12 ruling 1): the sealer needs only the seed
+	// (and, at version 3, the voucher). Registering the standing key with the
+	// coordinator is the outbox's job, off this request's context and
+	// deadline, with the same voucher when there is one.
+	a.writeCBOR(w, http.StatusOK, resp)
 
 	if a.registrations != nil {
-		if err := a.registrations.enqueue(req.SealerID, req.Epoch, keyVersion, seed); err != nil {
+		if err := a.registrations.enqueue(req.SealerID, req.Epoch, keyVersion, seed, issued); err != nil {
 			a.Logger.Error("delegate key registration not queued",
 				"sealerId", req.SealerID, "epoch", req.Epoch, "kmsKeyVersion", keyVersion, "error", err)
 		}
 	}
+}
+
+// voucherForSeed derives the standing public key for (sealerID, epoch) from
+// seed, exactly as the sealer does, and issues its voucher.
+func (a *API) voucherForSeed(ctx context.Context, sealerID string, epoch uint32, kmsKeyVersion string, seed []byte) (issuedVoucher, error) {
+	priv, err := delegatekeys.DeriveKey(seed, epoch, 0)
+	if err != nil {
+		return issuedVoucher{}, fmt.Errorf("derive delegate key: %w", err)
+	}
+	pubkeyHash, err := delegatekeys.PubkeyHashHex(&priv.PublicKey)
+	if err != nil {
+		return issuedVoucher{}, fmt.Errorf("hash delegate key: %w", err)
+	}
+	return a.issueDelegateKeyVoucher(ctx, voucherSubject{
+		sealerID:      sealerID,
+		epoch:         epoch,
+		kmsKeyVersion: kmsKeyVersion,
+		publicKey:     &priv.PublicKey,
+		pubkeyHash:    pubkeyHash,
+	})
 }
 
 // disambiguateVersionNotFound resolves a MacSign NotFound by checking the

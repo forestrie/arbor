@@ -5,7 +5,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
@@ -27,7 +30,10 @@ import (
 // signatures) and from the per-log custody keys.
 const delegateKeyVoucherCTY = "application/forestrie.delegate-key-voucher+cbor"
 
-// voucherClaimsWire is the canonical int-keyed CBOR payload of a voucher.
+// voucherClaimsWire is the canonical int-keyed CBOR payload of a voucher:
+// {1: sealerId, 2: epoch, 3: delegateKeyCoseCbor, 4: notAfter}. Claim 4 is
+// Unix seconds (plan-2609-12 slice 07, ruling 7); vouchers issued before it
+// lack the claim, which decodes as 0.
 // The delegate key is the shared canonical COSE_Key bytes (delegatekeys.
 // CoseKeyBytes), so it is byte-identical to the coordinator's
 // delegated_pubkey_hash preimage. Verification decodes and field-compares
@@ -37,6 +43,7 @@ type voucherClaimsWire struct {
 	SealerID string `cbor:"1,keyasint"`
 	Epoch    uint32 `cbor:"2,keyasint"`
 	Key      []byte `cbor:"3,keyasint"`
+	NotAfter uint64 `cbor:"4,keyasint,omitempty"`
 }
 
 // DelegateKeyVoucherClaims is the attested tuple in decoded form.
@@ -44,7 +51,26 @@ type DelegateKeyVoucherClaims struct {
 	SealerID  string
 	Epoch     uint32
 	PublicKey *ecdsa.PublicKey
+	// NotAfter is claim 4, the voucher's expiry in Unix seconds. 0 means
+	// absent: the builder refuses it, and a verifier given it as `want`
+	// does not compare it.
+	NotAfter int64
 }
+
+// VerifyDelegateKeyVoucherOptions tunes VerifyDelegateKeyVoucher.
+type VerifyDelegateKeyVoucherOptions struct {
+	// RequireNotAfter refuses a voucher without claim 4. Off, such a voucher
+	// (issued before slice 07) still verifies until slice 08's cutover.
+	RequireNotAfter bool
+}
+
+var (
+	// ErrVoucherNotAfterMissing: claim 4 is absent and was required. The text
+	// matches the TypeScript verifier's reason, not_after_missing.
+	ErrVoucherNotAfterMissing = errors.New("voucher: not_after_missing")
+	// ErrVoucherExpired: claim 4 is not after now (TypeScript reason expired).
+	ErrVoucherExpired = errors.New("voucher: expired")
+)
 
 var canonicalVoucherCBOR cbor.EncMode
 
@@ -64,6 +90,10 @@ func encodeVoucherClaims(c DelegateKeyVoucherClaims) ([]byte, error) {
 	if c.Epoch == 0 {
 		return nil, fmt.Errorf("voucher: epoch must be >= 1")
 	}
+	if c.NotAfter <= 0 {
+		// Every voucher this custodian issues expires (ruling 7).
+		return nil, fmt.Errorf("voucher: notAfter (claim 4) is required")
+	}
 	keyBytes, err := delegatekeys.CoseKeyBytes(c.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("voucher: encode delegate key: %w", err)
@@ -72,6 +102,7 @@ func encodeVoucherClaims(c DelegateKeyVoucherClaims) ([]byte, error) {
 		SealerID: c.SealerID,
 		Epoch:    c.Epoch,
 		Key:      keyBytes,
+		NotAfter: uint64(c.NotAfter),
 	})
 }
 
@@ -99,34 +130,60 @@ func BuildDelegateKeyVoucherWithSigner(claims DelegateKeyVoucherClaims, kid []by
 	return u.MarshalCBOR()
 }
 
-// VerifyDelegateKeyVoucher verifies the voucher signature against pinnedKey and
-// confirms the decoded claims equal `want`. Mirrored by the TS kit (phase I);
-// also usable coordinator-side for defense-in-depth at registration ingest.
-func VerifyDelegateKeyVoucher(voucherBytes []byte, pinnedKey *ecdsa.PublicKey, want DelegateKeyVoucherClaims) error {
+// VerifyDelegateKeyVoucher verifies the voucher signature against pinnedKey,
+// confirms the decoded claims equal `want` (NotAfter only when want sets it)
+// and returns claim 4 (0 when absent). Claim 4, when present, must be after
+// now (ErrVoucherExpired); opts.RequireNotAfter refuses its absence
+// (ErrVoucherNotAfterMissing). Mirrors canopy @forestrie/encoding
+// verifyDelegateKeyVoucher; the protocol vector delegate-key-voucher.json
+// pins the two together.
+func VerifyDelegateKeyVoucher(
+	voucherBytes []byte,
+	pinnedKey *ecdsa.PublicKey,
+	want DelegateKeyVoucherClaims,
+	now time.Time,
+	opts VerifyDelegateKeyVoucherOptions,
+) (int64, error) {
 	verifier, err := cose.NewVerifier(cose.AlgorithmES256, pinnedKey)
 	if err != nil {
-		return fmt.Errorf("voucher: build verifier: %w", err)
+		return 0, fmt.Errorf("voucher: build verifier: %w", err)
 	}
 	var u cose.UntaggedSign1Message
 	if err := u.UnmarshalCBOR(voucherBytes); err != nil {
-		return fmt.Errorf("voucher: decode: %w", err)
+		return 0, fmt.Errorf("voucher: decode: %w", err)
 	}
 	msg := cose.Sign1Message(u)
 	if err := msg.Verify(nil, verifier); err != nil {
-		return fmt.Errorf("voucher: signature: %w", err)
+		return 0, fmt.Errorf("voucher: signature: %w", err)
 	}
 	var got voucherClaimsWire
 	if err := cbor.Unmarshal(msg.Payload, &got); err != nil {
-		return fmt.Errorf("voucher: decode claims: %w", err)
+		return 0, fmt.Errorf("voucher: decode claims: %w", err)
 	}
 	wantKey, err := delegatekeys.CoseKeyBytes(want.PublicKey)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if got.SealerID != want.SealerID || got.Epoch != want.Epoch || !bytes.Equal(got.Key, wantKey) {
-		return fmt.Errorf("voucher: claims mismatch (sealerId/epoch/key)")
+		return 0, fmt.Errorf("voucher: claims mismatch (sealerId/epoch/key)")
 	}
-	return nil
+	if got.NotAfter > math.MaxInt64 {
+		return 0, fmt.Errorf("voucher: notAfter %d out of range", got.NotAfter)
+	}
+	notAfter := int64(got.NotAfter)
+	if want.NotAfter != 0 && notAfter != want.NotAfter {
+		return 0, fmt.Errorf("voucher: claims mismatch (notAfter %d, want %d)", notAfter, want.NotAfter)
+	}
+	if notAfter == 0 {
+		if opts.RequireNotAfter {
+			return 0, ErrVoucherNotAfterMissing
+		}
+		return 0, nil
+	}
+	if now.Unix() >= notAfter {
+		return notAfter, fmt.Errorf("%w: notAfter %d, now %d", ErrVoucherExpired, notAfter, now.Unix())
+	}
+	return notAfter, nil
 }
 
 // BuildDelegateKeyVoucher signs a voucher with the KMS registrar voucher key

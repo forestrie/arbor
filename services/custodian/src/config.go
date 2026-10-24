@@ -3,6 +3,7 @@ package custodian
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -55,6 +56,52 @@ type Config struct {
 	// DelegateSeedSealers is the allowlist of sealerId values permitted to
 	// derive seeds (comma-separated env DELEGATE_SEED_SEALERS).
 	DelegateSeedSealers []string
+	// DelegateKeyVoucherTTL is how far out a voucher's claim 4 (notAfter) is
+	// set when the custodian signs it (DELEGATE_KEY_VOUCHER_TTL, plan-2609-12
+	// slice 07). Zero means defaultDelegateKeyVoucherTTL.
+	DelegateKeyVoucherTTL time.Duration
+	// voucherTTLRejectedInput and voucherTTLRejectedReason record a refused
+	// DELEGATE_KEY_VOUCHER_TTL for LogConfig's error line; the reason is
+	// empty when the input was unset or accepted.
+	voucherTTLRejectedInput  string
+	voucherTTLRejectedReason string
+}
+
+// Bounds and default of DELEGATE_KEY_VOUCHER_TTL (plan-2609-12 ruling 7). The
+// coordinator refuses a voucher more than 31 days out, so 30 days leaves a
+// day of clock and config slack. The sealer refreshes at a quarter of the
+// lifetime, so the default survives a custodian outage of 18 h.
+const (
+	defaultDelegateKeyVoucherTTL = 24 * time.Hour
+	minDelegateKeyVoucherTTL     = time.Hour
+	maxDelegateKeyVoucherTTL     = 30 * 24 * time.Hour
+)
+
+// parseDelegateKeyVoucherTTL reads DELEGATE_KEY_VOUCHER_TTL. Unset is the
+// default. An unparseable or out-of-range value is also the default, with the
+// reason returned, because the custodian also countersigns checkpoints and
+// must never exit over this setting.
+func parseDelegateKeyVoucherTTL(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultDelegateKeyVoucherTTL, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return defaultDelegateKeyVoucherTTL, err
+	}
+	if d < minDelegateKeyVoucherTTL || d > maxDelegateKeyVoucherTTL {
+		return defaultDelegateKeyVoucherTTL, fmt.Errorf("%s is outside %s..%s", d, minDelegateKeyVoucherTTL, maxDelegateKeyVoucherTTL)
+	}
+	return d, nil
+}
+
+// delegateKeyVoucherTTL is the effective voucher TTL.
+func (c Config) delegateKeyVoucherTTL() time.Duration {
+	if c.DelegateKeyVoucherTTL <= 0 {
+		return defaultDelegateKeyVoucherTTL
+	}
+	return c.DelegateKeyVoucherTTL
 }
 
 // delegateSeedSealerAllowed reports whether sealerId is in the allowlist.
@@ -125,6 +172,13 @@ func LoadConfig() Config {
 		}
 	}
 
+	voucherTTLRaw := os.Getenv("DELEGATE_KEY_VOUCHER_TTL")
+	voucherTTL, voucherTTLErr := parseDelegateKeyVoucherTTL(voucherTTLRaw)
+	voucherTTLReason := ""
+	if voucherTTLErr != nil {
+		voucherTTLReason = voucherTTLErr.Error()
+	}
+
 	return Config{
 		Port:                    getEnvOrDefault("PORT", "9092"),
 		LogLevel:                getEnvOrDefault("LOG_LEVEL", "info"),
@@ -145,6 +199,10 @@ func LoadConfig() Config {
 		DelegateSeedMacKey:         strings.TrimSpace(os.Getenv("DELEGATE_SEED_MAC_KEY")),
 		RegistrarVoucherKey:        strings.TrimSpace(os.Getenv("REGISTRAR_VOUCHER_KEY")),
 		DelegateSeedSealers:        splitNonEmpty(os.Getenv("DELEGATE_SEED_SEALERS")),
+
+		DelegateKeyVoucherTTL:    voucherTTL,
+		voucherTTLRejectedInput:  voucherTTLRaw,
+		voucherTTLRejectedReason: voucherTTLReason,
 	}
 }
 
@@ -177,6 +235,12 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "DELEGATE_SEED_MAC_KEY", "value", c.DelegateSeedMacKey)
 	logger.Warn("config value", "name", "REGISTRAR_VOUCHER_KEY", "value", c.RegistrarVoucherKey)
 	logger.Warn("config value", "name", "DELEGATE_SEED_SEALERS", "value", strings.Join(c.DelegateSeedSealers, ","))
+	if c.voucherTTLRejectedReason != "" {
+		logger.Error("DELEGATE_KEY_VOUCHER_TTL invalid; using the default",
+			"input", c.voucherTTLRejectedInput, "error", c.voucherTTLRejectedReason,
+			"default", defaultDelegateKeyVoucherTTL.String())
+	}
+	logger.Warn("config value", "name", "DELEGATE_KEY_VOUCHER_TTL", "value", c.delegateKeyVoucherTTL().String())
 }
 
 func secretDigest(value string) string {

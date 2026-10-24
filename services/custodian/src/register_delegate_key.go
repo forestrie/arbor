@@ -34,7 +34,7 @@ type RegisterDelegateKeysBody struct {
 }
 
 // signRegistrarVoucher signs a delegate-key voucher with the KMS registrar
-// voucher key's current signing version. The outbox calls it once per entry.
+// voucher key's current signing version. issueDelegateKeyVoucher calls it.
 func (a *API) signRegistrarVoucher(ctx context.Context, claims DelegateKeyVoucherClaims) ([]byte, error) {
 	client, err := kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
 	if err != nil {
