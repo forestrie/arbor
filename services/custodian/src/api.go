@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // publicKeyCacheEntry caches PEM + alg after a successful KMS GetPublicKey (short crypto key id key).
@@ -41,6 +42,11 @@ type API struct {
 	// getDelegateSeedKeyOverride is a test-only seam for the delegate-seed MAC
 	// key probe and the NotFound parent-key check without GCP KMS.
 	getDelegateSeedKeyOverride func(ctx context.Context, keyName string) (delegateSeedKeyInfo, error)
+	// signVoucherOverride is a test-only seam that signs a delegate-key
+	// voucher without the KMS registrar voucher key.
+	signVoucherOverride func(ctx context.Context, claims DelegateKeyVoucherClaims) ([]byte, error)
+	// now is the clock for voucher claim 4 (tests fix it).
+	now func() time.Time
 
 	// delegateSeedVerified is set once the boot probe has confirmed
 	// DELEGATE_SEED_MAC_KEY is an HMAC_SHA256 MAC key (plan-2609-12 ruling 2).
@@ -60,9 +66,10 @@ func NewAPI(logger *slog.Logger, cfg Config) *API {
 		store:          NewKeyStore(),
 		logIDKeyCache:  newLogIDKeyLRU(cfg.LogIDCacheSize),
 		publicKeyCache: make(map[string]publicKeyCacheEntry),
+		now:            time.Now,
 	}
 	if cfg.RegistrarVoucherKey != "" && a.coordinatorConfigured() {
-		a.registrations = newRegistrationOutbox(logger, a.signRegistrarVoucher, a.postDelegateKeyRegistration)
+		a.registrations = newRegistrationOutbox(logger, a.issueDelegateKeyVoucher, a.postDelegateKeyRegistration)
 	}
 	return a
 }

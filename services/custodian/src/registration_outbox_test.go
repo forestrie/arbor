@@ -44,25 +44,38 @@ func testSeed(n byte) []byte {
 	return seed
 }
 
+// testIssuer returns a voucher issuer backed by an in-memory registrar key
+// whose claim 4 is now() + 24h, and a counter of vouchers issued.
+func testIssuer(t *testing.T, now func() time.Time) (func(context.Context, voucherSubject) (issuedVoucher, error), *atomic.Int32) {
+	t.Helper()
+	_, signer, kid := registrarKey(t)
+	var signs atomic.Int32
+	return func(_ context.Context, s voucherSubject) (issuedVoucher, error) {
+		signs.Add(1)
+		notAfter := now().Add(24 * time.Hour).Unix()
+		v, err := BuildDelegateKeyVoucherWithSigner(DelegateKeyVoucherClaims{
+			SealerID: s.sealerID, Epoch: s.epoch, PublicKey: s.publicKey, NotAfter: notAfter,
+		}, kid, signer)
+		return issuedVoucher{bytes: v, notAfter: notAfter}, err
+	}, &signs
+}
+
 // testOutbox builds an outbox with a real voucher signer (an in-memory
 // registrar key) and the given post fake; it returns the log sink and a
 // counter of voucher signatures.
 func testOutbox(t *testing.T, post func(context.Context, RegisterDelegateKeysBody) registrationOutcome) (*registrationOutbox, *syncBuffer, *atomic.Int32) {
 	t.Helper()
-	_, signer, kid := registrarKey(t)
-	var signs atomic.Int32
 	logs := &syncBuffer{}
-	o := newRegistrationOutbox(
+	var o *registrationOutbox
+	issue, signs := testIssuer(t, func() time.Time { return o.now() })
+	o = newRegistrationOutbox(
 		slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
-			signs.Add(1)
-			return BuildDelegateKeyVoucherWithSigner(c, kid, signer)
-		},
+		issue,
 		post,
 	)
 	o.backoffBase = time.Millisecond
 	o.backoffMax = 4 * time.Millisecond
-	return o, logs, &signs
+	return o, logs, signs
 }
 
 func ok200(context.Context, RegisterDelegateKeysBody) registrationOutcome {
@@ -72,14 +85,18 @@ func ok200(context.Context, RegisterDelegateKeysBody) registrationOutcome {
 // TestOutbox_BodyBindsDerivedKeyAndVoucher: the registration carries the
 // standing key derived from the seed (canonical COSE_Key, the coordinator's
 // pubkey_hash preimage), a voucher that verifies against the registrar key
-// for it, and a not-after rebuilt from the attempt time; a 2xx removes the
-// entry.
+// for it with claim 4, and a body not-after rebuilt from the attempt time at
+// 720 h (slice 08 caps it, not this one); a 2xx removes the entry.
 func TestOutbox_BodyBindsDerivedKeyAndVoucher(t *testing.T) {
 	reg, signer, kid := registrarKey(t)
 	var got RegisterDelegateKeysBody
 	o := newRegistrationOutbox(slog.Default(),
-		func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
-			return BuildDelegateKeyVoucherWithSigner(c, kid, signer)
+		func(_ context.Context, s voucherSubject) (issuedVoucher, error) {
+			notAfter := time.Unix(1_800_000_000, 0).Add(24 * time.Hour).Unix()
+			v, err := BuildDelegateKeyVoucherWithSigner(DelegateKeyVoucherClaims{
+				SealerID: s.sealerID, Epoch: s.epoch, PublicKey: s.publicKey, NotAfter: notAfter,
+			}, kid, signer)
+			return issuedVoucher{bytes: v, notAfter: notAfter}, err
 		},
 		func(_ context.Context, body RegisterDelegateKeysBody) registrationOutcome {
 			got = body
@@ -89,7 +106,7 @@ func TestOutbox_BodyBindsDerivedKeyAndVoucher(t *testing.T) {
 	o.now = func() time.Time { return now }
 
 	seed := testSeed(0)
-	require.NoError(t, o.enqueue("sealer-a", 3, "k/cryptoKeyVersions/3", seed))
+	require.NoError(t, o.enqueue("sealer-a", 3, "k/cryptoKeyVersions/3", seed, nil))
 	o.attempt(context.Background(), o.next())
 	require.Equal(t, 0, o.len(), "2xx removes the entry")
 
@@ -110,8 +127,52 @@ func TestOutbox_BodyBindsDerivedKeyAndVoucher(t *testing.T) {
 
 	voucher, err := base64.StdEncoding.DecodeString(entry.Voucher)
 	require.NoError(t, err)
-	require.NoError(t, VerifyDelegateKeyVoucher(voucher, &reg.PublicKey,
-		DelegateKeyVoucherClaims{SealerID: "sealer-a", Epoch: 3, PublicKey: &priv.PublicKey}))
+	notAfter, err := VerifyDelegateKeyVoucher(voucher, &reg.PublicKey,
+		DelegateKeyVoucherClaims{SealerID: "sealer-a", Epoch: 3, PublicKey: &priv.PublicKey},
+		now, VerifyDelegateKeyVoucherOptions{RequireNotAfter: true})
+	require.NoError(t, err)
+	require.Equal(t, now.Add(24*time.Hour).Unix(), notAfter, "the voucher carries claim 4")
+}
+
+// TestOutbox_UsesSuppliedVoucher: a seed request at apiVersion 3 hands the
+// outbox the voucher it just returned to the sealer, and the outbox registers
+// with that same voucher rather than signing another.
+func TestOutbox_UsesSuppliedVoucher(t *testing.T) {
+	var got RegisterDelegateKeysBody
+	o, _, signs := testOutbox(t, func(_ context.Context, body RegisterDelegateKeysBody) registrationOutcome {
+		got = body
+		return registrationOutcome{status: http.StatusOK}
+	})
+	now := time.Unix(1_800_000_000, 0)
+	o.now = func() time.Time { return now }
+	supplied := issuedVoucher{bytes: []byte{0x84, 0x40, 0xa0, 0x40, 0x40}, notAfter: now.Add(time.Hour).Unix()}
+	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0), &supplied))
+	o.attempt(context.Background(), o.next())
+	require.Equal(t, int32(0), signs.Load(), "no second voucher is signed")
+	require.Len(t, got.Keys, 1)
+	require.Equal(t, base64.StdEncoding.EncodeToString(supplied.bytes), got.Keys[0].Voucher)
+}
+
+// TestOutbox_ReissuesExpiringVoucher: an entry retried past its voucher's
+// claim 4 would be refused forever, so the outbox issues a fresh voucher once
+// the held one is within voucherRefreshMargin of expiry.
+func TestOutbox_ReissuesExpiringVoucher(t *testing.T) {
+	o, _, signs := testOutbox(t, func(context.Context, RegisterDelegateKeysBody) registrationOutcome {
+		return registrationOutcome{status: http.StatusBadGateway}
+	})
+	now := time.Unix(1_800_000_000, 0)
+	o.now = func() time.Time { return now }
+	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0), nil))
+	o.attempt(context.Background(), o.next())
+	require.Equal(t, int32(1), signs.Load())
+
+	now = now.Add(24*time.Hour - voucherRefreshMargin - time.Second)
+	o.attempt(context.Background(), o.next())
+	require.Equal(t, int32(1), signs.Load(), "a voucher outside the margin is kept")
+
+	now = now.Add(2 * time.Second)
+	o.attempt(context.Background(), o.next())
+	require.Equal(t, int32(2), signs.Load(), "a voucher inside the margin is reissued")
 }
 
 // TestOutbox_RetriesUntil2xx: transport errors and non-409 statuses are
@@ -140,7 +201,7 @@ func TestOutbox_RetriesUntil2xx(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go o.run(ctx)
-	require.NoError(t, o.enqueue("sealer-a", 1, "k/cryptoKeyVersions/1", testSeed(0)))
+	require.NoError(t, o.enqueue("sealer-a", 1, "k/cryptoKeyVersions/1", testSeed(0), nil))
 
 	require.Eventually(t, func() bool { return o.len() == 0 }, 5*time.Second, time.Millisecond)
 	require.Equal(t, int32(4), calls.Load())
@@ -160,7 +221,7 @@ func TestOutbox_NeverAttemptCapped(t *testing.T) {
 	o, _, _ := testOutbox(t, func(context.Context, RegisterDelegateKeysBody) registrationOutcome {
 		return registrationOutcome{status: http.StatusBadGateway}
 	})
-	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0)))
+	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0), nil))
 	for range 200 {
 		o.attempt(context.Background(), o.next())
 	}
@@ -189,18 +250,18 @@ func TestOutbox_DedupeOnRepeatRequest(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	o.now = func() time.Time { return now }
 
-	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0)))
+	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0), nil))
 	o.attempt(context.Background(), o.next())
 	require.True(t, o.next().nextAttempt.After(now), "failed attempt schedules a retry")
 
-	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0)))
+	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0), nil))
 	require.Equal(t, 1, o.len())
 	require.Equal(t, now, o.next().nextAttempt, "repeat request makes the entry due now")
 	o.attempt(context.Background(), o.next())
 	require.Equal(t, int32(1), signs.Load(), "voucher survives the upsert")
 
-	require.NoError(t, o.enqueue("sealer-a", 2, "v2", testSeed(0)))
-	require.NoError(t, o.enqueue("sealer-b", 1, "v1", testSeed(0)))
+	require.NoError(t, o.enqueue("sealer-a", 2, "v2", testSeed(0), nil))
+	require.NoError(t, o.enqueue("sealer-b", 1, "v1", testSeed(0), nil))
 	require.Equal(t, 3, o.len())
 }
 
@@ -209,13 +270,13 @@ func TestOutbox_DedupeOnRepeatRequest(t *testing.T) {
 func TestOutbox_CapOverflowLogsAndDrops(t *testing.T) {
 	o, logs, _ := testOutbox(t, ok200)
 	for e := range registrationOutboxCap {
-		require.NoError(t, o.enqueue("sealer-a", uint32(e+1), "v", testSeed(0)))
+		require.NoError(t, o.enqueue("sealer-a", uint32(e+1), "v", testSeed(0), nil))
 	}
-	err := o.enqueue("sealer-a", registrationOutboxCap+1, "v", testSeed(0))
+	err := o.enqueue("sealer-a", registrationOutboxCap+1, "v", testSeed(0), nil)
 	require.Error(t, err)
 	require.Equal(t, registrationOutboxCap, o.len())
 	require.Contains(t, logs.String(), `"level":"ERROR","msg":"delegate key registration outbox full; dropping entry"`)
-	require.NoError(t, o.enqueue("sealer-a", 1, "v", testSeed(0)), "upsert at the cap")
+	require.NoError(t, o.enqueue("sealer-a", 1, "v", testSeed(0), nil), "upsert at the cap")
 }
 
 // TestOutbox_ConflictIsTerminal: the coordinator's 409 (one key per
@@ -242,7 +303,7 @@ func TestOutbox_ConflictIsTerminal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go o.run(ctx)
-	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0)))
+	require.NoError(t, o.enqueue("sealer-a", 1, "v1", testSeed(0), nil))
 	require.Eventually(t, func() bool { return o.len() == 0 }, 5*time.Second, time.Millisecond)
 	// Several backoff intervals: nothing is retried.
 	time.Sleep(50 * time.Millisecond)
@@ -261,7 +322,7 @@ func TestOutbox_ConflictIsTerminal(t *testing.T) {
 func TestOutbox_AttemptLogsAuditFields(t *testing.T) {
 	o, logs, _ := testOutbox(t, ok200)
 	seed := testSeed(0)
-	require.NoError(t, o.enqueue("sealer-a", 2, "k/cryptoKeyVersions/2", seed))
+	require.NoError(t, o.enqueue("sealer-a", 2, "k/cryptoKeyVersions/2", seed, nil))
 	o.attempt(context.Background(), o.next())
 
 	priv, err := delegatekeys.DeriveKey(seed, 2, 0)

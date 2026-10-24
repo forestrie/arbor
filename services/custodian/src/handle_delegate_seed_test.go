@@ -130,18 +130,27 @@ func TestDelegateSeed_ValidatesEpochAndConfig(t *testing.T) {
 	}
 }
 
-// TestDelegateSeed_APIVersion: the response always carries apiVersion 2 (the
-// sealer's transition marker for epoch-is-version); a request without the
-// field is served as version 1 and one above 2 is refused.
+// TestDelegateSeed_APIVersion: a request without the field, or at 1 or 2, is
+// served as today with apiVersion 2 (the sealer's transition marker for
+// epoch-is-version) and no voucher; 3 is echoed; above 3 is refused (slice
+// 02's server rule).
 func TestDelegateSeed_APIVersion(t *testing.T) {
 	api := delegateSeedAPI(t)
-	resp := decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}))
-	if resp.APIVersion != 2 {
-		t.Fatalf("apiVersion = %d, want 2", resp.APIVersion)
+	for _, v := range []uint32{0, 1, 2} {
+		resp := decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: v}))
+		if resp.APIVersion != 2 {
+			t.Fatalf("request %d: apiVersion = %d, want 2", v, resp.APIVersion)
+		}
+		if resp.Voucher != nil || resp.VoucherNotAfter != 0 {
+			t.Fatalf("request %d: a version-2 response carries no voucher", v)
+		}
 	}
-	decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 2}))
-	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 3}); rec.Code != http.StatusBadRequest {
-		t.Fatalf("apiVersion 3: got %d, want 400: %s", rec.Code, rec.Body.String())
+	resp := decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 3}))
+	if resp.APIVersion != 3 {
+		t.Fatalf("request 3: apiVersion = %d, want 3", resp.APIVersion)
+	}
+	if rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 4}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("apiVersion 4: got %d, want 400: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -386,7 +395,7 @@ func TestDelegateSeed_RespondsBeforeRegistration(t *testing.T) {
 		t.Fatal("outbox must exist when the registrar key and coordinator are configured")
 	}
 	_, signer, kid := registrarKey(t)
-	api.registrations.signVoucher = func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
+	api.signVoucherOverride = func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
 		return BuildDelegateKeyVoucherWithSigner(c, kid, signer)
 	}
 	var responded atomic.Bool

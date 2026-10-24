@@ -30,6 +30,10 @@ const (
 	// attempt (voucher signing plus the coordinator POST). It is independent
 	// of the sealer's seed request, which has already been answered.
 	registrationAttemptTimeout = 30 * time.Second
+	// voucherRefreshMargin: an entry whose voucher expires within this margin
+	// gets a fresh one before its next attempt. Without it an entry retried
+	// past its voucher's claim 4 would be refused for as long as it retries.
+	voucherRefreshMargin = 5 * time.Minute
 )
 
 // registrationKey identifies an outbox entry. A sealer has at most one
@@ -50,9 +54,10 @@ type registrationEntry struct {
 	publicKey     *ecdsa.PublicKey
 	coseKey       []byte // canonical COSE_Key CBOR
 	pubkeyHash    string // hex(sha256(coseKey)), the coordinator's key id
-	// voucher is signed once per entry on its first attempt; its claims carry
-	// no expiry, so it stays valid across retries.
-	voucher     []byte
+	// voucher is the one returned to the sealer at seed apiVersion 3, or else
+	// issued on the entry's first attempt. It is kept across retries and
+	// reissued only when it nears its claim 4 (voucherRefreshMargin).
+	voucher     issuedVoucher
 	attempts    int
 	nextAttempt time.Time
 }
@@ -88,8 +93,8 @@ type registrationOutbox struct {
 	// backoffBase and backoffMax bound the retry interval (tests shrink them).
 	backoffBase time.Duration
 	backoffMax  time.Duration
-	// signVoucher signs the registrar voucher for an entry's claims.
-	signVoucher func(ctx context.Context, claims DelegateKeyVoucherClaims) ([]byte, error)
+	// issueVoucher signs (and logs) a registrar voucher for an entry's key.
+	issueVoucher func(ctx context.Context, s voucherSubject) (issuedVoucher, error)
 	// post sends one registration body to the coordinator.
 	post func(ctx context.Context, body RegisterDelegateKeysBody) registrationOutcome
 
@@ -100,28 +105,30 @@ type registrationOutbox struct {
 
 func newRegistrationOutbox(
 	logger *slog.Logger,
-	signVoucher func(context.Context, DelegateKeyVoucherClaims) ([]byte, error),
+	issueVoucher func(context.Context, voucherSubject) (issuedVoucher, error),
 	post func(context.Context, RegisterDelegateKeysBody) registrationOutcome,
 ) *registrationOutbox {
 	return &registrationOutbox{
-		logger:      logger,
-		now:         time.Now,
-		ttl:         defaultDelegateKeyTTL,
-		backoffBase: registrationBackoffBase,
-		backoffMax:  registrationBackoffMax,
-		signVoucher: signVoucher,
-		post:        post,
-		entries:     make(map[registrationKey]*registrationEntry),
-		wake:        make(chan struct{}, 1),
+		logger:       logger,
+		now:          time.Now,
+		ttl:          defaultDelegateKeyTTL,
+		backoffBase:  registrationBackoffBase,
+		backoffMax:   registrationBackoffMax,
+		issueVoucher: issueVoucher,
+		post:         post,
+		entries:      make(map[registrationKey]*registrationEntry),
+		wake:         make(chan struct{}, 1),
 	}
 }
 
 // enqueue derives the standing public key for (sealerID, epoch) from seed and
 // upserts an outbox entry for it, due immediately. The seed is not retained.
-// A repeat request for a pending pair with the same key keeps its voucher; a
+// voucher, when set, is the voucher just returned to the sealer for this key
+// (seed apiVersion 3) and becomes the entry's voucher. A repeat request for a
+// pending pair with the same key keeps its voucher unless given a new one; a
 // different key (the MAC key changed underneath the epoch) replaces the entry.
 // Never blocks on the network.
-func (o *registrationOutbox) enqueue(sealerID string, epoch uint32, kmsKeyVersion string, seed []byte) error {
+func (o *registrationOutbox) enqueue(sealerID string, epoch uint32, kmsKeyVersion string, seed []byte, voucher *issuedVoucher) error {
 	priv, err := delegatekeys.DeriveKey(seed, epoch, 0)
 	if err != nil {
 		return fmt.Errorf("derive delegate key: %w", err)
@@ -145,6 +152,9 @@ func (o *registrationOutbox) enqueue(sealerID string, epoch uint32, kmsKeyVersio
 		// the key registered, so make the entry due now.
 		e.kmsKeyVersion = kmsKeyVersion
 		e.nextAttempt = o.now()
+		if voucher != nil {
+			e.voucher = *voucher
+		}
 	case !ok && len(o.entries) >= registrationOutboxCap:
 		o.mu.Unlock()
 		o.logger.Error("delegate key registration outbox full; dropping entry",
@@ -157,7 +167,7 @@ func (o *registrationOutbox) enqueue(sealerID string, epoch uint32, kmsKeyVersio
 				"sealerId", sealerID, "epoch", epoch,
 				"pubkeyHash", pubkeyHash, "replacedPubkeyHash", e.pubkeyHash)
 		}
-		o.entries[k] = &registrationEntry{
+		e := &registrationEntry{
 			sealerID:      sealerID,
 			epoch:         epoch,
 			kmsKeyVersion: kmsKeyVersion,
@@ -166,6 +176,10 @@ func (o *registrationOutbox) enqueue(sealerID string, epoch uint32, kmsKeyVersio
 			pubkeyHash:    pubkeyHash,
 			nextAttempt:   o.now(),
 		}
+		if voucher != nil {
+			e.voucher = *voucher
+		}
+		o.entries[k] = e
 	}
 	o.mu.Unlock()
 	o.signal()
@@ -248,8 +262,11 @@ func (o *registrationOutbox) attempt(ctx context.Context, e *registrationEntry) 
 	o.mu.Unlock()
 
 	var outcome registrationOutcome
-	if voucher == nil {
-		v, err := o.signVoucher(attemptCtx, DelegateKeyVoucherClaims{SealerID: e.sealerID, Epoch: e.epoch, PublicKey: e.publicKey})
+	if voucher.bytes == nil || !o.now().Add(voucherRefreshMargin).Before(time.Unix(voucher.notAfter, 0)) {
+		v, err := o.issueVoucher(attemptCtx, voucherSubject{
+			sealerID: e.sealerID, epoch: e.epoch, kmsKeyVersion: kmsKeyVersion,
+			publicKey: e.publicKey, pubkeyHash: e.pubkeyHash,
+		})
 		if err != nil {
 			outcome.err = fmt.Errorf("sign voucher: %w", err)
 		} else {
@@ -260,8 +277,9 @@ func (o *registrationOutbox) attempt(ctx context.Context, e *registrationEntry) 
 		}
 	}
 	if outcome.err == nil {
-		// The not-after is rebuilt per attempt so a long retry does not
-		// shorten the registered key's life.
+		// The body not-after is rebuilt per attempt so a long retry does not
+		// shorten the registered key's life. It stays 720 h, independent of
+		// the voucher's claim 4, until slice 08 caps it at claim 4.
 		outcome = o.post(attemptCtx, RegisterDelegateKeysBody{
 			SealerID: e.sealerID,
 			Keys: []RegisterDelegateKeyEntry{{
@@ -269,7 +287,7 @@ func (o *registrationOutbox) attempt(ctx context.Context, e *registrationEntry) 
 				PublicKey: base64.StdEncoding.EncodeToString(e.coseKey),
 				Epoch:     e.epoch,
 				NotAfter:  o.now().Add(o.ttl).Unix(),
-				Voucher:   base64.StdEncoding.EncodeToString(voucher),
+				Voucher:   base64.StdEncoding.EncodeToString(voucher.bytes),
 			}},
 		})
 	}
