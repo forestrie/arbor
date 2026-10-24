@@ -2,6 +2,7 @@ package sealer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -12,49 +13,58 @@ const (
 	delegateSeedRetryBackoffMax   = 30 * time.Second
 )
 
-// StartDelegateKeysWithRetry loads the standing delegate keys at boot and wires
-// them into the lease manager. When DELEGATE_KEY_EPOCH>=1 the custodian is
-// REQUIRED (there is no on-demand degrade), so on failure this retries with
-// backoff in the background rather than exiting or silently continuing without
-// keys — letting the sealer and custodian start in any order (ADR-0050 boot
-// posture, phase J1). Non-blocking: the first attempt runs inline (so a healthy
-// custodian wires keys before the queue consumer starts); a failing first
-// attempt hands off to a background retry while the sealer serves liveness.
+// StartDelegateKeysWithRetry loads the standing delegate keys at boot and
+// installs them in the lease manager. The custodian (or the local seed) is
+// required: there is no on-demand fallback (devdocs plan-2609-12 slice 10).
+// On failure it retries with backoff in the background rather than exiting,
+// so the sealer and custodian start in any order (ADR-0050 boot posture,
+// phase J1). The first attempt runs inline, so a healthy seed source installs
+// keys before this returns. installed fires once keys are installed; main
+// serves /readyz from it and starts consuming only then.
 func StartDelegateKeysWithRetry(
 	ctx context.Context,
 	httpClient *HTTPClient,
 	logger *slog.Logger,
 	cfg Config,
 	leaseMgr *DelegationLeaseManager,
+	installed *DelegateKeysInstalled,
 ) {
-	if cfg.DelegateKeyEpoch == 0 {
-		logger.Info("delegation-in-advance explicitly disabled (DELEGATE_KEY_EPOCH=0)")
-		return
-	}
 	load := func() (*DelegateKeySet, error) {
 		return StartDelegateKeySchedule(ctx, httpClient, logger, cfg)
 	}
-	onReady := func(keys *DelegateKeySet) {
-		leaseMgr.SetDelegateKeys(keys)
-		logger.Warn("delegation-in-advance enabled", "delegate_key_epoch", cfg.DelegateKeyEpoch)
-	}
-	if keys, err := load(); err == nil {
-		if keys != nil {
-			onReady(keys)
-		}
-		return
-	} else {
-		logger.Warn("delegate key schedule not ready at boot (retrying in background)", "error", err)
-	}
-	go loadDelegateKeysWithRetry(
-		ctx, logger, load, onReady,
+	startDelegateKeys(
+		ctx, logger, load, leaseMgr, installed,
 		delegateSeedRetryBackoffStart, delegateSeedRetryBackoffMax,
 	)
 }
 
+// startDelegateKeys is StartDelegateKeysWithRetry with the load and backoff
+// seams exposed for unit testing.
+func startDelegateKeys(
+	ctx context.Context,
+	logger *slog.Logger,
+	load func() (*DelegateKeySet, error),
+	leaseMgr *DelegationLeaseManager,
+	installed *DelegateKeysInstalled,
+	backoffStart, backoffMax time.Duration,
+) {
+	onReady := func(keys *DelegateKeySet) {
+		leaseMgr.SetDelegateKeys(keys)
+		installed.fire()
+		logger.Warn("delegation-in-advance enabled", "delegate_key_epoch", keys.currentEpoch)
+	}
+	keys, err := loadKeys(load)
+	if err == nil {
+		onReady(keys)
+		return
+	}
+	logger.Warn("delegate key schedule not ready at boot (retrying in background)", "error", err)
+	go loadDelegateKeysWithRetry(ctx, logger, load, onReady, backoffStart, backoffMax)
+}
+
 // loadDelegateKeysWithRetry retries load with exponential backoff until it
 // succeeds or ctx is cancelled, invoking onReady once on success. Extracted for
-// unit testing; StartDelegateKeysWithRetry runs it in a goroutine.
+// unit testing; startDelegateKeys runs it in a goroutine.
 func loadDelegateKeysWithRetry(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -69,16 +79,24 @@ func loadDelegateKeysWithRetry(
 			return
 		case <-time.After(backoff):
 		}
-		keys, err := load()
+		keys, err := loadKeys(load)
 		if err == nil {
-			if keys != nil {
-				onReady(keys)
-			}
+			onReady(keys)
 			return
 		}
 		logger.Warn("delegate key schedule not ready (will retry)", "error", err)
 		backoff = min(backoff*2, backoffMax)
 	}
+}
+
+// loadKeys runs load and treats a successful load with no keys as a failure,
+// so the installed gate can never open without keys.
+func loadKeys(load func() (*DelegateKeySet, error)) (*DelegateKeySet, error) {
+	keys, err := load()
+	if err == nil && keys == nil {
+		err = errors.New("delegate key load returned no keys")
+	}
+	return keys, err
 }
 
 // StartDelegateKeySchedule loads the sealer's standing delegate keys (epoch N
@@ -88,14 +106,9 @@ func loadDelegateKeysWithRetry(
 // (FOR-390 phase G3), so registration carries a verifiable binding to the
 // sealer identity and a compromised app-token cannot inject a rogue key.
 //
-// Returns nil when the feature is off (DelegateKeyEpoch == 0) so callers can
-// gate hot-path behaviour on a non-nil key set. Boot-time only; nothing here
-// touches the per-seal path.
+// Boot-time only; nothing here touches the per-seal path. On success the key
+// set is never nil.
 func StartDelegateKeySchedule(ctx context.Context, httpClient *HTTPClient, logger *slog.Logger, cfg Config) (*DelegateKeySet, error) {
-	if cfg.DelegateKeyEpoch == 0 {
-		logger.Info("delegation-in-advance explicitly disabled (DELEGATE_KEY_EPOCH=0)")
-		return nil, nil
-	}
 	provider, err := newSeedProvider(cfg, httpClient, logger)
 	if err != nil {
 		return nil, fmt.Errorf("delegate seed provider: %w", err)

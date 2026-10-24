@@ -6,8 +6,8 @@
 // custodian (which re-derives the public keys at seed issuance to register and
 // vouch for them — FOR-390 phase G) import this package, so the two can never
 // drift. Drift would be silent and expensive: registered public keys that do
-// not match the sealer's keys make every coverage-retrieval lookup miss, and
-// the sealer falls back to on-demand issuance with no error anywhere. The
+// not match the sealer's keys make every coverage-retrieval lookup miss, so
+// the coordinator answers every lease request as pending and nothing seals. The
 // golden-vector test in this package pins the wire so a change on either side
 // is caught in CI.
 //

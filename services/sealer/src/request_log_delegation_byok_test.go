@@ -49,7 +49,7 @@ func TestRequestLogDelegationLease_BYOKHTTPTrustRoot(t *testing.T) {
 		HTTPClient: NewHTTPClient(nil),
 	}
 
-	lease, err := RequestLogDelegationLease(
+	lease, err := requestLeaseForTest(t,
 		context.Background(),
 		NewHTTPClient(nil),
 		trustRoot,
@@ -98,7 +98,7 @@ func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongRoot(t *testing.T) {
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
 	defer issuerSrv.Close()
 
-	_, err = RequestLogDelegationLease(
+	_, err = requestLeaseForTest(t,
 		context.Background(),
 		NewHTTPClient(nil),
 		&HTTPTrustRootClient{BaseURL: trustSrv.URL, HTTPClient: NewHTTPClient(nil)},
@@ -132,7 +132,7 @@ func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongLog(t *testing.T) {
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, "ffffffffffffffffffffffffffffffff", nil)
 	defer issuerSrv.Close()
 
-	_, err = RequestLogDelegationLease(
+	_, err = requestLeaseForTest(t,
 		context.Background(),
 		NewHTTPClient(nil),
 		&HTTPTrustRootClient{BaseURL: trustSrv.URL, HTTPClient: NewHTTPClient(nil)},

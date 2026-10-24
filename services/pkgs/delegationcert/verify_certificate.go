@@ -152,7 +152,7 @@ func verifyES256Signature(
 // delegation certificate payload (label 5).
 //
 // This is a verification path, not an informational one — the sealer binds
-// its ephemeral key to what this returns — so it decodes the same way
+// its signing key to what this returns — so it decodes the same way
 // VerifyCertificateSignature does. A permissive read here could resolve the
 // payload differently from the read the signature covered.
 func DelegatedKeyFromCertificate(certBytes []byte) (*DelegatedCoseKey, Curve, error) {
@@ -188,7 +188,7 @@ func DelegatedKeyFromCertificate(certBytes []byte) (*DelegatedCoseKey, Curve, er
 	return delegatedCoseKeyFromMap(m)
 }
 
-// DelegatedKeyMatches compares a delegated COSE key to an ephemeral public key.
+// DelegatedKeyMatches compares a delegated COSE key to a public key.
 func DelegatedKeyMatches(delegated *DelegatedCoseKey, pub *ecdsa.PublicKey) bool {
 	if delegated == nil || pub == nil || pub.X == nil || pub.Y == nil {
 		return false

@@ -138,7 +138,7 @@ func TestDelegateKeySet_HeldPubkeyHashes(t *testing.T) {
 	}
 	var nilSet *DelegateKeySet
 	if got := nilSet.HeldPubkeyHashes(); got != nil {
-		t.Fatal("nil set (on-demand model) must advertise no held keys")
+		t.Fatal("nil set must advertise no held keys")
 	}
 }
 
@@ -332,19 +332,6 @@ func TestNewSeedProvider_Selection(t *testing.T) {
 // custodian's registration test; the sealer no longer self-registers (the
 // custodian registers the standing key + voucher at seed issuance, FOR-390
 // phase G3/G4).
-
-// TestStartDelegateKeySchedule_Disabled confirms the feature is entirely off
-// at epoch 0 (no seed source needed, no key set returned).
-func TestStartDelegateKeySchedule_Disabled(t *testing.T) {
-	logger, _ := NewLogger(0)
-	keys, err := StartDelegateKeySchedule(context.Background(), NewHTTPClient(logger), logger, Config{DelegateKeyEpoch: 0})
-	if err != nil {
-		t.Fatalf("disabled must not error: %v", err)
-	}
-	if keys != nil {
-		t.Fatal("disabled must return nil key set")
-	}
-}
 
 // TestStartDelegateKeySchedule_LocalSeed exercises the full boot load path with
 // the self-hosted seed source. The sealer loads the standing keys but no longer

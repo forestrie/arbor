@@ -7,8 +7,8 @@ import (
 )
 
 // TestDelegationIssueRequest_HeldPublicKeyHashesWire: the field is omitted on
-// the wire when empty (on-demand sealers and coordinators that predate FOR-586
-// see an unchanged request) and carried verbatim when set.
+// the wire when empty (coordinators that predate FOR-586 see an unchanged
+// request) and carried verbatim when set.
 func TestDelegationIssueRequest_HeldPublicKeyHashesWire(t *testing.T) {
 	base := DelegationIssueRequest{LogID: []byte{1}, Algorithm: "ES256", DelegatedPublicKey: []byte{2}}
 	raw, err := cbor.Marshal(base)

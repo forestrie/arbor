@@ -11,4 +11,9 @@ var (
 	// request but does not yet have wallet-signed material for it. The caller
 	// should keep the message unacked so a later queue delivery can retry.
 	ErrDelegationPending = errors.New("delegation material pending")
+	// ErrNoStandingDelegateKeys indicates a lease was requested before the
+	// standing delegate keys were installed. The sealer consumes only once
+	// they are, so this is a wiring error, never a cue to fall back
+	// (devdocs plan-2609-12 slice 10).
+	ErrNoStandingDelegateKeys = errors.New("no standing delegate keys installed")
 )

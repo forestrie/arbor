@@ -48,43 +48,27 @@ type Config struct {
 	// Delegated checkpoint keys are ES256 (P-256) only.
 	DelegationKeyCurve string
 
-	// DelegationRangePad widens the MMR range requested at delegation issuance
-	// beyond the current seal window: the request becomes
-	// [mmrStart, mmrEnd + pad] (in MMR node indices). Every range-coverage
-	// check downstream (lease cache, on-chain publishCheckpoint, coordinator
-	// exact-match against the request) accepts the wider window, so one signed
-	// certificate covers every subsequent seal until the log outgrows the pad
-	// or the lease TTL expires — issuance leaves the per-append hot path
-	// (FOR-386). The pad trades signer round-trips for pre-authorization
-	// breadth; the TTL still bounds the delegation in time. 0 disables padding
-	// (legacy per-seal windows).
-	DelegationRangePad uint64
-
 	// DelegationMaxLeases caps the sealer's per-log delegation lease LRU.
-	// With padded ranges (FOR-386) the lease cache is latency-load-bearing:
-	// eviction of an active log's lease forces a fresh issuance round-trip on
-	// its next seal (~10s+ with a wallet signer). Size for the expected number
-	// of concurrently active logs on the lane.
+	// The lease cache is latency-load-bearing: eviction of an active log's
+	// lease forces a fresh issuance round-trip on its next seal. Size for the
+	// expected number of concurrently active logs on the lane.
 	DelegationMaxLeases int
 
 	// Deprecated migration aliases (fall back when seam URLs/tokens unset).
 	CustodianURL      string
 	CustodianAppToken string
 
-	// Delegation-in-advance (ADR-0050 / plan-2607-20). When DelegateKeyEpoch
-	// is 0 the whole feature is off and the sealer behaves exactly as before
-	// (on-demand issuance). When >= 1 the sealer derives standing delegate
-	// keys for epochs N and N-1 at boot from a seed source and advertises the
-	// current key to the coordinator. No private material is ever at rest:
-	// the seed is re-derived each boot from KMS (via the custodian) or, for
-	// self-hosted sealers, from a locally-held DELEGATE_SEED.
+	// Delegation-in-advance (ADR-0050 / plan-2607-20) is the only delegation
+	// model. The sealer derives standing delegate keys for epochs N and N-1
+	// at boot from a seed source; the epoch is the version number of the
+	// lane's KMS MAC key. No private material is ever at rest: the seed is
+	// re-derived each boot from KMS (via the custodian) or, for self-hosted
+	// sealers, from a locally-held DELEGATE_SEED.
 	//
-	// DELEGATE_KEY_EPOCH has no default: 0 (feature off) and >= 1 (feature on)
-	// are both meaningful operational states, so an unset variable is a
-	// deployment that never stated which one it wanted. Validate rejects it
-	// and the sealer refuses to start (FOR-390). DelegateKeyEpochRaw carries
-	// the verbatim environment value so Validate can tell "absent" from an
-	// explicit "0".
+	// DELEGATE_KEY_EPOCH has no default and must be >= 1. It used to accept 0
+	// for on-demand ephemeral-key delegation, which was removed (devdocs
+	// plan-2609-12 slice 10). DelegateKeyEpochRaw carries the verbatim
+	// environment value so Validate can name an unset variable.
 	SealerID            string
 	DelegateKeyEpoch    uint32
 	DelegateKeyEpochRaw string
@@ -248,17 +232,13 @@ func LoadConfig() Config {
 		UnivocityAuthorityURL: os.Getenv("UNIVOCITY_AUTHORITY_URL"),
 		UnivocityAPIToken:     os.Getenv("UNIVOCITY_API_TOKEN"),
 		DelegationKeyCurve:    getEnvOrDefault("DELEGATION_KEY_CURVE", "secp256r1"),
-		// Default 65536 MMR nodes (~32k leaves): generous enough that at demo
-		// and e2e append rates the lease TTL — not the range — is the binding
-		// constraint, i.e. many minutes of cached ephemeral-key reuse.
-		DelegationRangePad:  getUint64("DELEGATION_RANGE_PAD", 65536),
-		DelegationMaxLeases: getInt("DELEGATION_MAX_LEASES", 1000),
-		ContractRPCURL:      os.Getenv("UNIVOCITY_CONTRACT_RPC_URL"),
-		R2URL:               os.Getenv("R2_URL"),
-		R2Token:             r2Token,
-		AWSAccessKeyID:      os.Getenv("AWS_ACCESS_KEY_ID"),
-		AWSSecretAccessKey:  awsSecretAccessKey,
-		AWSRegion:           getEnvOrDefault("AWS_REGION", "auto"),
+		DelegationMaxLeases:   getInt("DELEGATION_MAX_LEASES", 1000),
+		ContractRPCURL:        os.Getenv("UNIVOCITY_CONTRACT_RPC_URL"),
+		R2URL:                 os.Getenv("R2_URL"),
+		R2Token:               r2Token,
+		AWSAccessKeyID:        os.Getenv("AWS_ACCESS_KEY_ID"),
+		AWSSecretAccessKey:    awsSecretAccessKey,
+		AWSRegion:             getEnvOrDefault("AWS_REGION", "auto"),
 
 		SealerID: getEnvOrDefault("SEALER_ID", "sealer-default"),
 		// No default — Validate rejects an unset/unparseable value (FOR-390).
@@ -366,7 +346,6 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "COORDINATOR_REGISTER_URL", c.CoordinatorRegisterURL)
 	logSecretDigest(logger, "COORDINATOR_REGISTER_TOKEN", c.CoordinatorRegisterToken)
 	logConfigValue(logger, "DELEGATION_KEY_CURVE", c.DelegationKeyCurve)
-	logConfigValue(logger, "DELEGATION_RANGE_PAD", c.DelegationRangePad)
 	logConfigValue(logger, "DELEGATION_MAX_LEASES", c.DelegationMaxLeases)
 	logConfigValue(logger, "UNIVOCITY_CONTRACT_RPC_URL", c.ContractRPCURL)
 	logConfigValue(logger, "R2_URL", c.R2URL)
@@ -417,17 +396,21 @@ func (c Config) Validate() error {
 		return fmt.Errorf("DELEGATION_KEY_CURVE must be secp256r1 (ES256)")
 	}
 
-	// Delegation-in-advance is fail-closed on configuration, not on value: an
-	// operator must say 0 (off) or >= 1 (on) rather than inherit a default
-	// nobody chose (FOR-390 / ADR-0050).
+	// Delegation-in-advance is the only model, so the epoch must be stated and
+	// non-zero, and there must be a seed source to derive keys from
+	// (FOR-390 / ADR-0050; devdocs plan-2609-12 slice 10).
 	if c.DelegateKeyEpochRaw == "" {
-		return fmt.Errorf(
-			"DELEGATE_KEY_EPOCH is required and has no default " +
-				"(set 0 to disable delegation-in-advance, or >= 1 to enable it)",
-		)
+		return fmt.Errorf("DELEGATE_KEY_EPOCH is required and has no default (set it to the lane's MAC key version, >= 1)")
 	}
-	if _, err := strconv.ParseUint(c.DelegateKeyEpochRaw, 10, 32); err != nil {
+	epoch, err := strconv.ParseUint(c.DelegateKeyEpochRaw, 10, 32)
+	if err != nil {
 		return fmt.Errorf("DELEGATE_KEY_EPOCH is invalid: %w", err)
+	}
+	if epoch == 0 {
+		return fmt.Errorf("DELEGATE_KEY_EPOCH must be >= 1 (on-demand delegation was removed, plan-2609-12 slice 10)")
+	}
+	if c.DelegateSeedCustodianURL == "" && len(c.DelegateSeedLocal) == 0 {
+		return fmt.Errorf("no delegate seed source: set DELEGATE_SEED_CUSTODIAN_URL (or CUSTODIAN_URL); DELEGATE_SEED is for tests only")
 	}
 
 	if c.R2URL == "" {
