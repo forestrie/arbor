@@ -27,6 +27,7 @@ type Metrics struct {
 	// Gauges
 	DelegationLeaseExpiry prometheus.Gauge
 	ResyncLastPageLogs    prometheus.Gauge
+	DelegateKeyRegistered *prometheus.GaugeVec
 }
 
 // NewMetrics creates and registers all metrics with the provided registry.
@@ -47,6 +48,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		ResyncChecksTotal:         newResyncChecksTotal(),
 		ResyncResealsTotal:        newResyncResealsTotal(),
 		ResyncLastPageLogs:        newResyncLastPage(),
+		DelegateKeyRegistered:     newDelegateKeyRegistered(),
 	}
 
 	reg.MustRegister(
@@ -65,6 +67,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.ResyncChecksTotal,
 		m.ResyncResealsTotal,
 		m.ResyncLastPageLogs,
+		m.DelegateKeyRegistered,
 	)
 
 	return m
