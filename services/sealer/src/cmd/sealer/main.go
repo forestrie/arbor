@@ -97,11 +97,12 @@ func main() {
 	metricsRegistry := prometheus.NewRegistry()
 	metricsHandles := metrics.NewMetrics(metricsRegistry)
 
-	// /readyz answers 503 until the standing delegate keys are installed.
-	keysInstalled := sealer.NewDelegateKeysInstalled()
+	// /readyz answers 503 until the standing delegate keys are installed and
+	// the coordinator has accepted the current key's first assertion.
+	readiness := sealer.NewDelegateKeyReadiness()
 
 	healthMux := http.NewServeMux()
-	setupHealthChecks(healthMux, keysInstalled)
+	setupHealthChecks(healthMux, readiness)
 	healthMux.Handle("/metrics", metrics.Handler(metricsRegistry))
 
 	healthServer := &http.Server{
@@ -120,22 +121,25 @@ func main() {
 	// model: derive the standing delegate keys (epoch N and N-1) from the
 	// custodian-gated seed and route lease issuance through them (Phase D).
 	// StartDelegateKeysWithRetry retries in the background if the custodian is
-	// not yet up, so sealer and custodian start in any order (Phase J1).
-	// Deterministic re-derivation means a restart re-loads the same keys, so
-	// outstanding advance certificates stay valid.
-	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr, keysInstalled)
+	// not yet up, so sealer and custodian start in any order (Phase J1), and
+	// asserts the keys' registration with the coordinator every minute
+	// (devdocs plan-2609-12 slice 05). Deterministic re-derivation means a
+	// restart re-loads the same keys, so outstanding advance certificates
+	// stay valid.
+	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, cfg, leaseMgr, readiness, metricsHandles)
 
-	// Consume only once the standing keys are installed (devdocs plan-2609-12
-	// ruling D1 (a), slice 10). Until then the pod is not Ready and does no
-	// work, so a rollout whose new pod cannot load keys keeps the old pod
-	// sealing alone instead of running two consumers.
+	// Consume only once Ready: keys installed and the current key asserted
+	// (devdocs plan-2609-12 ruling D1 (a), slice 05 change 8). Until then the
+	// pod does no work, so a rollout whose new pod cannot load or register
+	// its keys keeps the old pod sealing alone instead of running two
+	// consumers.
 	queueConsumer := consumer.NewQueueConsumer(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	resyncMgr, err := sealer.NewResyncManager(cfg, httpClient, logger, leaseMgr, metricsHandles)
 	if err != nil {
 		slog.Error("failed to build resync manager; resync disabled", "error", err)
 	}
-	keysInstalled.RunWhenInstalled(ctx, func() {
-		slog.Info("standing delegate keys installed; starting queue consumer")
+	readiness.RunWhenReady(ctx, func() {
+		slog.Info("sealer ready; starting queue consumer")
 		go queueConsumer.ConsumeQueue(ctx)
 		// Level-triggered resync (ADR-0007 phase-3 / plan-2607-04): the
 		// correctness backstop to the edge-triggered queue. Disabled unless
@@ -158,13 +162,13 @@ func main() {
 	slog.Warn("service stopped")
 }
 
-func setupHealthChecks(mux *http.ServeMux, keysInstalled *sealer.DelegateKeysInstalled) {
+func setupHealthChecks(mux *http.ServeMux, readiness *sealer.DelegateKeyReadiness) {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	mux.HandleFunc("/readyz", keysInstalled.ReadyzHandler())
+	mux.HandleFunc("/readyz", readiness.ReadyzHandler())
 
 	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{

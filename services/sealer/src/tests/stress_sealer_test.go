@@ -293,13 +293,15 @@ func runCheckpointLogs(
 	)
 	// Delegation-in-advance is the only model (devdocs plan-2609-12 slice 10):
 	// install standing keys from a local seed so the fake issuer certifies the
-	// standing key.
-	keys, err := sealer.StartDelegateKeySchedule(ctx, httpClient, logger, sealer.Config{
+	// standing key. The local seed asserts no registration, so the sealer is
+	// Ready as soon as the keys install (slice 05).
+	readiness := sealer.NewDelegateKeyReadiness()
+	sealer.StartDelegateKeysWithRetry(ctx, httpClient, logger, sealer.Config{
+		SealerID:          "stress-sealer",
 		DelegateKeyEpoch:  1,
 		DelegateSeedLocal: []byte("stress-test-delegate-seed-0123456789"),
-	})
-	require.NoError(t, err)
-	leaseMgr.SetDelegateKeys(keys)
+	}, leaseMgr, readiness, nil)
+	require.True(t, readiness.Ready(), "standing keys must install from the local seed")
 	svc := sealer.SealerService{
 		Cfg:          cfg,
 		HTTPClient:   httpClient,

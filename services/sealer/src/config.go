@@ -88,10 +88,13 @@ type Config struct {
 	DelegateSeedCustodianToken string
 	DelegateSeedLocal          []byte
 
-	// CoordinatorRegisterURL is where the sealer POSTs its advertised delegate
-	// key (POST /api/sealer/delegate-keys). Best-effort; falls back to
-	// TrustRootURL (the coordinator seam). Registration failure never blocks
-	// boot — the coordinator can also learn the key at issuance time.
+	// CoordinatorRegisterURL/Token address the delegation coordinator; they
+	// fall back to TrustRootURL/Token (the coordinator seam). With the
+	// custodian seed source the sealer asserts each standing delegate key
+	// there every minute (POST /api/sealer/delegate-keys, with the
+	// custodian's voucher), and is not Ready until the current key's first
+	// assertion succeeds (devdocs plan-2609-12 slice 05). Resync also pages
+	// /api/delegations/active from it.
 	CoordinatorRegisterURL   string
 	CoordinatorRegisterToken string
 
@@ -412,6 +415,11 @@ func (c Config) Validate() error {
 	if c.DelegateSeedCustodianURL == "" && len(c.DelegateSeedLocal) == 0 {
 		return fmt.Errorf("no delegate seed source: set DELEGATE_SEED_CUSTODIAN_URL (or CUSTODIAN_URL); DELEGATE_SEED is for tests only")
 	}
+	if c.DelegateSeedCustodianURL != "" {
+		if err := c.validateCoordinatorRegister(); err != nil {
+			return err
+		}
+	}
 
 	if c.R2URL == "" {
 		return fmt.Errorf("R2_URL is required")
@@ -423,6 +431,26 @@ func (c Config) Validate() error {
 		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for SigV4 signing (set AWS_SECRET_ACCESS_KEY or set R2_TOKEN to derive it)")
 	}
 
+	return nil
+}
+
+// validateCoordinatorRegister checks the coordinator seam the sealer asserts
+// its delegate keys on when the custodian is its seed source (devdocs
+// plan-2609-12 slice 05). Without it the sealer could never become Ready.
+// TRUST_ROOT_URL may fall back to CUSTODIAN_URL, and COORDINATOR_REGISTER_URL
+// to TRUST_ROOT_URL, so a custodian URL here means no coordinator was set.
+func (c Config) validateCoordinatorRegister() error {
+	const fix = "set COORDINATOR_REGISTER_URL/_TOKEN, or TRUST_ROOT_URL/_TOKEN, to the delegation coordinator"
+	reg := strings.TrimRight(strings.TrimSpace(c.CoordinatorRegisterURL), "/")
+	cust := strings.TrimRight(strings.TrimSpace(c.CustodianURL), "/")
+	switch {
+	case reg == "":
+		return fmt.Errorf("the custodian seed source asserts delegate keys with the coordinator, but COORDINATOR_REGISTER_URL resolved empty: %s", fix)
+	case reg == cust:
+		return fmt.Errorf("COORDINATOR_REGISTER_URL resolved to CUSTODIAN_URL %q (TRUST_ROOT_URL fell back to it); the sealer asserts delegate keys with the coordinator: %s", c.CustodianURL, fix)
+	case strings.TrimSpace(c.CoordinatorRegisterToken) == "":
+		return fmt.Errorf("COORDINATOR_REGISTER_TOKEN resolved empty; the sealer asserts delegate keys with the coordinator: %s", fix)
+	}
 	return nil
 }
 

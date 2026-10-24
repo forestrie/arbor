@@ -71,7 +71,7 @@ func phaseDKeys(t *testing.T) (*DelegateKeySet, *ecdsa.PrivateKey) {
 	}
 	// Re-derive the epoch N-1 key for the rotation-overlap cases.
 	prevSeed, _ := local.Seed(context.Background(), 2)
-	prev, err := deriveDelegateKey(prevSeed, 2, 0)
+	prev, err := deriveDelegateKey(prevSeed.Seed, 2, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

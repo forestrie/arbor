@@ -1,6 +1,7 @@
 package sealer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -54,9 +55,18 @@ func pubkeyHashHex(pub *ecdsa.PublicKey) (string, error) {
 
 // SeedProvider yields the delegate-key seed for an epoch. Implementations:
 // the custodian KMS-MAC endpoint (production) and a locally-held seed
-// (self-hosted sealers).
+// (tests).
 type SeedProvider interface {
-	Seed(ctx context.Context, epoch uint32) ([]byte, error)
+	Seed(ctx context.Context, epoch uint32) (DelegateSeed, error)
+}
+
+// DelegateSeed is one epoch's seed and, from the custodian, the registrar
+// voucher for the key it derives (delegate-seed apiVersion 3, devdocs
+// plan-2609-12 slice 07). Voucher is nil for the local seed, and when the
+// custodian could not sign one.
+type DelegateSeed struct {
+	Seed    []byte
+	Voucher *DelegateKeyVoucher
 }
 
 // localSeedProvider serves a fixed seed for all epochs mixed with the epoch,
@@ -69,22 +79,28 @@ type SeedProvider interface {
 // as a hermetic seed source for tests.
 type localSeedProvider struct{ secret []byte }
 
-func (p localSeedProvider) Seed(_ context.Context, epoch uint32) ([]byte, error) {
+// Seed derives epoch's seed from the local secret. It carries no voucher.
+func (p localSeedProvider) Seed(_ context.Context, epoch uint32) (DelegateSeed, error) {
 	if len(p.secret) == 0 {
-		return nil, fmt.Errorf("DELEGATE_SEED is empty")
+		return DelegateSeed{}, fmt.Errorf("DELEGATE_SEED is empty")
 	}
 	r := hkdf.New(sha256.New, p.secret, nil, []byte(fmt.Sprintf("forestrie/delegate-seed/local/%d", epoch)))
 	out := make([]byte, 32)
 	if _, err := io.ReadFull(r, out); err != nil {
-		return nil, err
+		return DelegateSeed{}, err
 	}
-	return out, nil
+	return DelegateSeed{Seed: out}, nil
 }
 
-// delegateKeyEntry is a standing delegate key with the epoch it belongs to.
+// delegateKeyEntry is a standing delegate key with the epoch it belongs to,
+// and the voucher that came with its seed (nil for the local seed, or when
+// the custodian could not sign one).
 type delegateKeyEntry struct {
-	epoch uint32
-	priv  *ecdsa.PrivateKey
+	epoch      uint32
+	priv       *ecdsa.PrivateKey
+	coseKey    []byte // canonical COSE_Key: the registration's publicKey
+	pubkeyHash string
+	voucher    *DelegateKeyVoucher
 }
 
 // DelegateKeySet holds the standing delegate keys the sealer can sign with,
@@ -145,7 +161,8 @@ func (s *DelegateKeySet) KeyFor(pub *ecdsa.PublicKey) *ecdsa.PrivateKey {
 // disabled after the overlap ran its course, plan-2609-11) is not an error:
 // the set loads with epoch N alone and PreviousRetired reports it. Any other
 // N-1 failure, and any failure for epoch N, fails the load so the boot-time
-// retry keeps trying.
+// retry keeps trying. So does a voucher that binds a key other than the one
+// its seed derives (devdocs plan-2609-12 slice 05 change 2).
 func LoadDelegateKeys(ctx context.Context, provider SeedProvider, epoch uint32) (*DelegateKeySet, error) {
 	if epoch == 0 {
 		return nil, fmt.Errorf("delegate key epoch must be >= 1")
@@ -164,16 +181,23 @@ func LoadDelegateKeys(ctx context.Context, provider SeedProvider, epoch uint32) 
 			}
 			return nil, fmt.Errorf("seed for epoch %d: %w", e, err)
 		}
-		k, err := deriveDelegateKey(seed, e, 0)
+		k, err := deriveDelegateKey(seed.Seed, e, 0)
 		if err != nil {
 			return nil, err
+		}
+		coseKey, err := delegateCoseKeyBytes(&k.PublicKey)
+		if err != nil {
+			return nil, fmt.Errorf("encode delegate key for epoch %d: %w", e, err)
 		}
 		h, err := pubkeyHashHex(&k.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("hash delegate key for epoch %d: %w", e, err)
 		}
+		if seed.Voucher != nil && !bytes.Equal(seed.Voucher.CoseKey, coseKey) {
+			return nil, fmt.Errorf("seed for epoch %d: voucher binds a key other than the derived key %s; refusing the response", e, h)
+		}
 		s.byPubkeyHash[h] = k
-		s.entries = append(s.entries, delegateKeyEntry{epoch: e, priv: k})
+		s.entries = append(s.entries, delegateKeyEntry{epoch: e, priv: k, coseKey: coseKey, pubkeyHash: h, voucher: seed.Voucher})
 		if e == epoch {
 			s.current = k
 		}
