@@ -27,8 +27,9 @@ type DelegationIssueRequest struct {
 	// delegate key the sealer currently holds the private half of (its standing
 	// keys, epochs N and N-1). The coordinator's coverage retrieval then serves
 	// only certificates bound to one of these keys, never one bound to a
-	// registered key the sealer has since dropped (FOR-586). Omitted in the
-	// on-demand ephemeral model, where the request key is the only key.
+	// registered key the sealer has since dropped (FOR-586). The sealer
+	// always sends it; omitempty keeps the wire unchanged for callers that
+	// do not.
 	HeldPublicKeyHashes []string `cbor:"heldPublicKeyHashes,omitempty"`
 }
 

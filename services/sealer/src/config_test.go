@@ -169,3 +169,20 @@ func TestConfigValidate_requiresDelegateSeedSource(t *testing.T) {
 		t.Fatalf("custodian seed source should be valid, got: %v", err)
 	}
 }
+
+// Lanes set only CUSTODIAN_URL (arbor-flux Taskfile, Doppler sealer config),
+// not DELEGATE_SEED_CUSTODIAN_URL. LoadConfig must fall back to it so the
+// seed-source check in Validate passes, or the sealer refuses to start.
+func TestLoadConfig_seedSourceFallsBackToCustodianURL(t *testing.T) {
+	t.Setenv("DELEGATE_SEED_CUSTODIAN_URL", "")
+	t.Setenv("DELEGATE_SEED", "")
+	t.Setenv("CUSTODIAN_URL", "http://custodian:9092")
+	if got := LoadConfig().DelegateSeedCustodianURL; got != "http://custodian:9092" {
+		t.Fatalf("DelegateSeedCustodianURL=%q want the CUSTODIAN_URL fallback", got)
+	}
+
+	t.Setenv("DELEGATE_SEED_CUSTODIAN_URL", "http://seed:9092")
+	if got := LoadConfig().DelegateSeedCustodianURL; got != "http://seed:9092" {
+		t.Fatalf("DelegateSeedCustodianURL=%q want the explicit value", got)
+	}
+}
