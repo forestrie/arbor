@@ -25,4 +25,8 @@ func TestSetDelegateKeyRegistered(t *testing.T) {
 	if n := testutil.CollectAndCount(m.DelegateKeyRegistered, "sealer_delegate_key_registered"); n != 2 {
 		t.Errorf("series = %d, want 2", n)
 	}
+	m.DeleteDelegateKeyRegistered(1)
+	if n := testutil.CollectAndCount(m.DelegateKeyRegistered, "sealer_delegate_key_registered"); n != 1 {
+		t.Errorf("series after delete = %d, want 1", n)
+	}
 }

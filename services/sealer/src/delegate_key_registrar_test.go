@@ -75,7 +75,15 @@ func TestCoordinatorRegistrar_Outcomes(t *testing.T) {
 		{201, `{}`, assertOK},
 		{409, `{"title":"Conflict","detail":"sealer s epoch 3 already has delegate key aa; refusing bb"}`, assertConflict},
 		{410, `{"title":"Gone","detail":"delegate key tombstoned"}`, assertTombstoned},
-		{400, `{"title":"Invalid voucher","detail":"delegate-key voucher failed verification (expired)"}`, assertVoucherRefused},
+		// A fresh voucher fixes these (canopy post-delegate-keys.ts and
+		// delegation-store.ts parseDelegateKeyBatch).
+		{400, `{"type":"about:blank","title":"Invalid voucher","detail":"delegate-key voucher failed verification (expired)"}`, assertVoucherRefused},
+		{400, `{"type":"about:blank","title":"Invalid voucher","detail":"delegate-key voucher failed verification (signature)"}`, assertVoucherRefused},
+		{400, `{"type":"about:blank","title":"Invalid request","status":400,"detail":"notAfter must be in the future"}`, assertVoucherRefused},
+		// Malformed bodies: a fresh voucher does not fix them.
+		{400, `{"type":"about:blank","title":"Invalid request","detail":"publicKey and voucher must be valid base64"}`, assertRetry},
+		{400, `{"type":"about:blank","title":"Invalid request","status":400,"detail":"voucher must be valid base64"}`, assertRetry},
+		{400, `{"type":"about:blank","title":"Invalid request","status":400,"detail":"voucher is required"}`, assertRetry},
 		{400, `{"title":"Invalid request","detail":"epoch must be >= 1"}`, assertRetry},
 		{401, `{}`, assertRetry},
 		{503, `not json`, assertRetry},

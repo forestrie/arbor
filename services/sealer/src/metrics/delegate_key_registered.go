@@ -29,3 +29,9 @@ func (m *Metrics) SetDelegateKeyRegistered(epoch uint32, registered bool) {
 	}
 	m.DelegateKeyRegistered.WithLabelValues(strconv.FormatUint(uint64(epoch), 10)).Set(v)
 }
+
+// DeleteDelegateKeyRegistered removes epoch's series, for a key the sealer no
+// longer asserts (retired), so the "== 0" alert does not fire on it.
+func (m *Metrics) DeleteDelegateKeyRegistered(epoch uint32) {
+	m.DelegateKeyRegistered.DeleteLabelValues(strconv.FormatUint(uint64(epoch), 10))
+}

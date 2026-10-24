@@ -56,7 +56,7 @@ func newDelegateKeyRunner(
 		assertBackoffStart: delegateKeyAssertBackoffStart,
 		assertBackoffMax:   delegateKeyAssertBackoffMax,
 		registeredFor:      delegateKeyRegisteredFor,
-		conflictLogEvery:   delegateKeyConflictLogInterval,
+		warnLogEvery:       delegateKeyWarnLogInterval,
 		refreshAfter:       voucherRefreshAfter,
 		refreshRetryAfter:  voucherRefreshRetryAfter,
 		now:                time.Now,

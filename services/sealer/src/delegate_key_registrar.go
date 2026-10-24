@@ -44,8 +44,8 @@ const (
 	assertConflict
 	// assertTombstoned is the 410 for a retired key (ruling 8). Final.
 	assertTombstoned
-	// assertVoucherRefused is a 400 naming the voucher (expired or refused):
-	// refresh vouchers now, then retry.
+	// assertVoucherRefused is a 400 that a fresh voucher fixes (refused or
+	// expired; see voucherFixes): refresh vouchers now, then retry.
 	assertVoucherRefused
 	// assertRetry is any other status or a transport error.
 	assertRetry
@@ -117,9 +117,27 @@ func (c coordinatorDelegateKeyRegistrar) assert(ctx context.Context, sealerID st
 		res.kind = assertConflict
 	case resp.StatusCode == http.StatusGone:
 		res.kind = assertTombstoned
-	case resp.StatusCode == http.StatusBadRequest &&
-		strings.Contains(strings.ToLower(problem.Title+" "+problem.Detail), "voucher"):
+	case resp.StatusCode == http.StatusBadRequest && voucherFixes(problem.Title, problem.Detail):
 		res.kind = assertVoucherRefused
 	}
 	return res
+}
+
+// Coordinator 400s that a fresh voucher fixes. Every problem there has type
+// "about:blank", so the title and detail are what is stable. Wire owner:
+// canopy packages/apps/delegation-coordinator src/handlers/post-delegate-keys.ts
+// ("Invalid voucher": the voucher failed verification, whatever the reason)
+// and src/durableobjects/delegation-store.ts parseDelegateKeyBatch ("Invalid
+// request" with notAfter in the past, which the sealer sends as the voucher's
+// claim 4). Other "Invalid request" details are malformed bodies (base64,
+// required fields) that a new voucher would not change.
+const (
+	coordinatorProblemInvalidVoucher  = "Invalid voucher"
+	coordinatorProblemInvalidRequest  = "Invalid request"
+	coordinatorDetailNotAfterInFuture = "notAfter must be in the future"
+)
+
+func voucherFixes(title, detail string) bool {
+	return title == coordinatorProblemInvalidVoucher ||
+		(title == coordinatorProblemInvalidRequest && detail == coordinatorDetailNotAfterInFuture)
 }

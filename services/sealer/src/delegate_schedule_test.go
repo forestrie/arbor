@@ -34,6 +34,12 @@ func (g *fakeRegisteredGauge) SetDelegateKeyRegistered(epoch uint32, registered 
 	g.set[epoch] = registered
 }
 
+func (g *fakeRegisteredGauge) DeleteDelegateKeyRegistered(epoch uint32) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.set, epoch)
+}
+
 // get returns the gauge value and whether the series exists.
 func (g *fakeRegisteredGauge) get(epoch uint32) (registered, exported bool) {
 	g.mu.Lock()
@@ -152,7 +158,7 @@ func newRunnerHarness(t *testing.T, epoch uint32) *runnerHarness {
 		assertBackoffStart: time.Millisecond,
 		assertBackoffMax:   5 * time.Millisecond,
 		registeredFor:      50 * time.Millisecond,
-		conflictLogEvery:   time.Hour,
+		warnLogEvery:       time.Hour,
 		refreshAfter:       func(time.Duration) time.Duration { return time.Hour },
 		refreshRetryAfter:  func(time.Duration) time.Duration { return 5 * time.Millisecond },
 		now:                func() time.Time { return time.Now().Add(time.Duration(h.skew.Load())) },
@@ -280,8 +286,11 @@ func TestDelegateKeyRunner_TombstoneStopsThatKeyOnly(t *testing.T) {
 	if n := h.coord.callCount(4); n != 1 {
 		t.Fatalf("tombstoned key asserted %d times, want 1", n)
 	}
-	if v, ok := h.gauge.get(4); !ok || v {
-		t.Fatal("a 410 sets the gauge to 0")
+	if _, ok := h.gauge.get(4); ok {
+		t.Fatal("a 410 deletes the key's gauge series, so a retired key never pages")
+	}
+	if v, ok := h.gauge.get(5); !ok || !v {
+		t.Fatal("the current key's series is unaffected")
 	}
 }
 
@@ -294,6 +303,68 @@ func TestDelegateKeyRunner_CurrentTombstoneHoldsReadiness(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	if h.r.readiness.Ready() || h.coord.callCount(5) != 1 {
 		t.Fatal("a current-key 410 holds readiness and stops asserting")
+	}
+	if _, ok := h.gauge.get(5); ok {
+		t.Fatal("a 410 deletes the key's gauge series")
+	}
+}
+
+// N-1 retired by the custodian after boot (the normal end of a rotation
+// overlap): its assertions and refresh stop and its gauge series is deleted,
+// not left at 0, so "registered == 0 for 15m" does not fire. N is
+// unaffected and the refresh returns to its normal schedule.
+func TestDelegateKeyRunner_PreviousRetiredAfterBootDeletesSeries(t *testing.T) {
+	h := newRunnerHarness(t, 5)
+	h.r.refreshAfter = func(time.Duration) time.Duration { return 30 * time.Millisecond }
+	h.r.refreshRetryAfter = func(time.Duration) time.Duration { return time.Millisecond }
+	h.start()
+	waitFor(t, "ready", h.r.readiness.Ready)
+	waitFor(t, "gauge 4 = 1", h.gaugeIs(4, true))
+	h.cust.set(func(f *fakeCustodianServer) { f.retired[4] = true })
+	waitFor(t, "series 4 deleted", func() bool { _, ok := h.gauge.get(4); return !ok })
+	n4 := h.coord.callCount(4)
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := h.gauge.get(4); ok {
+		t.Fatal("a retired epoch's series must stay deleted")
+	}
+	if h.coord.callCount(4) > n4+1 {
+		t.Fatal("a retired key must stop asserting")
+	}
+	if v, ok := h.gauge.get(5); !ok || !v {
+		t.Fatal("the current key's series is unaffected")
+	}
+	if !strings.Contains(h.logs.String(), "previous delegate epoch retired by the custodian; no longer asserting it") {
+		t.Fatal("retirement must be logged")
+	}
+	before := h.cust.requestCount()
+	time.Sleep(150 * time.Millisecond)
+	if n := h.cust.requestCount() - before; n > 30 {
+		t.Fatalf("%d seed requests in 150ms: the refresh is still retrying for the retired epoch", n)
+	}
+}
+
+// Failed assertions warn once per key per window, with a debug line per
+// attempt.
+func TestDelegateKeyRunner_FailureWarnsThrottled(t *testing.T) {
+	for name, kind := range map[string]assertKind{
+		"retry":           assertRetry,
+		"voucher-refused": assertVoucherRefused,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newRunnerHarness(t, 5)
+			h.coord.answer(5, kind)
+			h.start()
+			waitFor(t, "many failures", func() bool { return h.coord.callCount(5) >= 6 })
+			logs := h.logs.String()
+			warns := strings.Count(logs, "level=WARN msg=\"delegate key assertion failed") +
+				strings.Count(logs, "level=WARN msg=\"coordinator refused the delegate key voucher")
+			if warns != 1 {
+				t.Fatalf("%d warn lines for epoch 5 failures, want 1", warns)
+			}
+			if d := strings.Count(logs, "level=DEBUG msg=\"delegate key assertion attempt"); d < 6 {
+				t.Fatalf("%d debug lines, want one per attempt", d)
+			}
+		})
 	}
 }
 
