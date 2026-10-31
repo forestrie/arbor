@@ -16,6 +16,37 @@ tasks:
   # once build-deploy has finished pushing; while a run is mid-push, or
   # build-deploy has not got that far, this keeps polling until the deadline
   # rather than mix digests from two builds.
+  # build-deploy's tag is main-<sha7>-<GITHUB_RUN_NUMBER>, and a GitHub
+  # re-run keeps the run number. Pushing again would silently move the tag
+  # to a new digest: Flux would not redeploy (the tag string is unchanged),
+  # so lane A would keep running the old digest while the tag, and any
+  # release retagged from it, named the new one. Refuse instead; dispatch a
+  # fresh build-deploy run, which gets a new run number (FOR-611).
+  assert-unpushed:
+    desc: Fail if IMAGE_TAG already exists for any service
+    silent: true
+    requires:
+      vars: [IMAGE_TAG]
+    vars:
+      SERVICES: ranger scout sealer publisher custodian univocity
+    cmds:
+      - |
+        set -euo pipefail
+        tag='{{.IMAGE_TAG}}'
+        found=""
+        for s in {{.SERVICES}}; do
+          # No error handling around gcloud: a failed list fails the build.
+          if gcloud artifacts docker tags list "{{.IMAGE_URL}}/${s}" --format=json \
+              | jq -e --arg t "$tag" 'any(.[]; (.tag | split("/") | last) == $t)' >/dev/null; then
+            found="${found} ${s}"
+          fi
+        done
+        if [ -n "$found" ]; then
+          echo "::error::${tag} already exists for:${found}. A re-run reuses the run number and would move the tag to a new digest; dispatch a new build-deploy run instead (FOR-611)." >&2
+          exit 1
+        fi
+        echo "${tag} is new for every service"
+
   retag:
     desc: Tag the main-* images build-deploy pushed for COMMIT as VERSION
     silent: true
@@ -95,7 +126,10 @@ tasks:
         echo "resolved ${src_tag} for every service"
 
         # Resolve every digest, and refuse to move an existing release tag,
-        # before adding any tag: a release is all six services or none.
+        # before adding any tag. That makes validation all-or-nothing; the
+        # tagging itself is not atomic. If a `tags add` fails part-way, the
+        # services already tagged keep the tag, and re-running the release
+        # converges: a release tag already on the same digest is a no-op.
         for s in $services; do
           digest=$(digest_of "$s" "$src_tag")
           current=$(digest_of "$s" "$version")

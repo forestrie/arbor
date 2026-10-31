@@ -88,11 +88,24 @@ jobs:
         id: vars
         run: echo "image_tag=main-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
+      - name: Refuse to overwrite an existing image tag
+        env:
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
+        run: task release:assert-unpushed IMAGE_TAG="${{ steps.vars.outputs.image_tag }}"
+
+      # BUILD_DATE: the merge commit's timestamp, or the run start for a
+      # dispatched build (the github context has no run_started_at).
+      - name: Compute build date
+        id: date
+        env:
+          HEAD_TS: ${{ github.event.head_commit.timestamp }}
+        run: echo "build_date=${HEAD_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" >> "$GITHUB_OUTPUT"
+
       - name: Build Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           VERSION: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task ranger:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
@@ -100,7 +113,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           VERSION: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task scout:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
@@ -108,7 +121,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           VERSION: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task sealer:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
@@ -116,7 +129,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           VERSION: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task publisher:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
@@ -124,7 +137,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           VERSION: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task custodian:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
@@ -132,7 +145,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           VERSION: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
         run: task univocity:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
