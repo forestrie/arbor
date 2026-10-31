@@ -2,25 +2,153 @@
 version: "3"
 
 tasks:
-  build-push:
-    desc: Build and push one arbor service image with an explicit semver tag
+  # A release does not build. It marks the images build-deploy already built
+  # for the tagged commit (FOR-611, devdocs plan-2610-05 D1): lane A ran
+  # `main-<sha7>-<run>`, and lane B is promoted `vX.Y.Z`, so the two tags
+  # must name one digest or release-orchestrator cannot prove by digest that
+  # lane A ran what it promotes. A rebuild differs in VERSION and BUILD_DATE,
+  # so it never matches — which is why there is no fallback rebuild here: an
+  # image that is missing for the commit fails the release, loudly.
+  #
+  # Run selection: the highest `<run>` seen for the commit across all
+  # services, and every service must carry that same run. That is Flux's
+  # `numerical asc` ImagePolicy pick (arbor-flux ledger-a image-automation)
+  # once build-deploy has finished pushing; while a run is mid-push, or
+  # build-deploy has not got that far, this keeps polling until the deadline
+  # rather than mix digests from two builds. It never falls back to a lower
+  # run: Flux picks per service, so a higher run pushed for even one service
+  # (say, a dispatched rebuild that failed part-way) is what lane A runs
+  # there. Such a release fails at the deadline; finish that run, or
+  # dispatch a new one, then re-run the release.
+  # build-deploy's tag is main-<sha7>-<GITHUB_RUN_NUMBER>, and a GitHub
+  # re-run keeps the run number. Pushing again would silently move the tag
+  # to a new digest: Flux would not redeploy (the tag string is unchanged),
+  # so lane A would keep running the old digest while the tag, and any
+  # release retagged from it, named the new one. Refuse instead; dispatch a
+  # fresh build-deploy run, which gets a new run number (FOR-611).
+  assert-unpushed:
+    desc: Fail if IMAGE_TAG already exists for any service
+    silent: true
     requires:
-      vars: [SERVICE]
+      vars: [IMAGE_TAG]
+    vars:
+      SERVICES: ranger scout sealer publisher custodian univocity
     cmds:
       - |
         set -euo pipefail
-        if [ -z "${IMAGE_TAG:-}" ]; then
-          echo "IMAGE_TAG is required for release builds" >&2
+        tag='{{.IMAGE_TAG}}'
+        found=""
+        for s in {{.SERVICES}}; do
+          # No error handling around gcloud: a failed list fails the build.
+          if gcloud artifacts docker tags list "{{.IMAGE_URL}}/${s}" --format=json \
+              | jq -e --arg t "$tag" 'any(.[]; (.tag | split("/") | last) == $t)' >/dev/null; then
+            found="${found} ${s}"
+          fi
+        done
+        if [ -n "$found" ]; then
+          echo "::error::${tag} already exists for:${found}. A re-run reuses the run number and would move the tag to a new digest; dispatch a new build-deploy run instead (FOR-611)." >&2
           exit 1
         fi
-        case "${IMAGE_TAG}" in
-          v[0-9]*.[0-9]*.[0-9]*)
-            ;;
-          *)
-            echo "IMAGE_TAG must be semver vX.Y.Z, got: ${IMAGE_TAG}" >&2
+        echo "${tag} is new for every service"
+
+  retag:
+    desc: Tag the main-* images build-deploy pushed for COMMIT as VERSION
+    silent: true
+    requires:
+      vars: [VERSION, COMMIT]
+    vars:
+      SERVICES: ranger scout sealer publisher custodian univocity
+      POLL_INTERVAL: '{{.POLL_INTERVAL | default "30"}}'
+      POLL_TIMEOUT: '{{.POLL_TIMEOUT | default "1800"}}'
+    cmds:
+      - |
+        set -euo pipefail
+        version='{{.VERSION}}'
+        commit='{{.COMMIT}}'
+        image_url='{{.IMAGE_URL}}'
+        services='{{.SERVICES}}'
+
+        if ! printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+          echo "VERSION must be semver vX.Y.Z, got: ${version}" >&2
+          exit 1
+        fi
+        if ! printf '%s' "$commit" | grep -Eq '^[0-9a-f]{40}$'; then
+          echo "COMMIT must be a full 40-hex commit SHA, got: ${commit}" >&2
+          exit 1
+        fi
+        sha7=$(printf '%s' "$commit" | cut -c1-7)
+        prefix="main-${sha7}-"
+
+        work=$(mktemp -d)
+        trap 'rm -rf "$work"' EXIT
+
+        # No error handling around gcloud: a failed list is a failed release,
+        # never a "not there yet" that the poll would quietly absorb.
+        list_tags() {
+          gcloud artifacts docker tags list "${image_url}/$1" --format=json \
+            | jq -r '.[] | [(.tag | split("/") | last), (.version | split("/") | last)] | @tsv' \
+            > "${work}/$1.tsv"
+        }
+        # Run numbers of the commit's main-* tags, one per line.
+        runs_of() {
+          awk -F '\t' -v p="$prefix" 'index($1, p) == 1 { r = substr($1, length(p) + 1); if (r ~ /^[0-9]+$/) print r }' \
+            "${work}/$1.tsv"
+        }
+        digest_of() {
+          awk -F '\t' -v t="$2" '$1 == t { print $2 }' "${work}/$1.tsv"
+        }
+
+        deadline=$(( $(date +%s) + {{.POLL_TIMEOUT}} ))
+        while :; do
+          run=""
+          for s in $services; do
+            list_tags "$s"
+            for r in $(runs_of "$s"); do
+              if [ -z "$run" ] || [ "$r" -gt "$run" ]; then run="$r"; fi
+            done
+          done
+          missing=""
+          if [ -z "$run" ]; then
+            missing=" $services"
+          else
+            for s in $services; do
+              [ -n "$(digest_of "$s" "${prefix}${run}")" ] || missing="${missing} ${s}"
+            done
+          fi
+          if [ -z "$missing" ]; then
+            break
+          fi
+          if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "::error::No main-* image for commit ${commit} (want ${prefix}${run:-<run>}) for:${missing}. build-deploy must build every merge; a release never rebuilds (FOR-611)." >&2
             exit 1
-            ;;
-        esac
-        echo "Release build-push {{.SERVICE}}:${IMAGE_TAG}"
-      - task: ":{{.SERVICE}}:build"
-      - task: ":{{.SERVICE}}:push"
+          fi
+          echo "waiting for ${prefix}${run:-<run>} on:${missing}; next poll in {{.POLL_INTERVAL}}s"
+          sleep {{.POLL_INTERVAL}}
+        done
+
+        src_tag="${prefix}${run}"
+        echo "resolved ${src_tag} for every service"
+
+        # Resolve every digest, and refuse to move an existing release tag,
+        # before adding any tag. That makes validation all-or-nothing; the
+        # tagging itself is not atomic. If a `tags add` fails part-way, the
+        # services already tagged keep the tag, and re-running the release
+        # converges: a release tag already on the same digest is a no-op.
+        for s in $services; do
+          digest=$(digest_of "$s" "$src_tag")
+          current=$(digest_of "$s" "$version")
+          if [ -n "$current" ] && [ "$current" != "$digest" ]; then
+            echo "::error::${s}:${version} already names ${current}, not ${src_tag} (${digest}). Release tags never move." >&2
+            exit 1
+          fi
+          printf '%s\t%s\t%s\n' "$s" "$digest" "$current" >> "${work}/plan.tsv"
+        done
+
+        while IFS="$(printf '\t')" read -r s digest current; do
+          if [ -n "$current" ]; then
+            echo "${s}:${version} already names ${digest}; nothing to do"
+            continue
+          fi
+          gcloud artifacts docker tags add "${image_url}/${s}@${digest}" "${image_url}/${s}:${version}"
+          echo "tagged ${s}:${version} -> ${src_tag} ${digest}"
+        done < "${work}/plan.tsv"

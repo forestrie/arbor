@@ -1,8 +1,22 @@
 name: Release
 
-# Semver v* tag: build, test, and publish images only. Ledger-b GitOps bumps
-# are owned by release-orchestrator (FOR-254 / ARC-0025). Orchestrator may
-# dispatch workflow_dispatch from main (ADR-0043) with patch-bump tag creation.
+# Semver v* tag: mark the images already built for the tagged commit, then
+# publish the GitHub Release. Ledger-b GitOps bumps are owned by
+# release-orchestrator (FOR-254 / ARC-0025). Orchestrator may dispatch
+# workflow_dispatch from main (ADR-0043) with patch-bump tag creation.
+#
+# NOTHING HERE BUILDS AN IMAGE (FOR-611, devdocs plan-2610-05 D1). Both
+# paths run `task release:retag`, which finds the `main-<sha7>-<run>` images
+# build-deploy pushed for the tagged commit and adds `vX.Y.Z` to those same
+# digests. This job used to rebuild all six images as `vX.Y.Z`; the rebuild
+# differed in VERSION and BUILD_DATE, so the digest promoted to lane B was
+# one lane A had never run, and release-orchestrator could not prove by
+# digest that lane A ran the manifest it qualified. A commit with no main-*
+# image fails the release by name. There is deliberately no fallback
+# rebuild: it would mint exactly the unqualifiable digest this removes.
+#
+# No unit or integration tests here either: build-deploy ran both on this
+# commit before it pushed the images being tagged, and a retag adds no code.
 
 on:
   push:
@@ -29,9 +43,12 @@ jobs:
     # secret-egress-ok: exports only `version`, a semver tag parsed from the ref
     # secrets.GITHUB_TOKEN is a setup-task repo-token and never reaches an
     # output. See devdocs plan-2608-04.
-    name: Build Release
+    name: Tag release images
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    # retag polls up to 30 min for build-deploy on the same commit, which is
+    # usually still running when auto-tag pushes the tag.
+    timeout-minutes: 45
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -51,35 +68,22 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
+      # The commit the tag names, peeled: `^{commit}` is right for both a
+      # lightweight tag (auto-tag's) and an annotated one, where the tag
+      # object's own SHA would match no image.
+      - name: Resolve the tagged commit
+        id: commit
+        env:
+          TAG: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse "refs/tags/${TAG}^{commit}")" >> "$GITHUB_OUTPUT"
 
       - name: Install go-task
         uses: arduino/setup-task@v2
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # go-univocity is public (plan-2609-02 P1); no App token is needed to build.
-      # This job builds and pushes deployable images, so bootstrap must pin
-      # go-merklelog (bootstrap:release), not float on main like plain
-      # bootstrap (FOR-568 O1).
-      - name: Git Bootstrap
-        run: |
-          task bootstrap:release
-
-      - name: Unit Tests
-        run: task test:unit
-
-      - name: Integration Tests
-        run: task test:integration
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -89,23 +93,13 @@ jobs:
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          install_components: "gke-gcloud-auth-plugin"
 
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker europe-west2-docker.pkg.dev
-
-      - name: Build and push release images
+      - name: Tag the commit's main-* images as the release
         env:
-          IMAGE_TAG: ${{ steps.version.outputs.version }}
-          VERSION: ${{ steps.version.outputs.version }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: |
-          set -euo pipefail
-          for service in ranger scout sealer custodian univocity publisher; do
-            task release:build-push SERVICE="$service"
-          done
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.commit.outputs.sha }}
+        run: task release:retag VERSION="$RELEASE_VERSION" COMMIT="$RELEASE_COMMIT"
 
   # FOR-532. The frontier resolver reads GitHub *Releases*, not git tags:
   # `fetchLatestReleaseTag` and `fetchSemverReleaseTags` both call
@@ -182,6 +176,7 @@ jobs:
     name: Orchestrator release (main)
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: write
       id-token: write
@@ -212,35 +207,20 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
+      # The commit checked out, not github.sha: `ref: main` resolves when
+      # the job starts, so if main moved after dispatch the two differ. The
+      # tag below is created on HEAD, so HEAD is the commit to mark.
+      - name: Resolve the release commit
+        id: commit
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Install go-task
         uses: arduino/setup-task@v2
         with:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      # go-univocity is public (plan-2609-02 P1); no App token is needed to build.
-      # This job builds and pushes deployable images, so bootstrap must pin
-      # go-merklelog (bootstrap:release), not float on main like plain
-      # bootstrap (FOR-568 O1).
-      - name: Git Bootstrap
-        run: |
-          task bootstrap:release
-
-      - name: Unit Tests
-        run: task test:unit
-
-      - name: Integration Tests
-        run: task test:integration
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -250,23 +230,16 @@ jobs:
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-        with:
-          install_components: "gke-gcloud-auth-plugin"
 
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker europe-west2-docker.pkg.dev
-
-      - name: Build and push release images
+      # Same retag as the tag-push path, and before the tag exists: if the
+      # commit has no main-* image this fails here, and no tag or Release
+      # is created for images that were never marked.
+      - name: Tag the commit's main-* images as the release
         env:
-          IMAGE_TAG: ${{ steps.version.outputs.version }}
-          VERSION: ${{ steps.version.outputs.version }}
-          BUILD_DATE: ${{ github.run_started_at }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: |
-          set -euo pipefail
-          for service in ranger scout sealer custodian univocity publisher; do
-            task release:build-push SERVICE="$service"
-          done
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_COMMIT: ${{ steps.commit.outputs.sha }}
+        run: task release:retag VERSION="$RELEASE_VERSION" COMMIT="$RELEASE_COMMIT"
 
       - name: Write release fragment
         env:
@@ -278,7 +251,7 @@ jobs:
           jq -n \
             --arg repo "${{ github.repository }}" \
             --arg tag "$VERSION" \
-            --arg sha "${{ github.sha }}" \
+            --arg sha "${{ steps.commit.outputs.sha }}" \
             --arg ref "main" \
             --arg orchestratorRunId "$ORCH_RUN_ID" \
             --arg capturedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

@@ -46,11 +46,10 @@ and copy the `go.work` files from an existing checkout.
 `GIT_CLONES`/`GIT_CHECKOUTS`). Every dep floats on a default branch there,
 including go-merklelog (`^main`) — fine for local/dev, but it means an
 arbor image tag alone would not identify its sealer/verifier code
-(FOR-568 review finding O1). So **anything that gets deployed** — every
-workflow that builds and pushes an image
-(`.github/workflows/build-deploy.yml`, both jobs in
-`.github/workflows/release.yaml`) — runs `task bootstrap:release`
-instead. That task runs plain `bootstrap` and then re-checks-out
+(FOR-568 review finding O1). So **anything that gets deployed** — the
+one workflow that builds and pushes images,
+`.github/workflows/build-deploy.yml` — runs `task bootstrap:release`
+instead. `task bootstrap:release` runs plain `bootstrap` and then re-checks-out
 go-merklelog at the commit in `GO_MERKLELOG_PIN`
 (`Taskfile.dist.yml`'s `vars:`), via a `.env.bootstrap.release` overlay
 in each of the same four directories, selected with
@@ -70,6 +69,15 @@ since it ends up as a plain `git checkout <ref>`.
 go-merklelog now tags each module on release (e.g. `massifs/v0.7.0`,
 `mmr/v0.5.0`), so `GO_MERKLELOG_PIN` should track the relevant module tag
 rather than a bare commit SHA going forward.
+
+`.github/workflows/release.yaml` builds nothing: `task release:retag`
+adds `vX.Y.Z` to the digest build-deploy pushed as `main-<sha7>-<run>`
+for the tagged commit, and fails if there is none (FOR-611, devdocs
+plan-2610-05 D1), so a release image is the image lane A ran. Never add a
+rebuild back to release.yaml, as a fallback or otherwise. build-deploy
+refuses to push a `main-*` tag that already exists (`task
+release:assert-unpushed`): a GitHub re-run keeps the run number and would
+move it. Dispatch a new run instead.
 
 ## Services
 
