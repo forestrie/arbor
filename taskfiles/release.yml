@@ -15,7 +15,11 @@ tasks:
   # `numerical asc` ImagePolicy pick (arbor-flux ledger-a image-automation)
   # once build-deploy has finished pushing; while a run is mid-push, or
   # build-deploy has not got that far, this keeps polling until the deadline
-  # rather than mix digests from two builds.
+  # rather than mix digests from two builds. It never falls back to a lower
+  # run: Flux picks per service, so a higher run pushed for even one service
+  # (say, a dispatched rebuild that failed part-way) is what lane A runs
+  # there. Such a release fails at the deadline; finish that run, or
+  # dispatch a new one, then re-run the release.
   # build-deploy's tag is main-<sha7>-<GITHUB_RUN_NUMBER>, and a GitHub
   # re-run keeps the run number. Pushing again would silently move the tag
   # to a new digest: Flux would not redeploy (the tag string is unchanged),
