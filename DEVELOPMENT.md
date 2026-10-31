@@ -116,19 +116,20 @@ task ranger:deploy IMAGE_TAG=dev RANGER_QUEUE_URL="..." RANGER_QUEUE_API_TOKEN="
 Arbor services use **Flux GitOps** for automated deployment, managed by the forest-1 infrastructure repository.
 
 **Deployment Flow**:
-1. Code changes trigger GitHub Actions workflow (`.github/workflows/build-push-ranger.yaml`)
-2. Docker image is built and pushed to Artifact Registry with tag `main-{sha}-{timestamp}`
+1. Every merge to `main` runs `.github/workflows/build-deploy.yml`, which tests and builds all six service images
+2. Images are pushed to Artifact Registry tagged `main-{sha7}-{run_number}`; the binaries' `VERSION` is that same tag
 3. Flux ImageRepository detects the new image in Artifact Registry
-4. Flux ImagePolicy selects the latest image based on alphabetical sorting
-5. Flux ImageUpdateAutomation updates the image tag in `kustomization.yaml` (commits to arbor repo)
+4. Flux ImagePolicy selects the highest run number (`numerical asc`)
+5. Flux ImageUpdateAutomation updates the image tag in the arbor-flux manifests
 6. Flux Kustomization reconciles the deployment with the new image tag
-7. Deployment rolls out automatically to GKE cluster
+7. Deployment rolls out automatically to the lane A GKE cluster
+
+**Releases** (`.github/workflows/release.yaml`) do not build. auto-tag cuts `vX.Y.Z` on every merge; `task release:retag` adds that tag to the same digests as the commit's `main-*` images and fails if they are missing (FOR-611), so the image promoted to lane B is byte-for-byte the one lane A ran.
 
 **GitHub Actions Workflow**:
-- Triggers on push to `main` when `services/ranger/**` changes
+- Triggers on every push to `main` (no path filter) and on `workflow_dispatch`
 - Uses Workload Identity Federation for GCP authentication (no static keys)
 - Builds images with build metadata (version, commit, build date)
-- Tags images with format: `main-{short-sha}-{timestamp}` for traceability
 - Skips runs for Flux ImageUpdateAutomation commits (actor `fluxcdbot`, message `Update from image update automation`) to avoid build loops
 
 **Required GitHub Variables**:
