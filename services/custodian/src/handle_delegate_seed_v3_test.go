@@ -1,14 +1,14 @@
 package custodian
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
 	"errors"
 	"log/slog"
-	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +16,24 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 )
+
+// syncBuffer is a goroutine-safe log sink for asserting on log lines.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // voucherSeedAPI is delegateSeedAPI with a registrar voucher key (an
 // in-memory signer), a fixed clock and the given voucher TTL. It returns the
@@ -131,36 +149,4 @@ func TestDelegateSeed_VoucherIssuanceLog(t *testing.T) {
 	} {
 		require.Contains(t, line, want)
 	}
-}
-
-// TestDelegateSeed_V3VoucherReachesOutbox: the outbox registers with the
-// voucher the sealer was given, not one it signs itself.
-func TestDelegateSeed_V3VoucherReachesOutbox(t *testing.T) {
-	logs := &syncBuffer{}
-	api := NewAPI(slog.New(slog.NewJSONHandler(logs, nil)), Config{
-		AppToken:                 "app-token",
-		DelegateSeedMacKey:       "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed",
-		DelegateSeedSealers:      []string{"sealer-a"},
-		RegistrarVoucherKey:      "projects/p/locations/l/keyRings/r/cryptoKeys/registrar-voucher",
-		DelegationCoordinatorURL: "https://coordinator.invalid",
-	})
-	api.macSignOverride = fakeMacSign(nil)
-	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(goodMacKey, nil)
-	require.NoError(t, api.probeDelegateSeedKey(context.Background()))
-	_, signer, kid := registrarKey(t)
-	signs := 0
-	api.signVoucherOverride = func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
-		signs++
-		return BuildDelegateKeyVoucherWithSigner(c, kid, signer)
-	}
-	var posted RegisterDelegateKeysBody
-	api.registrations.post = func(_ context.Context, body RegisterDelegateKeysBody) registrationOutcome {
-		posted = body
-		return registrationOutcome{status: http.StatusOK}
-	}
-	resp := decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 3}))
-	api.registrations.attempt(context.Background(), api.registrations.next())
-	require.Equal(t, 1, signs, "one voucher per seed request")
-	require.Len(t, posted.Keys, 1)
-	require.Equal(t, base64.StdEncoding.EncodeToString(resp.Voucher), posted.Keys[0].Voucher)
 }

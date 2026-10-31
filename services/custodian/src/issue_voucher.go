@@ -4,7 +4,11 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"fmt"
 	"time"
+
+	kms "cloud.google.com/go/kms/apiv1"
+	"google.golang.org/api/option"
 )
 
 // voucherSignTimeout is the custodian's own deadline for signing one voucher
@@ -65,4 +69,19 @@ func (a *API) issueDelegateKeyVoucher(ctx context.Context, s voucherSubject) (is
 		"ttl", ttl.String(),
 	)
 	return issuedVoucher{bytes: v, notAfter: notAfter}, nil
+}
+
+// signRegistrarVoucher signs a delegate-key voucher with the KMS registrar
+// voucher key's current signing version. issueDelegateKeyVoucher calls it.
+func (a *API) signRegistrarVoucher(ctx context.Context, claims DelegateKeyVoucherClaims) ([]byte, error) {
+	client, err := kms.NewKeyManagementClient(ctx, option.WithScopes("https://www.googleapis.com/auth/cloud-platform"))
+	if err != nil {
+		return nil, fmt.Errorf("kms client: %w", err)
+	}
+	defer client.Close()
+	versionName, versionAlg, err := kmsResolveSigningVersion(ctx, client, a.cfg.RegistrarVoucherKey)
+	if err != nil {
+		return nil, fmt.Errorf("resolve registrar voucher key version: %w", err)
+	}
+	return BuildDelegateKeyVoucher(ctx, client, versionName, versionAlg, claims, "registrar")
 }
