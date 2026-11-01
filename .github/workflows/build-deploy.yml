@@ -1,14 +1,16 @@
 name: Build and Deploy
 
+# Every merge to main builds, with no `paths:` filter (FOR-611, devdocs
+# plan-2610-05 D2). auto-tag cuts a `vX.Y.Z` on every merge, and
+# release.yaml no longer builds: it adds that tag to the digest this
+# workflow pushed as `main-<sha7>-<run>` for the same commit, and fails the
+# release if there is none. A path-filtered merge (docs only, say) would
+# leave its tag with nothing to mark. One build per commit is also what
+# lets release-orchestrator prove by digest that lane A ran the image lane
+# B is promoted: a rebuild never shares a digest with what lane A ran.
 on:
   push:
     branches: [main]
-    paths:
-      - "services/ranger/.env.bootstrap"
-      - "Taskfile.dist.yml"
-      - "taskfiles/**"
-      - "services/**"
-      - ".github/workflows/build-deploy.yml"
 
   # Bootstrap / operators: push images after forest-1 Phase 4 syncs GitHub variables
   # (see forest-1 docs/bootstrap-arbor-ci.md). Uses repo Variables (WIF, registry URL).
@@ -78,84 +80,107 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker europe-west2-docker.pkg.dev
 
+      # VERSION embedded in each binary is the image tag itself, not the
+      # service taskfiles' `git describe` default: the image is built once
+      # and later also tagged `vX.Y.Z` by release.yaml, so the tag that
+      # names this build is the one stable identity it can carry (D2).
       - name: Compute image tag
         id: vars
         run: echo "image_tag=main-${GITHUB_SHA::7}-${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
 
+      - name: Refuse to overwrite an existing image tag
+        env:
+          ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
+        run: task release:assert-unpushed IMAGE_TAG="${{ steps.vars.outputs.image_tag }}"
+
+      # BUILD_DATE: the merge commit's timestamp, or the run start for a
+      # dispatched build (the github context has no run_started_at).
+      - name: Compute build date
+        id: date
+        env:
+          HEAD_TS: ${{ github.event.head_commit.timestamp }}
+        run: echo "build_date=${HEAD_TS:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" >> "$GITHUB_OUTPUT"
+
       - name: Build Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          VERSION: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task ranger:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+        run: task ranger:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
       - name: Build Scout Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          VERSION: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task scout:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+        run: task scout:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
       - name: Build Sealer Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          VERSION: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task sealer:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+        run: task sealer:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
       - name: Build Publisher Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          VERSION: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task publisher:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+        run: task publisher:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
       - name: Build Custodian Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          VERSION: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task custodian:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+        run: task custodian:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
       - name: Build Univocity Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
-          BUILD_DATE: ${{ github.event.head_commit.timestamp || github.run_started_at }}
+          VERSION: ${{ steps.vars.outputs.image_tag }}
+          BUILD_DATE: ${{ steps.date.outputs.build_date }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task univocity:build IMAGE_TAG=${IMAGE_TAG} BUILD_DATE=${BUILD_DATE}
+        run: task univocity:build IMAGE_TAG="${IMAGE_TAG}" VERSION="${VERSION}" BUILD_DATE="${BUILD_DATE}"
 
       - name: Push Ranger Image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task ranger:push IMAGE_TAG=${IMAGE_TAG}
+        run: task ranger:push IMAGE_TAG="${IMAGE_TAG}"
 
       - name: Push Scout image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task scout:push IMAGE_TAG=${IMAGE_TAG}
+        run: task scout:push IMAGE_TAG="${IMAGE_TAG}"
 
       - name: Push Sealer image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task sealer:push IMAGE_TAG=${IMAGE_TAG}
+        run: task sealer:push IMAGE_TAG="${IMAGE_TAG}"
 
       - name: Push Publisher image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task publisher:push IMAGE_TAG=${IMAGE_TAG}
+        run: task publisher:push IMAGE_TAG="${IMAGE_TAG}"
 
       - name: Push Custodian image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task custodian:push IMAGE_TAG=${IMAGE_TAG}
+        run: task custodian:push IMAGE_TAG="${IMAGE_TAG}"
 
       - name: Push Univocity image
         env:
           IMAGE_TAG: ${{ steps.vars.outputs.image_tag }}
           ARTIFACT_REGISTRY_URL: ${{ vars.ARTIFACT_REGISTRY_URL }}
-        run: task univocity:push IMAGE_TAG=${IMAGE_TAG}
+        run: task univocity:push IMAGE_TAG="${IMAGE_TAG}"
