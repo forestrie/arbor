@@ -9,6 +9,7 @@ require (
 	cloud.google.com/go/kms v1.25.0
 	github.com/forestrie/arbor/services/pkgs/delegatekeys v0.0.0
 	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0
+	github.com/forestrie/arbor/services/pkgs/logredact v0.0.0
 	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/stretchr/testify v1.11.1
 	github.com/veraison/go-cose v1.3.0
@@ -19,6 +20,8 @@ require (
 replace github.com/forestrie/arbor/services/pkgs/delegatekeys => ../../pkgs/delegatekeys
 
 replace github.com/forestrie/arbor/services/pkgs/delegationcert => ../../pkgs/delegationcert
+
+replace github.com/forestrie/arbor/services/pkgs/logredact => ../../pkgs/logredact
 
 require (
 	cloud.google.com/go v0.121.6 // indirect
