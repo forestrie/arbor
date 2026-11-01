@@ -1,14 +1,14 @@
 package custodian
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 )
 
 // Config holds 12-factor configuration for custodian.
@@ -17,7 +17,7 @@ type Config struct {
 	LogLevel        string
 	ShutdownTimeout time.Duration
 
-	// Application tokens (Bearer); log only digests.
+	// Application tokens (Bearer); log only fingerprints.
 	AppToken          string // Normal: key ensure, list keys, public key, custody key signing
 	BootstrapAppToken string // Privileged: key destruction (POST .../delete)
 
@@ -218,12 +218,14 @@ func splitNonEmpty(raw string) []string {
 }
 
 // LogConfig logs non-secret configuration values for observability.
+// Bearer tokens are logged as domain-separated fingerprints
+// (logredact.StringFingerprint), never as a bare sha256 (FOR-409).
 func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "PORT", "value", c.Port)
 	logger.Warn("config value", "name", "LOG_LEVEL", "value", c.LogLevel)
 	logger.Warn("config value", "name", "SHUTDOWN_TIMEOUT", "value", c.ShutdownTimeout.String())
-	logger.Warn("config value", "name", "APP_TOKEN", "value", secretDigest(c.AppToken))
-	logger.Warn("config value", "name", "BOOTSTRAP_APP_TOKEN", "value", secretDigest(c.BootstrapAppToken))
+	logger.Warn("config value", "name", "APP_TOKEN", "value", logredact.StringFingerprint(c.AppToken))
+	logger.Warn("config value", "name", "BOOTSTRAP_APP_TOKEN", "value", logredact.StringFingerprint(c.BootstrapAppToken))
 	logger.Warn("config value", "name", "CUSTODY_SIGNER_SA_EMAIL", "value", c.CustodySignerSAEmail)
 	logger.Warn("config value", "name", "CUSTODIAN_RUNTIME_SA_EMAIL", "value", c.CustodianRuntimeSAEmail)
 	logger.Warn("config value", "name", "CUSTODY_KEY_RING_ID", "value", c.CustodyKeyRingID)
@@ -231,7 +233,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logger.Warn("config value", "name", "GCP_LOCATION", "value", c.GCPLocation)
 	logger.Warn("config value", "name", "LOG_ID_CACHE_SIZE", "value", c.LogIDCacheSize)
 	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_URL", "value", c.DelegationCoordinatorURL)
-	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_TOKEN", "value", secretDigest(c.DelegationCoordinatorToken))
+	logger.Warn("config value", "name", "DELEGATION_COORDINATOR_TOKEN", "value", logredact.StringFingerprint(c.DelegationCoordinatorToken))
 	logger.Warn("config value", "name", "DELEGATE_SEED_MAC_KEY", "value", c.DelegateSeedMacKey)
 	logger.Warn("config value", "name", "REGISTRAR_VOUCHER_KEY", "value", c.RegistrarVoucherKey)
 	logger.Warn("config value", "name", "DELEGATE_SEED_SEALERS", "value", strings.Join(c.DelegateSeedSealers, ","))
@@ -241,12 +243,4 @@ func (c Config) LogConfig(logger *slog.Logger) {
 			"default", defaultDelegateKeyVoucherTTL.String())
 	}
 	logger.Warn("config value", "name", "DELEGATE_KEY_VOUCHER_TTL", "value", c.delegateKeyVoucherTTL().String())
-}
-
-func secretDigest(value string) string {
-	if value == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
 }

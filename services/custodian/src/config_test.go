@@ -2,11 +2,15 @@ package custodian
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logredact"
 )
 
 func TestLoadConfig_LogIDCacheSize(t *testing.T) {
@@ -70,6 +74,37 @@ func TestLoadConfig_DelegateKeyVoucherTTL(t *testing.T) {
 		}
 		if c.invalid && !strings.Contains(out, `"input":"`+c.raw+`"`) {
 			t.Fatalf("%q: error line must name the rejected input:\n%s", c.raw, out)
+		}
+	}
+}
+
+// TestLogConfig_SecretsAsFingerprints: the boot config log names each bearer
+// token by its domain-separated logredact fingerprint, never by a bare
+// sha256, which a derive convention can turn into a live credential
+// (FOR-409).
+func TestLogConfig_SecretsAsFingerprints(t *testing.T) {
+	secrets := map[string]string{
+		"APP_TOKEN":                    "app-token-value",
+		"BOOTSTRAP_APP_TOKEN":          "bootstrap-token-value",
+		"DELEGATION_COORDINATOR_TOKEN": "coordinator-token-value",
+	}
+	for name, value := range secrets {
+		t.Setenv(name, value)
+	}
+	var logs bytes.Buffer
+	LoadConfig().LogConfig(slog.New(slog.NewJSONHandler(&logs, nil)))
+	out := logs.String()
+	for name, value := range secrets {
+		sum := sha256.Sum256([]byte(value))
+		if bare := hex.EncodeToString(sum[:]); strings.Contains(out, bare[:logredact.FingerprintHexLen]) {
+			t.Errorf("%s: bare sha256 logged:\n%s", name, out)
+		}
+		if strings.Contains(out, value) {
+			t.Errorf("%s: raw value logged", name)
+		}
+		want := `"name":"` + name + `","value":"` + logredact.StringFingerprint(value) + `"`
+		if !strings.Contains(out, want) {
+			t.Errorf("%s: fingerprint not logged, want %s in:\n%s", name, want, out)
 		}
 	}
 }
