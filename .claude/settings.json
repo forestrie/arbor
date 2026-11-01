@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "extraKnownMarketplaces": {
+    "forestrie-agents": {
+      "source": {
+        "source": "github",
+        "repo": "forestrie/forestrie-agents"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "forestrie-core@forestrie-agents": true,
+    "mattpocock-skills@forestrie-agents": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" = true ] || exit 0; # agentfiles:cloud-install\nenv -u CLAUDECODE claude plugin marketplace add forestrie/forestrie-agents >/dev/null 2>&1 || echo 'cloud-install failed: claude plugin marketplace add forestrie/forestrie-agents'\nenv -u CLAUDECODE claude plugin install forestrie-core@forestrie-agents >/dev/null 2>&1 || echo 'cloud-install failed: claude plugin install forestrie-core@forestrie-agents'\nenv -u CLAUDECODE claude plugin install mattpocock-skills@forestrie-agents >/dev/null 2>&1 || echo 'cloud-install failed: claude plugin install mattpocock-skills@forestrie-agents'\nexit 0",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  }
+}
