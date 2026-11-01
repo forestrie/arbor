@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -56,11 +57,85 @@ type ResyncManager struct {
 // activeLog mirrors one row of the coordinator GET /api/delegations/active
 // response. mmrEnd is the furthest authorized index (a hint), not necessarily
 // the head — an advance certificate's range can sit ahead of the true head.
+//
+// mmrStart and mmrEnd are canonical decimal strings or null on the wire
+// (plan-2611-01 D1, FOR-613; the coordinator side is canopy's
+// delegation-coordinator): a JSON number cannot carry an MMR index above
+// 2^53 exactly through the JS coordinator.
 type activeLog struct {
-	LogIDHex32 string `json:"logIdHex32"`
-	ExpiresAt  int64  `json:"expiresAt"`
-	MmrStart   *int64 `json:"mmrStart"`
-	MmrEnd     *int64 `json:"mmrEnd"`
+	LogIDHex32 string           `json:"logIdHex32"`
+	ExpiresAt  int64            `json:"expiresAt"`
+	MmrStart   decimalIndexHint `json:"mmrStart"`
+	MmrEnd     decimalIndexHint `json:"mmrEnd"`
+}
+
+// rangeErr reports a malformed mmrStart or mmrEnd on this row.
+func (lg activeLog) rangeErr() error {
+	if lg.MmrStart.err != nil {
+		return fmt.Errorf("mmrStart: %w", lg.MmrStart.err)
+	}
+	if lg.MmrEnd.err != nil {
+		return fmt.Errorf("mmrEnd: %w", lg.MmrEnd.err)
+	}
+	return nil
+}
+
+// decimalIndexHint is an MMR index carried as a canonical decimal string
+// (^(0|[1-9][0-9]*)$, value <= 2^64-1) or null/absent.
+//
+// UnmarshalJSON never fails: a malformed value is recorded in err instead,
+// so one bad row is skipped by checkAndReseal (as a row with an invalid
+// logId is) rather than failing the decode of the whole page.
+type decimalIndexHint struct {
+	value   uint64
+	present bool
+	err     error
+}
+
+// Value returns the index and whether one was present and well formed.
+func (h decimalIndexHint) Value() (uint64, bool) {
+	return h.value, h.present
+}
+
+func (h *decimalIndexHint) UnmarshalJSON(b []byte) error {
+	*h = decimalIndexHint{}
+	if string(b) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		h.err = fmt.Errorf("not a decimal string: %s", truncateForLog(b, 40))
+		return nil
+	}
+	v, err := parseCanonicalDecimalUint64(s)
+	if err != nil {
+		h.err = err
+		return nil
+	}
+	h.value, h.present = v, true
+	return nil
+}
+
+// parseCanonicalDecimalUint64 parses s as ^(0|[1-9][0-9]*)$ into a uint64.
+// strconv.ParseUint alone accepts leading zeros, so the canonical form is
+// checked first; ParseUint then rejects overflow past 2^64-1.
+func parseCanonicalDecimalUint64(s string) (uint64, error) {
+	if s == "" {
+		return 0, errors.New("empty decimal string")
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("non-canonical decimal %q", s)
+		}
+	}
+	if len(s) > 1 && s[0] == '0' {
+		return 0, fmt.Errorf("non-canonical decimal %q (leading zero)", s)
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("decimal %q out of uint64 range", s)
+	}
+	return v, nil
 }
 
 type activePage struct {
@@ -179,16 +254,20 @@ func (r *ResyncManager) checkAndReseal(ctx context.Context, lg activeLog) {
 		r.logger.Warn("resync: invalid logId", "logId", lg.LogIDHex32)
 		return
 	}
+	if err := lg.rangeErr(); err != nil {
+		r.logger.Warn("resync: malformed range hint; skipping log", "logId", lg.LogIDHex32, "error", err)
+		return
+	}
 
 	// Range-hint fast path: mmrEnd is the furthest authorized index. If a prior
 	// checkpoint read already covers it, nothing more can be sealed under the
 	// current delegation — skip the R2 head read entirely. Pure fast-path: a log
 	// with no cached sealed size falls through to the authoritative check.
-	if lg.MmrEnd != nil && *lg.MmrEnd >= 0 {
+	if mmrEnd, present := lg.MmrEnd.Value(); present {
 		r.mu.Lock()
 		cached, ok := r.sealedByLog[lg.LogIDHex32]
 		r.mu.Unlock()
-		if ok && cached >= uint64(*lg.MmrEnd) {
+		if ok && cached >= mmrEnd {
 			return
 		}
 	}

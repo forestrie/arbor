@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,10 +60,101 @@ func TestHintFastPathSkipsWhenSealedCoversMmrEnd(t *testing.T) {
 	r := newTestResyncManager(Config{ResyncMassifHeights: []uint8{14}}, nil)
 	const logID = "0123456789abcdef0123456789abcdef"
 	r.sealedByLog[logID] = 100
-	end := int64(50)
 
 	// No panic (no S3 touched) and it returns quickly => fast-path taken.
-	r.checkAndReseal(context.Background(), activeLog{LogIDHex32: logID, MmrEnd: &end})
+	r.checkAndReseal(context.Background(), decodeActiveLog(t, `{"logIdHex32":"`+logID+`","mmrStart":"0","mmrEnd":"50"}`))
+}
+
+// TestHintFastPathAtMaxUint64 pins the fast path at the top of the uint64
+// range (plan-2611-01): an mmrEnd of 2^64-1 arrives as a decimal string and
+// compares exactly against the cached sealed size.
+func TestHintFastPathAtMaxUint64(t *testing.T) {
+	r := newTestResyncManager(Config{ResyncMassifHeights: []uint8{14}}, nil)
+	const logID = "0123456789abcdef0123456789abcdef"
+	r.sealedByLog[logID] = math.MaxUint64
+
+	r.checkAndReseal(context.Background(), decodeActiveLog(t,
+		`{"logIdHex32":"`+logID+`","mmrStart":"18446744073709551614","mmrEnd":"18446744073709551615"}`))
+}
+
+// TestCheckAndResealSkipsMalformedRangeHint pins the per-log handling of a
+// malformed range value: the row is skipped like a row with an invalid
+// logId — no R2 access (s3Client is nil, so a fall-through would panic) —
+// and the rest of the page is unaffected.
+func TestCheckAndResealSkipsMalformedRangeHint(t *testing.T) {
+	r := newTestResyncManager(Config{ResyncMassifHeights: []uint8{14}}, nil)
+	const logID = "0123456789abcdef0123456789abcdef"
+	for _, row := range []string{
+		`{"logIdHex32":"` + logID + `","mmrStart":"0","mmrEnd":"042"}`,
+		`{"logIdHex32":"` + logID + `","mmrStart":42,"mmrEnd":"50"}`,
+		`{"logIdHex32":"` + logID + `","mmrStart":"0","mmrEnd":"18446744073709551616"}`,
+	} {
+		r.checkAndReseal(context.Background(), decodeActiveLog(t, row))
+	}
+}
+
+func decodeActiveLog(t *testing.T, row string) activeLog {
+	t.Helper()
+	var lg activeLog
+	if err := json.Unmarshal([]byte(row), &lg); err != nil {
+		t.Fatalf("decode %s: %v", row, err)
+	}
+	return lg
+}
+
+// TestActiveLogRangeDecode pins the coordinator wire contract for the range
+// hint (plan-2611-01 D1): canonical decimal strings or null. Every other
+// shape decodes without failing the page and marks the row malformed.
+func TestActiveLogRangeDecode(t *testing.T) {
+	ok := []struct {
+		raw     string
+		want    uint64
+		present bool
+	}{
+		{`"0"`, 0, true},
+		{`"42"`, 42, true},
+		{`"4294967297"`, 1<<32 + 1, true},
+		{`"9007199254740993"`, 1<<53 + 1, true},
+		{`"18446744073709551615"`, math.MaxUint64, true},
+		{`null`, 0, false},
+	}
+	for _, c := range ok {
+		lg := decodeActiveLog(t, `{"logIdHex32":"x","mmrStart":"0","mmrEnd":`+c.raw+`}`)
+		if err := lg.rangeErr(); err != nil {
+			t.Fatalf("mmrEnd %s: unexpected error %v", c.raw, err)
+		}
+		got, present := lg.MmrEnd.Value()
+		if present != c.present || got != c.want {
+			t.Fatalf("mmrEnd %s: got (%d,%v) want (%d,%v)", c.raw, got, present, c.want, c.present)
+		}
+	}
+
+	absent := decodeActiveLog(t, `{"logIdHex32":"x"}`)
+	if err := absent.rangeErr(); err != nil {
+		t.Fatalf("absent range: unexpected error %v", err)
+	}
+	if _, present := absent.MmrEnd.Value(); present {
+		t.Fatal("absent mmrEnd must decode as not present")
+	}
+
+	malformed := []string{
+		`""`, `"01"`, `"00"`, `"-1"`, `"+1"`, `" 1"`, `"1 "`, `"1.0"`, `"1e3"`,
+		`"0x10"`, `"18446744073709551616"`, `"99999999999999999999"`,
+		`42`, `4.2`, `true`, `{}`, `[]`,
+	}
+	for _, raw := range malformed {
+		lg := decodeActiveLog(t, `{"logIdHex32":"x","mmrStart":"0","mmrEnd":`+raw+`}`)
+		if lg.rangeErr() == nil {
+			t.Fatalf("mmrEnd %s: expected malformed", raw)
+		}
+		if _, present := lg.MmrEnd.Value(); present {
+			t.Fatalf("mmrEnd %s: malformed value must not be present", raw)
+		}
+		lg = decodeActiveLog(t, `{"logIdHex32":"x","mmrStart":`+raw+`,"mmrEnd":"0"}`)
+		if lg.rangeErr() == nil {
+			t.Fatalf("mmrStart %s: expected malformed", raw)
+		}
+	}
 }
 
 // TestResolveHeightNegativeCacheSkipsProbe pins R3: within the negative-cache
@@ -181,14 +273,23 @@ func TestActivePageDecode(t *testing.T) {
 	}
 
 	var more activePage
-	body := `{"logs":[{"logIdHex32":"0123456789abcdef0123456789abcdef","expiresAt":123,"mmrStart":0,"mmrEnd":42}],"cursor":"abc"}`
+	body := `{"logs":[{"logIdHex32":"0123456789abcdef0123456789abcdef","expiresAt":123,"mmrStart":"0","mmrEnd":"42"},` +
+		`{"logIdHex32":"fedcba9876543210fedcba9876543210","expiresAt":123,"mmrStart":"0","mmrEnd":"042"}],"cursor":"abc"}`
 	if err := json.Unmarshal([]byte(body), &more); err != nil {
 		t.Fatal(err)
 	}
 	if more.Cursor == nil || *more.Cursor != "abc" {
 		t.Fatalf("expected cursor 'abc', got %v", more.Cursor)
 	}
-	if len(more.Logs) != 1 || more.Logs[0].MmrEnd == nil || *more.Logs[0].MmrEnd != 42 {
+	// One malformed row does not fail the page: both rows decode, and only
+	// the second is marked malformed.
+	if len(more.Logs) != 2 {
 		t.Fatalf("unexpected logs decode: %+v", more.Logs)
+	}
+	if end, ok := more.Logs[0].MmrEnd.Value(); !ok || end != 42 || more.Logs[0].rangeErr() != nil {
+		t.Fatalf("unexpected first row decode: %+v", more.Logs[0])
+	}
+	if more.Logs[1].rangeErr() == nil {
+		t.Fatalf("expected the second row to be malformed: %+v", more.Logs[1])
 	}
 }
