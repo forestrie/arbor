@@ -17,6 +17,7 @@ type Metrics struct {
 	ResyncPagesTotal          prometheus.Counter
 	ResyncChecksTotal         prometheus.Counter
 	ResyncResealsTotal        prometheus.Counter
+	ResyncMalformedHintTotal  prometheus.Counter
 
 	// Histograms
 	MessagesPerPoll    prometheus.Histogram
@@ -47,6 +48,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		ResyncPagesTotal:          newResyncPagesTotal(),
 		ResyncChecksTotal:         newResyncChecksTotal(),
 		ResyncResealsTotal:        newResyncResealsTotal(),
+		ResyncMalformedHintTotal:  newResyncMalformedHintTotal(),
 		ResyncLastPageLogs:        newResyncLastPage(),
 		DelegateKeyRegistered:     newDelegateKeyRegistered(),
 	}
@@ -66,6 +68,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		m.ResyncPagesTotal,
 		m.ResyncChecksTotal,
 		m.ResyncResealsTotal,
+		m.ResyncMalformedHintTotal,
 		m.ResyncLastPageLogs,
 		m.DelegateKeyRegistered,
 	)
@@ -157,6 +160,12 @@ func (m *Metrics) RecordResyncPage(logsInPage int) {
 // IncResyncChecks increments the per-log freshness-check counter.
 func (m *Metrics) IncResyncChecks() {
 	m.ResyncChecksTotal.Inc()
+}
+
+// IncResyncMalformedHint increments the count of active-set rows whose
+// range hint was malformed and treated as absent.
+func (m *Metrics) IncResyncMalformedHint() {
+	m.ResyncMalformedHintTotal.Inc()
 }
 
 // IncResyncReseals increments the count of logs the resync re-drove.
