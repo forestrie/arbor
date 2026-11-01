@@ -12,8 +12,9 @@ type CertificateInfo struct {
 	PayloadLogIDPrefix     string
 	// MMRStart and MMREnd are payload labels 3 and 4: the inclusive MMR
 	// index range the delegation authorizes. Both are required and are
-	// full-width uint64 (plan-2611-01); ParseCertificate rejects a
-	// certificate that omits either or carries any other CBOR type.
+	// full-width uint64; ParseCertificate rejects a certificate that omits
+	// either or carries any other CBOR type (ErrMMRRangeBound), because an
+	// absent bound must not read as 0 and a float is not an index.
 	MMRStart              uint64
 	MMREnd                uint64
 	PayloadIssuedAt       string
