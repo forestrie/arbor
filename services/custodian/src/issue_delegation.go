@@ -26,6 +26,11 @@ func (a *API) issueDelegationForLog(
 	if err != nil {
 		return nil, err
 	}
+	// Reject an inverted range before key resolution and KMS calls; the
+	// builder would refuse it anyway, after the signing setup.
+	if err := delegationcert.ValidateMMRRange(req.MMRStart, req.MMREnd); err != nil {
+		return nil, err
+	}
 
 	keyID, err := a.ResolveCustodianKeyIDForLogID(ctx, logIdHex)
 	if err != nil {
@@ -171,6 +176,10 @@ func delegationIssueHTTPStatus(err error) int {
 	}
 	if errors.Is(err, ErrNoCustodianKeyForLogID) {
 		return 404
+	}
+	if errors.Is(err, delegationcert.ErrMMRRangeInverted) ||
+		errors.Is(err, delegationcert.ErrLogIDRequired) {
+		return 400
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "logid") ||

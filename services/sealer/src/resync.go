@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,23 +45,113 @@ type ResyncManager struct {
 	metrics    *metrics.Metrics
 
 	s3Client *s3.Client
+	// lister is the R2 LIST behind the height probe and the head read.
+	// Production sets it to s3Client; tests count calls through it.
+	lister objectLister
 
 	mu          sync.Mutex
 	cursor      string
 	factories   map[uint8]*merklelog.Factory
 	heightByLog map[string]uint8
 	heightMiss  map[string]time.Time // logID -> earliest re-probe time (negative cache)
+	hintWarned  map[string]bool      // logID -> malformed range hint already logged at WARN
 	sealedByLog map[string]uint64
+}
+
+// objectLister is the R2 object listing the resync's freshness check reads.
+// *s3.Client implements it.
+type objectLister interface {
+	ListObjects(ctx context.Context, prefix, continuationToken string, maxKeys int) (s3.ListResult, error)
 }
 
 // activeLog mirrors one row of the coordinator GET /api/delegations/active
 // response. mmrEnd is the furthest authorized index (a hint), not necessarily
 // the head — an advance certificate's range can sit ahead of the true head.
+//
+// mmrStart and mmrEnd are canonical decimal strings or null on the wire: a
+// JSON number cannot carry an MMR index above 2^53 exactly through the JS
+// coordinator, so a number is never read as a value. The coordinator owns
+// this contract: the row type is canopy's
+// [packages/apps/delegation-coordinator/src/types/active-log.ts] and the
+// decimal codec is @forestrie/delegation-cose's
+// [packages/libs/delegation-cose/src/decimal-uint64.ts].
+//
+// [packages/apps/delegation-coordinator/src/types/active-log.ts]: https://github.com/forestrie/canopy/blob/main/packages/apps/delegation-coordinator/src/types/active-log.ts
+// [packages/libs/delegation-cose/src/decimal-uint64.ts]: https://github.com/forestrie/canopy/blob/main/packages/libs/delegation-cose/src/decimal-uint64.ts
 type activeLog struct {
-	LogIDHex32 string `json:"logIdHex32"`
-	ExpiresAt  int64  `json:"expiresAt"`
-	MmrStart   *int64 `json:"mmrStart"`
-	MmrEnd     *int64 `json:"mmrEnd"`
+	LogIDHex32 string           `json:"logIdHex32"`
+	ExpiresAt  int64            `json:"expiresAt"`
+	MmrStart   decimalIndexHint `json:"mmrStart"`
+	MmrEnd     decimalIndexHint `json:"mmrEnd"`
+}
+
+// rangeErr reports a malformed mmrStart or mmrEnd on this row.
+func (lg activeLog) rangeErr() error {
+	if lg.MmrStart.err != nil {
+		return fmt.Errorf("mmrStart: %w", lg.MmrStart.err)
+	}
+	if lg.MmrEnd.err != nil {
+		return fmt.Errorf("mmrEnd: %w", lg.MmrEnd.err)
+	}
+	return nil
+}
+
+// decimalIndexHint is an MMR index carried as a canonical decimal string
+// (^(0|[1-9][0-9]*)$, value <= 2^64-1) or null/absent.
+//
+// UnmarshalJSON never fails: a malformed value is recorded in err instead,
+// so one bad row does not fail the decode of the whole page. checkAndReseal
+// treats a malformed hint as absent.
+type decimalIndexHint struct {
+	value   uint64
+	present bool
+	err     error
+}
+
+// Value returns the index and whether one was present and well formed.
+func (h decimalIndexHint) Value() (uint64, bool) {
+	return h.value, h.present
+}
+
+func (h *decimalIndexHint) UnmarshalJSON(b []byte) error {
+	*h = decimalIndexHint{}
+	if string(b) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		h.err = fmt.Errorf("not a decimal string: %s", truncateForLog(b, 40))
+		return nil
+	}
+	v, err := parseCanonicalDecimalUint64(s)
+	if err != nil {
+		h.err = err
+		return nil
+	}
+	h.value, h.present = v, true
+	return nil
+}
+
+// parseCanonicalDecimalUint64 parses s as ^(0|[1-9][0-9]*)$ into a uint64.
+// strconv.ParseUint alone accepts leading zeros, so the canonical form is
+// checked first; ParseUint then rejects overflow past 2^64-1.
+func parseCanonicalDecimalUint64(s string) (uint64, error) {
+	if s == "" {
+		return 0, errors.New("empty decimal string")
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("non-canonical decimal %q", s)
+		}
+	}
+	if len(s) > 1 && s[0] == '0' {
+		return 0, fmt.Errorf("non-canonical decimal %q (leading zero)", s)
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("decimal %q out of uint64 range", s)
+	}
+	return v, nil
 }
 
 type activePage struct {
@@ -87,9 +178,11 @@ func NewResyncManager(cfg Config, httpClient *HTTPClient, logger *slog.Logger, l
 		leaseMgr:    leaseMgr,
 		metrics:     m,
 		s3Client:    s3Client,
+		lister:      s3Client,
 		factories:   map[uint8]*merklelog.Factory{},
 		heightByLog: map[string]uint8{},
 		heightMiss:  map[string]time.Time{},
+		hintWarned:  map[string]bool{},
 		sealedByLog: map[string]uint64{},
 	}, nil
 }
@@ -179,16 +272,20 @@ func (r *ResyncManager) checkAndReseal(ctx context.Context, lg activeLog) {
 		r.logger.Warn("resync: invalid logId", "logId", lg.LogIDHex32)
 		return
 	}
+	// A malformed hint is treated as absent: it only gates the fast path
+	// below, so the authoritative check still runs and a coordinator bug
+	// cannot leave a log unsealed.
+	hintOK := r.noteRangeHint(lg)
 
 	// Range-hint fast path: mmrEnd is the furthest authorized index. If a prior
 	// checkpoint read already covers it, nothing more can be sealed under the
 	// current delegation — skip the R2 head read entirely. Pure fast-path: a log
 	// with no cached sealed size falls through to the authoritative check.
-	if lg.MmrEnd != nil && *lg.MmrEnd >= 0 {
+	if mmrEnd, present := lg.MmrEnd.Value(); hintOK && present {
 		r.mu.Lock()
 		cached, ok := r.sealedByLog[lg.LogIDHex32]
 		r.mu.Unlock()
-		if ok && cached >= uint64(*lg.MmrEnd) {
+		if ok && cached >= mmrEnd {
 			return
 		}
 	}
@@ -250,6 +347,34 @@ func (r *ResyncManager) checkAndReseal(ctx context.Context, lg activeLog) {
 	r.mu.Unlock()
 }
 
+// noteRangeHint reports whether the row's range hint is well formed. A
+// malformed one is counted on every check and logged at WARN once per log
+// (DEBUG after), since the active set is re-read every cycle; a well-formed
+// hint re-arms the WARN.
+func (r *ResyncManager) noteRangeHint(lg activeLog) bool {
+	err := lg.rangeErr()
+	r.mu.Lock()
+	warned := r.hintWarned[lg.LogIDHex32]
+	if err == nil {
+		delete(r.hintWarned, lg.LogIDHex32)
+	} else {
+		r.hintWarned[lg.LogIDHex32] = true
+	}
+	r.mu.Unlock()
+	if err == nil {
+		return true
+	}
+	if r.metrics != nil {
+		r.metrics.IncResyncMalformedHint()
+	}
+	if !warned {
+		r.logger.Warn("resync: malformed range hint; treating it as absent", "logId", lg.LogIDHex32, "error", err)
+	} else {
+		r.logger.Debug("resync: malformed range hint; treating it as absent", "logId", lg.LogIDHex32, "error", err)
+	}
+	return false
+}
+
 // resolveHeight returns the massif height for a log, discovering it from R2 by
 // probing the configured candidate heights and caching the hit. Misses are
 // negative-cached with a backoff so a delegation-in-advance log (active cert,
@@ -276,7 +401,7 @@ func (r *ResyncManager) resolveHeight(ctx context.Context, logIDHex string, logI
 		if err != nil {
 			continue
 		}
-		page, err := r.s3Client.ListObjects(ctx, prefix, "", 1)
+		page, err := r.lister.ListObjects(ctx, prefix, "", 1)
 		if err != nil {
 			r.logger.Debug("resync: height probe list failed", "logId", logIDHex, "height", cand, "error", err)
 			continue
@@ -322,7 +447,7 @@ func (r *ResyncManager) headSize(ctx context.Context, height uint8, logIDBytes [
 		cont      string
 	)
 	for {
-		page, err := r.s3Client.ListObjects(ctx, prefix, cont, 1000)
+		page, err := r.lister.ListObjects(ctx, prefix, cont, 1000)
 		if err != nil {
 			return 0, false, fmt.Errorf("list massifs: %w", err)
 		}

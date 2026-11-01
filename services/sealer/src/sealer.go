@@ -171,12 +171,16 @@ func CheckpointLog(
 		// Calculate MMR range for this massif for the delegation
 		// MMR size at start of massif and end of massif
 		mmrStart := baseState.MMRSize
+		// curSize is an MMR size, one past the last index, while the
+		// lease's range checks treat mmrEnd as an inclusive index. The
+		// request therefore over-asks by one, which is conservative: a
+		// lease that covers it also covers the true last index.
 		mmrEnd := curSize
 
 		// Obtain per-log delegation lease from Custodian.
 		//
-		// Pass the TRUE seal window. The lease manager checks its cache
-		// against this window (coverage). An advance certificate for the
+		// Pass the seal window as computed above (its end is a size). The
+		// lease manager checks its cache against this window (coverage). An advance certificate for the
 		// standing key is signed to the owner's horizon, so one certificate
 		// covers subsequent seals; a certificate signed for a demanded window
 		// covers only that window. Widening the window here would advance the

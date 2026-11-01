@@ -35,6 +35,18 @@ func newResyncResealsTotal() prometheus.Counter {
 	})
 }
 
+// newResyncMalformedHintTotal counts active-set rows whose mmrStart or
+// mmrEnd range hint was malformed. The resync treats such a hint as absent
+// and still runs the authoritative check, so a non-zero rate means the
+// coordinator is emitting a range shape the sealer does not read, not that
+// logs go unsealed.
+func newResyncMalformedHintTotal() prometheus.Counter {
+	return prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "sealer_resync_malformed_hint_total",
+		Help: "Total active-delegation rows whose mmrStart/mmrEnd hint was malformed and was treated as absent.",
+	})
+}
+
 // newResyncLastPage gauges the size of the most recent active-set page.
 func newResyncLastPage() prometheus.Gauge {
 	return prometheus.NewGauge(prometheus.GaugeOpts{

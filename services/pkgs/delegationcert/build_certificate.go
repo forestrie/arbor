@@ -63,9 +63,9 @@ const (
 
 // DelegationInput holds the parameters for building a delegation certificate.
 type DelegationInput struct {
-	LogID        string            // Optional, 32-char hex log ID
-	MmrStart     uint64            // Required if LogID set
-	MmrEnd       uint64            // Required if LogID set
+	LogID        string            // Required, 32-char hex log ID
+	MmrStart     uint64            // Inclusive; must not exceed MmrEnd
+	MmrEnd       uint64            // Inclusive
 	DelegatedKey *DelegatedCoseKey // The delegated EC public key
 	Constraints  map[string]any    // Optional constraints map
 	DelegationID []byte            // 16 bytes recommended
@@ -93,7 +93,17 @@ func coseAlgFromCurve(curve Curve) int64 {
 //
 // Returns the protected header bytes, payload bytes, and SHA-256 digest of the
 // COSE Sig_structure that should be signed.
+//
+// It refuses an input ParseCertificate would refuse once signed: an empty
+// LogID (ErrLogIDRequired), which would leave out range labels 3 and 4, and
+// MmrStart > MmrEnd (ErrMMRRangeInverted).
 func BuildDelegationToBeSigned(curve Curve, kid []byte, input DelegationInput) (*DelegationToBeSigned, error) {
+	if input.LogID == "" {
+		return nil, ErrLogIDRequired
+	}
+	if err := ValidateMMRRange(input.MmrStart, input.MmrEnd); err != nil {
+		return nil, err
+	}
 	if input.DelegatedKey == nil {
 		return nil, fmt.Errorf("delegated key is required")
 	}
@@ -118,13 +128,9 @@ func BuildDelegationToBeSigned(curve Curve, kid []byte, input DelegationInput) (
 
 	// Build payload with deterministic ordering.
 	payloadMap := make(map[int64]any)
-	if input.LogID != "" {
-		payloadMap[PayloadLabelLogID] = input.LogID
-	}
-	if input.LogID != "" {
-		payloadMap[PayloadLabelMmrStart] = input.MmrStart
-		payloadMap[PayloadLabelMmrEnd] = input.MmrEnd
-	}
+	payloadMap[PayloadLabelLogID] = input.LogID
+	payloadMap[PayloadLabelMmrStart] = input.MmrStart
+	payloadMap[PayloadLabelMmrEnd] = input.MmrEnd
 	payloadMap[PayloadLabelDelegatedKey] = input.DelegatedKey.ToCBORMap()
 	if input.Constraints != nil {
 		payloadMap[PayloadLabelConstraints] = input.Constraints
