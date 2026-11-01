@@ -12,6 +12,10 @@ import (
 // The ack's firstLeafIndex is a full uint64 on the wire. canopy's
 // forestrie-ingress decodes it with a strict uint64 check, so it must be
 // CBOR major type 0 in shortest form, never a float.
+//
+// The golden uses massif height 33: a massif of one-based height h holds
+// 2^(h-1) leaves, and canopy rejects a leaf whose massif index exceeds
+// 2^32-1, so 2^64-1 is only reachable at h >= 33.
 
 // ackGoldenUint64MaxHex is EncodeAckRequest(ackGoldenUint64Max()).
 // canopy's ack handler tests decode the same bytes; change both together.
@@ -19,7 +23,7 @@ const ackGoldenUint64MaxHex = "a5" +
 	"656c696d697401" + // "limit": 1
 	"656c6f6749645010" + "1112131415161718191a1b1c1d1e1f" + // "logId": h'10..1f'
 	"657365714c6f01" + // "seqLo": 1
-	"6c6d6173736966486569676874" + "1820" + // "massifHeight": 32
+	"6c6d6173736966486569676874" + "1821" + // "massifHeight": 33
 	"6e66697273744c656166496e646578" + "1bffffffffffffffff" // "firstLeafIndex": 2^64-1
 
 func ackGoldenUint64Max() AckRequest {
@@ -32,7 +36,7 @@ func ackGoldenUint64Max() AckRequest {
 		SeqLo:          1,
 		Limit:          1,
 		FirstLeafIndex: math.MaxUint64,
-		MassifHeight:   32,
+		MassifHeight:   33,
 	}
 }
 
