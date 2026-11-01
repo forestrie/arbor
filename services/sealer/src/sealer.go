@@ -171,6 +171,10 @@ func CheckpointLog(
 		// Calculate MMR range for this massif for the delegation
 		// MMR size at start of massif and end of massif
 		mmrStart := baseState.MMRSize
+		// curSize is an MMR size, one past the last index, while the
+		// lease's range checks treat mmrEnd as an inclusive index. The
+		// request therefore over-asks by one, which is conservative: a
+		// lease that covers it also covers the true last index.
 		mmrEnd := curSize
 
 		// Obtain per-log delegation lease from Custodian.

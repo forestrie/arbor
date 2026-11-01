@@ -105,8 +105,8 @@ func certFallbackLease(t *testing.T, cert []byte) *DelegationLease {
 }
 
 // TestLeaseCoversMMRRange_CertFallbackWide pins the uint64 range end to end
-// (plan-2611-01, FOR-613) on the certificate fallback path: bounds above
-// 2^32 and 2^53 and at 2^64-1 compare exactly, with no decimal round trip.
+// on the certificate fallback path: bounds above 2^32 and 2^53 and at
+// 2^64-1 compare exactly, with no decimal round trip.
 func TestLeaseCoversMMRRange_CertFallbackWide(t *testing.T) {
 	custody, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
