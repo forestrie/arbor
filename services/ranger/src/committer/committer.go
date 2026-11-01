@@ -42,9 +42,11 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 		logger = slog.Default()
 	}
 
+	// No default here: the consumer acks with cfg.MassifHeight, so the
+	// committer must write at exactly that height (see Config.Validate).
 	massifHeight := cfg.MassifHeight
-	if massifHeight == 0 {
-		massifHeight = 14
+	if massifHeight < 1 || massifHeight > 64 {
+		return nil, fmt.Errorf("massif height must be 1..64, got %d", massifHeight)
 	}
 
 	factory, err := merklelog.NewS3FactoryWithCredentials(
@@ -82,7 +84,7 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 
 // CommitLogGroup commits entries from the DO ingress queue for a single log.
 // Returns a CommitResult with the count of successfully committed entries
-// and the sequencing metadata (firstLeafIndex, massifIndex) needed for ack.
+// and the first leaf index, which the consumer acks with.
 //
 // This method is called by the ingress consumer for each log group in parallel.
 // See: arbor/docs/arc-cloudflare-do-ingress.md

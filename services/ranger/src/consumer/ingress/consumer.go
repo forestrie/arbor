@@ -382,7 +382,7 @@ func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 }
 
 // ackFirst acknowledges committed entries using limit-based ack.
-// Includes sequencing metadata (firstLeafIndex, massifIndex) for return path unification.
+// Includes sequencing metadata (firstLeafIndex, massifHeight) for return path unification.
 func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, result *CommitResult) error {
 	if c.cfg.SuppressAcknowledge {
 		return nil
