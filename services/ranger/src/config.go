@@ -54,7 +54,7 @@ type Config struct {
 	PodIP               string // Pod IP address, required
 
 	// Merklelog configuration
-	MassifHeight    uint8  // Massif height (default 14)
+	MassifHeight    uint8  // One-based massif height: 2^(h-1) leaves (default 14)
 	CommitmentEpoch uint32 // Commitment epoch (default 1)
 }
 
@@ -219,6 +219,11 @@ func (c Config) Validate() error {
 	}
 	if c.QueueBatchSize <= 0 {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be greater than zero")
+	}
+	// One-based (a massif holds 2^(h-1) leaves). The committer writes at it
+	// and the consumer acks with it, so neither defaults it.
+	if c.MassifHeight < 1 || c.MassifHeight > 64 {
+		return fmt.Errorf("MASSIF_HEIGHT must be 1..64, got %d", c.MassifHeight)
 	}
 	if c.R2URL == "" {
 		return fmt.Errorf("R2_URL is required")

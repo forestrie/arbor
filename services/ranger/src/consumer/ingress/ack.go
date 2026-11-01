@@ -12,7 +12,12 @@ import (
 //
 // With return path unification (Phase 9), ack also records leaf indices
 // to enable direct registration status queries from the DO.
-// massifIndex is derived: floor(leafIndex / (1 << massifHeight))
+//
+// MassifHeight is the one-based height the committer writes massifs at: a
+// massif holds 2^(h-1) leaves (urkle.LeafCountForMassifHeight). The DO stores
+// no massif index; readers derive it with the equivalent of
+// massifs.MassifIndexFromLeafIndex. The DO uses MassifHeight only to size how
+// many sequenced entries it retains.
 type AckRequest struct {
 	LogId          []byte `cbor:"logId"`
 	SeqLo          uint64 `cbor:"seqLo"`
