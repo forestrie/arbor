@@ -73,11 +73,11 @@ type objectLister interface {
 // coordinator, so a number is never read as a value. The coordinator owns
 // this contract: the row type is canopy's
 // [packages/apps/delegation-coordinator/src/types/active-log.ts] and the
-// decimal codec is
-// [packages/apps/delegation-coordinator/src/decimal-uint64.ts].
+// decimal codec is @forestrie/delegation-cose's
+// [packages/libs/delegation-cose/src/decimal-uint64.ts].
 //
 // [packages/apps/delegation-coordinator/src/types/active-log.ts]: https://github.com/forestrie/canopy/blob/main/packages/apps/delegation-coordinator/src/types/active-log.ts
-// [packages/apps/delegation-coordinator/src/decimal-uint64.ts]: https://github.com/forestrie/canopy/blob/main/packages/apps/delegation-coordinator/src/decimal-uint64.ts
+// [packages/libs/delegation-cose/src/decimal-uint64.ts]: https://github.com/forestrie/canopy/blob/main/packages/libs/delegation-cose/src/decimal-uint64.ts
 type activeLog struct {
 	LogIDHex32 string           `json:"logIdHex32"`
 	ExpiresAt  int64            `json:"expiresAt"`

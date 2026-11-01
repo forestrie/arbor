@@ -179,8 +179,8 @@ func CheckpointLog(
 
 		// Obtain per-log delegation lease from Custodian.
 		//
-		// Pass the TRUE seal window. The lease manager checks its cache
-		// against this window (coverage). An advance certificate for the
+		// Pass the seal window as computed above (its end is a size). The
+		// lease manager checks its cache against this window (coverage). An advance certificate for the
 		// standing key is signed to the owner's horizon, so one certificate
 		// covers subsequent seals; a certificate signed for a demanded window
 		// covers only that window. Widening the window here would advance the

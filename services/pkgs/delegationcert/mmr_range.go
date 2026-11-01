@@ -6,8 +6,10 @@ import (
 )
 
 // Errors for the delegation's MMR range (payload labels 3 and 4) and the
-// log id it is scoped to. The builder and ParseCertificate share them, so a
-// certificate the builder emits is one the parser accepts.
+// log id it is scoped to. The builder rejects what ParseCertificate would
+// reject, so a certificate the builder emits is one the parser accepts:
+// ErrMMRRangeInverted is returned by both, ErrMMRRangeBound only by the
+// parser, ErrLogIDRequired only by the builder.
 var (
 	// ErrMMRRangeBound reports a range bound that is missing or is not a
 	// CBOR unsigned integer. An absent bound must not read as 0, and a
