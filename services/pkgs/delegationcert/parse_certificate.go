@@ -59,8 +59,17 @@ func ParseCertificate(certBytes []byte) (*CertificateInfo, error) {
 	}
 
 	logID, _ := payloadMap[1].(string)
-	mmrStart := toNumericString(payloadMap[3])
-	mmrEnd := toNumericString(payloadMap[4])
+	mmrStart, err := payloadRangeBound(payloadMap, PayloadLabelMmrStart)
+	if err != nil {
+		return nil, err
+	}
+	mmrEnd, err := payloadRangeBound(payloadMap, PayloadLabelMmrEnd)
+	if err != nil {
+		return nil, err
+	}
+	if mmrStart > mmrEnd {
+		return nil, fmt.Errorf("payload mmr range is inverted: start %d > end %d", mmrStart, mmrEnd)
+	}
 	issuedAt := toNumericString(payloadMap[8])
 	expiresAt := toNumericString(payloadMap[9])
 
@@ -113,8 +122,8 @@ func ParseCertificate(certBytes []byte) (*CertificateInfo, error) {
 		PayloadDelegationIDHex: delegationIDHex,
 		PayloadLogID:           logID,
 		PayloadLogIDPrefix:     logIDPrefix,
-		PayloadMmrStart:        mmrStart,
-		PayloadMmrEnd:          mmrEnd,
+		MMRStart:               mmrStart,
+		MMREnd:                 mmrEnd,
 		PayloadIssuedAt:        issuedAt,
 		PayloadExpiresAt:       expiresAt,
 		PayloadIssuedAtUnix:    issuedAtUnix,
@@ -122,6 +131,24 @@ func ParseCertificate(certBytes []byte) (*CertificateInfo, error) {
 		PayloadDelegatedCurve:  delegatedCurve,
 		SignatureSize:          len(signature),
 	}, nil
+}
+
+// payloadRangeBound reads an MMR range bound (payload label 3 or 4). The
+// bound must be present and must be a CBOR unsigned integer (major type
+// 0), which the decoder's default IntDec yields as uint64. Anything else —
+// a missing label, a float, a negative int, a string, null — is a parse
+// error: a missing bound must not read as 0 and a whole-number float must
+// not pass as an index (plan-2611-01 findings B2, B3).
+func payloadRangeBound(payload map[int64]any, label int64) (uint64, error) {
+	v, present := payload[label]
+	if !present {
+		return 0, fmt.Errorf("payload label %d (mmr range bound) is missing", label)
+	}
+	u, ok := v.(uint64)
+	if !ok {
+		return 0, fmt.Errorf("payload label %d (mmr range bound) is not an unsigned integer (type=%T)", label, v)
+	}
+	return u, nil
 }
 
 func asBstr(v any) ([]byte, bool) {

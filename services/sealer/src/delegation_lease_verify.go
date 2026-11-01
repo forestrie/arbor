@@ -100,11 +100,7 @@ func VerifyDelegationLease(
 			info.PayloadLogID, req.LogIdHex,
 		)
 	}
-	start, errStart := parseUint64Decimal(info.PayloadMmrStart)
-	end, errEnd := parseUint64Decimal(info.PayloadMmrEnd)
-	if errStart != nil || errEnd != nil {
-		return nil, fmt.Errorf("delegation cert has non-decimal mmr bounds")
-	}
+	start, end := info.MMRStart, info.MMREnd
 	if !(start <= req.MMRStart && end >= req.MMREnd) {
 		return nil, fmt.Errorf(
 			"delegation cert range [%d,%d] does not cover seal window [%d,%d]",

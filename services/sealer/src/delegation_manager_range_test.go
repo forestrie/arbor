@@ -1,7 +1,15 @@
 package sealer
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"math"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -82,5 +90,95 @@ func TestEnsureValidForLog_RejectsCachedLeaseOutsideRange(t *testing.T) {
 	}
 	if _, ok := mgr.leases[logID]; ok {
 		t.Fatal("expected non-covering cached lease to be evicted")
+	}
+}
+
+// certFallbackLease builds a lease with no on-chain proof, so
+// leaseCoversMMRRange falls back to the parsed certificate range.
+func certFallbackLease(t *testing.T, cert []byte) *DelegationLease {
+	t.Helper()
+	info, err := delegationcert.ParseCertificate(cert)
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	return &DelegationLease{CertBytes: cert, Info: info, ExpiresAt: time.Now().Add(time.Hour)}
+}
+
+// TestLeaseCoversMMRRange_CertFallbackWide pins the uint64 range end to end
+// (plan-2611-01, FOR-613) on the certificate fallback path: bounds above
+// 2^32 and 2^53 and at 2^64-1 compare exactly, with no decimal round trip.
+func TestLeaseCoversMMRRange_CertFallbackWide(t *testing.T) {
+	custody, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleg, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name       string
+		start, end uint64
+	}{
+		{"2^32+1", 1<<32 + 1, 1<<32 + 1},
+		{"2^53+1", 1<<53 + 1, 1<<53 + 1},
+		{"2^64-1", math.MaxUint64, math.MaxUint64},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lease := certFallbackLease(t, buildSignedCert(t, custody, deleg.Public().(*ecdsa.PublicKey), c.start, c.end))
+			if !leaseCoversMMRRange(lease, c.start, c.end) {
+				t.Fatalf("expected [%d,%d] to cover itself", c.start, c.end)
+			}
+			if leaseCoversMMRRange(lease, c.start-1, c.end) {
+				t.Fatalf("expected [%d,%d] not to cover start-1", c.start, c.end)
+			}
+			if c.end < math.MaxUint64 && leaseCoversMMRRange(lease, c.start, c.end+1) {
+				t.Fatalf("expected [%d,%d] not to cover end+1", c.start, c.end)
+			}
+		})
+	}
+}
+
+// TestLeaseCoversMMRRange_WebAuthnGolden2Pow40 runs the real-authenticator
+// golden certificate (mmrEnd = 2^40) through ParseCertificate and the
+// certificate fallback range check.
+func TestLeaseCoversMMRRange_WebAuthnGolden2Pow40(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "pkgs", "publishproof", "testdata", "webauthn-real-authenticator-golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g struct {
+		Certificate struct {
+			CoseSign1 string `json:"coseSign1"`
+		} `json:"certificate"`
+	}
+	if err := json.Unmarshal(raw, &g); err != nil {
+		t.Fatal(err)
+	}
+	cert, err := hex.DecodeString(g.Certificate.CoseSign1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease := certFallbackLease(t, cert)
+	const end = uint64(1) << 40
+	if !leaseCoversMMRRange(lease, 0, end) {
+		t.Fatal("expected the golden [0,2^40] to cover [0,2^40]")
+	}
+	if !leaseCoversMMRRange(lease, end, end) {
+		t.Fatal("expected the golden [0,2^40] to cover [2^40,2^40]")
+	}
+	if leaseCoversMMRRange(lease, 0, end+1) {
+		t.Fatal("expected the golden [0,2^40] not to cover 2^40+1")
+	}
+}
+
+// A lease with no on-chain proof and no parsed certificate covers nothing:
+// a certificate that failed to parse never yields an Info, so the fallback
+// must fail closed rather than read zero-valued bounds.
+func TestLeaseCoversMMRRange_NoInfoCoversNothing(t *testing.T) {
+	lease := &DelegationLease{ExpiresAt: time.Now().Add(time.Hour)}
+	if leaseCoversMMRRange(lease, 0, 0) {
+		t.Fatal("a lease without proof or certificate info must not cover [0,0]")
 	}
 }

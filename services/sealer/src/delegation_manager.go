@@ -211,26 +211,12 @@ func leaseCoversMMRRange(lease *DelegationLease, mmrStart, mmrEnd uint64) bool {
 		return lease.OnchainProof.MMRStart <= mmrStart &&
 			lease.OnchainProof.MMREnd >= mmrEnd
 	}
+	// No parsed certificate covers nothing. ParseCertificate refuses a
+	// certificate without both bounds, so a non-nil Info has real ones.
 	if lease.Info == nil {
 		return false
 	}
-	start, errStart := parseUint64Decimal(lease.Info.PayloadMmrStart)
-	end, errEnd := parseUint64Decimal(lease.Info.PayloadMmrEnd)
-	if errStart != nil || errEnd != nil {
-		return false
-	}
-	return start <= mmrStart && end >= mmrEnd
-}
-
-func parseUint64Decimal(s string) (uint64, error) {
-	var v uint64
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return 0, fmt.Errorf("non-decimal mmr bound %q", s)
-		}
-		v = v*10 + uint64(c-'0')
-	}
-	return v, nil
+	return lease.Info.MMRStart <= mmrStart && lease.Info.MMREnd >= mmrEnd
 }
 
 // NOTE: We intentionally avoid package-level global state. Construct a
