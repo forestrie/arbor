@@ -48,10 +48,11 @@ long-lived private key is persisted, and the operator never holds the user root
 `K(L)`. **The epoch is the MAC key version number**: epoch *e* is derived under
 `cryptoKeyVersions/<e>`, fixed by construction and never chosen from listing
 state, so a key-version rotation and an epoch bump are one act and the N/N−1
-overlap covers it; the MAC key never auto-rotates. **Why:** certificates survive
-restarts and rotations without on-demand signer latency, and BYOK custody is
-preserved.
-⤷ specialises P6 (BYOK). [ADR-0050](https://github.com/forestrie/protocol/blob/main/decisions/adr-0050-delegation-in-advance.md) (amendment 2026-09-26) · [ARC-0022 §3](https://github.com/forestrie/devdocs/blob/main/archive/2606/arc/arc-0022-byok-user-log-delegation-and-operator-hosted-sealing.md) · runbook: devdocs ops-0016.
+overlap covers it; the MAC key never auto-rotates and is per lane, so a
+rotation never has another lane's deployments as a precondition. **Why:**
+certificates survive restarts and rotations without on-demand signer latency,
+and BYOK custody is preserved.
+⤷ specialises P6 (BYOK). [ADR-0050](https://github.com/forestrie/protocol/blob/main/decisions/adr-0050-delegation-in-advance.md) (amendments 2026-09-26 and 2026-10-31) · [ARC-0022 §3](https://github.com/forestrie/devdocs/blob/main/archive/2606/arc/arc-0022-byok-user-log-delegation-and-operator-hosted-sealing.md) · runbook: devdocs ops-0016.
 
 ### A6 — Resolve `(chainId, contract)` from public R2 genesis
 The sealer and publisher resolve each forest's chain binding from public R2
