@@ -30,8 +30,15 @@ on:
         default: true
         type: boolean
 
+# One group per release tag, plus one shared group for the orchestrator's
+# workflow_dispatch path. A single repo-wide group let a newer pending run
+# replace an older pending one, so a burst of merges could skip a tag's
+# retag and GitHub Release entirely; each run now waits on build-deploy,
+# which makes a queue likely. Different tags touch different image tags,
+# so they need no serialising. The dispatch path computes the next patch
+# version from the latest tag, so dispatches stay serialised.
 concurrency:
-  group: release-${{ github.repository }}
+  group: release-${{ github.event_name == 'push' && github.ref || 'dispatch' }}
   cancel-in-progress: false
 
 permissions:
