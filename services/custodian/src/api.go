@@ -52,10 +52,6 @@ type API struct {
 	// DELEGATE_SEED_MAC_KEY is an HMAC_SHA256 MAC key (plan-2609-12 ruling 2).
 	// Until then seed requests answer 501 before any MacSign.
 	delegateSeedVerified atomic.Bool
-	// registrations is the coordinator registration outbox (plan-2609-12
-	// ruling 1); nil unless REGISTRAR_VOUCHER_KEY and the coordinator are
-	// both configured.
-	registrations *registrationOutbox
 }
 
 // NewAPI builds an API with the given logger and config.
@@ -68,21 +64,15 @@ func NewAPI(logger *slog.Logger, cfg Config) *API {
 		publicKeyCache: make(map[string]publicKeyCacheEntry),
 		now:            time.Now,
 	}
-	if cfg.RegistrarVoucherKey != "" && a.coordinatorConfigured() {
-		a.registrations = newRegistrationOutbox(logger, a.issueDelegateKeyVoucher, a.postDelegateKeyRegistration)
-	}
 	return a
 }
 
 // Start runs the background work the API needs until ctx ends: the
-// delegate-seed MAC key boot probe (retried until it verifies) and the
-// registration outbox worker. Neither ever stops the process.
+// delegate-seed MAC key boot probe, retried until it verifies. It never
+// stops the process.
 func (a *API) Start(ctx context.Context) {
 	if a.cfg.DelegateSeedMacKey != "" {
 		go a.runDelegateSeedProbe(ctx)
-	}
-	if a.registrations != nil {
-		go a.registrations.run(ctx)
 	}
 }
 

@@ -373,65 +373,53 @@ func TestDelegateSeed_NotFoundDisambiguation(t *testing.T) {
 	}
 }
 
-// TestDelegateSeed_RespondsBeforeRegistration: the seed is answered without
-// waiting on the coordinator (ruling 1). The registration POST hangs until the
-// test ends, yet the handler returns promptly, and the POST is attempted only
-// after the response was written.
-func TestDelegateSeed_RespondsBeforeRegistration(t *testing.T) {
+// TestDelegateSeed_NeverCallsCoordinator: the sealer asserts its own
+// registration (plan-2609-12 slice 09), so a seed request at any apiVersion
+// reaches no coordinator route, even with the coordinator URL, the registrar
+// voucher key and the background workers all in place.
+func TestDelegateSeed_NeverCallsCoordinator(t *testing.T) {
+	var hits atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer coordinator.Close()
+
 	logger, _ := NewLogger(0)
 	api := NewAPI(logger, Config{
-		AppToken:                 "app-token",
-		DelegateSeedMacKey:       "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed",
-		DelegateSeedSealers:      []string{"sealer-a"},
-		RegistrarVoucherKey:      "projects/p/locations/l/keyRings/r/cryptoKeys/registrar-voucher",
-		DelegationCoordinatorURL: "https://coordinator.invalid",
+		AppToken:                   "app-token",
+		DelegateSeedMacKey:         "projects/p/locations/l/keyRings/r/cryptoKeys/delegate-seed",
+		DelegateSeedSealers:        []string{"sealer-a"},
+		RegistrarVoucherKey:        "projects/p/locations/l/keyRings/r/cryptoKeys/registrar-voucher",
+		DelegationCoordinatorURL:   coordinator.URL,
+		DelegationCoordinatorToken: "coordinator-token",
 	})
 	api.macSignOverride = fakeMacSign(nil)
 	api.getDelegateSeedKeyOverride = fakeDelegateSeedKey(goodMacKey, nil)
 	if err := api.probeDelegateSeedKey(context.Background()); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if api.registrations == nil {
-		t.Fatal("outbox must exist when the registrar key and coordinator are configured")
-	}
 	_, signer, kid := registrarKey(t)
+	var signs atomic.Int32
 	api.signVoucherOverride = func(_ context.Context, c DelegateKeyVoucherClaims) ([]byte, error) {
+		signs.Add(1)
 		return BuildDelegateKeyVoucherWithSigner(c, kid, signer)
-	}
-	var responded atomic.Bool
-	posted := make(chan bool, 1)
-	hang := make(chan struct{})
-	defer close(hang)
-	api.registrations.post = func(ctx context.Context, _ RegisterDelegateKeysBody) registrationOutcome {
-		posted <- responded.Load()
-		select {
-		case <-hang:
-		case <-ctx.Done():
-		}
-		return registrationOutcome{err: ctx.Err()}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	api.Start(ctx)
 
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		rec := postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1})
-		responded.Store(true)
-		done <- rec
-	}()
-	select {
-	case rec := <-done:
-		decodeSeed(t, rec)
-	case <-time.After(5 * time.Second):
-		t.Fatal("seed response waited on the coordinator")
+	decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1}))
+	v3 := decodeSeed(t, postDelegateSeed(t, api, "app-token", DelegateSeedRequest{SealerID: "sealer-a", Epoch: 1, APIVersion: 3}))
+	if len(v3.Voucher) == 0 {
+		t.Fatal("version-3 response carries no voucher")
 	}
-	select {
-	case <-posted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("registration was never attempted")
+	// Give any background worker time to act on the requests.
+	time.Sleep(500 * time.Millisecond)
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("coordinator received %d requests, want 0", n)
 	}
-	if api.registrations.len() != 1 {
-		t.Fatalf("outbox len = %d, want 1 pending", api.registrations.len())
+	if n := signs.Load(); n != 1 {
+		t.Fatalf("vouchers signed = %d, want 1 (the version-3 response's)", n)
 	}
 }

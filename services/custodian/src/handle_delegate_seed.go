@@ -197,7 +197,6 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 	)
 
 	resp := DelegateSeedResponse{Seed: seed, KMSKeyVersion: keyVersion, APIVersion: delegateSeedAPIVersionEpochIsVersion}
-	var issued *issuedVoucher
 	if req.APIVersion >= delegateSeedAPIVersionVoucher {
 		resp.APIVersion = delegateSeedAPIVersionVoucher
 		// Signed only after this epoch's MacSign succeeded, on the
@@ -208,22 +207,13 @@ func (a *API) handleDelegateSeed(w http.ResponseWriter, r *http.Request) {
 				"sealerId", req.SealerID, "epoch", req.Epoch, "kmsKeyVersion", keyVersion, "error", err)
 		} else {
 			resp.Voucher, resp.VoucherNotAfter = v.bytes, v.notAfter
-			issued = &v
 		}
 	}
 
-	// Answer first (plan-2609-12 ruling 1): the sealer needs only the seed
-	// (and, at version 3, the voucher). Registering the standing key with the
-	// coordinator is the outbox's job, off this request's context and
-	// deadline, with the same voucher when there is one.
+	// The sealer registers the standing key itself, with this voucher
+	// (plan-2609-12 rulings 1′ and 7); the custodian never calls the
+	// coordinator for it (slice 09).
 	a.writeCBOR(w, http.StatusOK, resp)
-
-	if a.registrations != nil {
-		if err := a.registrations.enqueue(req.SealerID, req.Epoch, keyVersion, seed, issued); err != nil {
-			a.Logger.Error("delegate key registration not queued",
-				"sealerId", req.SealerID, "epoch", req.Epoch, "kmsKeyVersion", keyVersion, "error", err)
-		}
-	}
 }
 
 // voucherForSeed derives the standing public key for (sealerID, epoch) from
