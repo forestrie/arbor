@@ -100,7 +100,7 @@ Sibling repos: **canopy** (SCRAPI Workers), **forest-1** (GKE/Flux), **univocity
 ## Gotchas (critical)
 
 - Platform ADRs/ARCs live in **devdocs**, not this repo — see stubs under `docs/adr/`.
-- Grant store and `logId → R` uniqueness: devdocs [ADR-0035](https://github.com/forestrie/devdocs/blob/main/archive/2603/adr/adr-0035-univocity-owned-grant-store-and-authority-correspondence.md), [ADR-0036](https://github.com/forestrie/devdocs/blob/main/archive/2603/adr/adr-0036-global-logid-r-uniqueness.md), [ADR-0037](https://github.com/forestrie/devdocs/blob/main/adr/adr-0037-forests-storage-and-uuid-log-ids.md) (private).
+- Grant store and `logId → R` uniqueness: devdocs [ADR-0035](https://github.com/forestrie/devdocs/blob/main/adr/adr-0035-univocity-owned-grant-store-and-authority-correspondence.md), [ADR-0036](https://github.com/forestrie/devdocs/blob/main/adr/adr-0036-global-logid-r-uniqueness.md), [ADR-0037](https://github.com/forestrie/devdocs/blob/main/adr/adr-0037-forests-storage-and-uuid-log-ids.md) (private).
 - Never log raw secrets; ranger logs SHA-256 digests only.
 - Sealer resolves contract via univocity `GET /api/logs/{logId}/public-root`.
 

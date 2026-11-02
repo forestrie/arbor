@@ -12,7 +12,7 @@ import (
 
 // The standing delegate key lifecycle (devdocs plan-2609-12 slice 05,
 // rulings 1′, 4′, 5 and 7):
-// https://github.com/forestrie/devdocs/blob/main/plans/plan-2609-12-delegate-key-registration-hardening/05-sealer-readiness.md
+// https://github.com/forestrie/work/blob/main/plans/plan-2609-12-delegate-key-registration-hardening/05-sealer-readiness.md
 //
 // Keys install the moment they derive. The sealer then asserts each held key
 // with the coordinator every minute, presenting the custodian's voucher, and
