@@ -30,6 +30,6 @@ user-invocable: false
 | Grant / Univocity client | [forestrie/go-univocity](https://github.com/forestrie/go-univocity) |
 | R2 SigV4 | [forestrie/go-sigv4](https://github.com/forestrie/go-sigv4) |
 | COSE MMR profile | [draft-bryce-cose-receipts-mmr-profile](https://github.com/robinbryce/draft-bryce-cose-receipts-mmr-profile) |
-| Platform glossary | [devdocs/glossary.md](https://github.com/forestrie/devdocs/blob/main/glossary.md) |
+| Platform glossary | [devdocs/glossary.md](https://github.com/forestrie/protocol/blob/main/glossary.md) |
 
 Repo-specific Go comment rules may also live in arbor `.cursor/rules/go-comments.mdc`.

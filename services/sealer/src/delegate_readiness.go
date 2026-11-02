@@ -9,7 +9,7 @@ import (
 
 // DelegateKeyReadiness is the sealer's readiness latch (devdocs plan-2609-12
 // ruling 5 and ruling D1 (a); slice 05:
-// https://github.com/forestrie/devdocs/blob/main/plans/plan-2609-12-delegate-key-registration-hardening/05-sealer-readiness.md).
+// https://github.com/forestrie/work/blob/main/plans/plan-2609-12-delegate-key-registration-hardening/05-sealer-readiness.md).
 // It is Ready once the standing delegate keys are installed and the
 // coordinator has accepted one assertion of the current key, and then stays
 // Ready for the life of the process: after boot, a lost registration shows
