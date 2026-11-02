@@ -16,17 +16,24 @@ import (
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
 )
 
+// verifiedLease builds a lease as VerifyDelegationLease admits it: the
+// certificate range and the on-chain proof range are equal.
+func verifiedLease(start, end uint64) *DelegationLease {
+	return &DelegationLease{
+		Info: &delegationcert.CertificateInfo{MMRStart: start, MMREnd: end},
+		OnchainProof: &delegationcert.OnchainDelegationProof{
+			MMRStart: start,
+			MMREnd:   end,
+		},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+}
+
 // A cached lease for [0,1] must not be reused for a later seal [0,3]: the
 // on-chain proof binds mmrEnd in the root signature, and univocity reverts
 // CheckpointIndexOutOfDelegationRange when claimedSize-1 > mmrEnd.
 func TestLeaseCoversMMRRange_OnchainProof(t *testing.T) {
-	lease := &DelegationLease{
-		OnchainProof: &delegationcert.OnchainDelegationProof{
-			MMRStart: 0,
-			MMREnd:   1,
-		},
-		ExpiresAt: time.Now().Add(time.Hour),
-	}
+	lease := verifiedLease(0, 1)
 	if !leaseCoversMMRRange(lease, 0, 1) {
 		t.Fatal("expected [0,1] to cover [0,1]")
 	}
@@ -39,18 +46,27 @@ func TestLeaseCoversMMRRange_OnchainProof(t *testing.T) {
 }
 
 func TestLeaseCoversMMRRange_OnchainProofInterior(t *testing.T) {
-	lease := &DelegationLease{
-		OnchainProof: &delegationcert.OnchainDelegationProof{
-			MMRStart: 0,
-			MMREnd:   3,
-		},
-		ExpiresAt: time.Now().Add(time.Hour),
-	}
+	lease := verifiedLease(0, 3)
 	if !leaseCoversMMRRange(lease, 1, 1) {
 		t.Fatal("expected [0,3] to cover [1,1]")
 	}
 	if !leaseCoversMMRRange(lease, 0, 3) {
 		t.Fatal("expected [0,3] to cover [0,3]")
+	}
+}
+
+// Coverage is the certificate's range, the one offline verification checks.
+// An on-chain proof wider than the certificate must not extend it: a
+// checkpoint sealed past the certificate would publish on-chain yet fail
+// offline verification.
+func TestLeaseCoversMMRRange_WiderProofDoesNotExtendCoverage(t *testing.T) {
+	lease := verifiedLease(0, 1)
+	lease.OnchainProof.MMREnd = 1000
+	if !leaseCoversMMRRange(lease, 0, 1) {
+		t.Fatal("expected certificate [0,1] to cover [0,1]")
+	}
+	if leaseCoversMMRRange(lease, 0, 3) {
+		t.Fatal("a proof wider than the certificate must not cover [0,3]")
 	}
 }
 
@@ -63,13 +79,7 @@ func TestEnsureValidForLog_RejectsCachedLeaseOutsideRange(t *testing.T) {
 		time.Minute,
 	)
 	mgr.SetDelegateKeys(standingKeys(t))
-	lease := &DelegationLease{
-		OnchainProof: &delegationcert.OnchainDelegationProof{
-			MMRStart: 0,
-			MMREnd:   1,
-		},
-		ExpiresAt: time.Now().Add(time.Hour),
-	}
+	lease := verifiedLease(0, 1)
 	entry := &leaseEntry{key: logID, lease: lease}
 	elem := mgr.lru.PushFront(entry)
 	mgr.leases[logID] = elem
@@ -93,8 +103,8 @@ func TestEnsureValidForLog_RejectsCachedLeaseOutsideRange(t *testing.T) {
 	}
 }
 
-// certFallbackLease builds a lease with no on-chain proof, so
-// leaseCoversMMRRange falls back to the parsed certificate range.
+// certFallbackLease builds a lease with no on-chain proof from a parsed
+// certificate, the range leaseCoversMMRRange reads.
 func certFallbackLease(t *testing.T, cert []byte) *DelegationLease {
 	t.Helper()
 	info, err := delegationcert.ParseCertificate(cert)
@@ -173,12 +183,17 @@ func TestLeaseCoversMMRRange_WebAuthnGolden2Pow40(t *testing.T) {
 	}
 }
 
-// A lease with no on-chain proof and no parsed certificate covers nothing:
-// a certificate that failed to parse never yields an Info, so the fallback
-// must fail closed rather than read zero-valued bounds.
+// A lease with no parsed certificate covers nothing, even with an on-chain
+// proof: a certificate that failed to parse never yields an Info, so the
+// check must fail closed rather than read zero-valued bounds or trust the
+// proof's range alone.
 func TestLeaseCoversMMRRange_NoInfoCoversNothing(t *testing.T) {
 	lease := &DelegationLease{ExpiresAt: time.Now().Add(time.Hour)}
 	if leaseCoversMMRRange(lease, 0, 0) {
 		t.Fatal("a lease without proof or certificate info must not cover [0,0]")
+	}
+	lease.OnchainProof = &delegationcert.OnchainDelegationProof{MMRStart: 0, MMREnd: 10}
+	if leaseCoversMMRRange(lease, 0, 0) {
+		t.Fatal("a lease with only an on-chain proof must not cover [0,0]")
 	}
 }

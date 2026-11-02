@@ -126,10 +126,7 @@ func TestEnsureValidForLog_CachedWideLeaseServesGrownWindows(t *testing.T) {
 	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, issuer, time.Hour, time.Minute)
 	mgr.SetDelegateKeys(standingKeys(t))
 
-	cached := &DelegationLease{
-		OnchainProof: &delegationcert.OnchainDelegationProof{MMRStart: 0, MMREnd: 1000},
-		ExpiresAt:    time.Now().Add(time.Hour),
-	}
+	cached := verifiedLease(0, 1000)
 	elem := mgr.lru.PushFront(&leaseEntry{key: logID, lease: cached})
 	mgr.leases[logID] = elem
 

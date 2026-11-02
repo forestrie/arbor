@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"testing"
 	"time"
 
@@ -182,4 +183,69 @@ func pemPublicKey(t *testing.T, pub *ecdsa.PublicKey) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+// verifyLeaseWithProof signs a certificate over [1,10] and verifies an issuer
+// response carrying proof against the seal window [1,10].
+func verifyLeaseWithProof(t *testing.T, proof *delegationcert.OnchainDelegationProof) error {
+	t.Helper()
+	custody, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleg, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_, err = VerifyDelegationLease(
+		LogSigningKey{PublicKeyPEM: pemPublicKey(t, &custody.PublicKey), Alg: "ES256", AlgInt: coseAlgES256},
+		&IssuerLeaseResponse{
+			Certificate:  buildSignedCert(t, custody, &deleg.PublicKey, 1, 10),
+			OnchainProof: proof,
+			IssuedAt:     now,
+			ExpiresAt:    now.Add(time.Hour),
+		},
+		LeaseVerificationInput{
+			LogIdHex: phaseDLogID,
+			MMRStart: 1,
+			MMREnd:   10,
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, deleg),
+		},
+		nil,
+	)
+	return err
+}
+
+// The on-chain proof's range must equal the certificate's: univocity checks
+// the proof at publication, offline verification checks the certificate, and
+// a lease is reused for any window its range covers.
+func TestVerifyDelegationLease_OnchainProofRange(t *testing.T) {
+	cases := []struct {
+		name       string
+		proof      *delegationcert.OnchainDelegationProof
+		wantErr    error
+		wantAccept bool
+	}{
+		{"nil proof", nil, nil, true},
+		{"matching proof", &delegationcert.OnchainDelegationProof{MMRStart: 1, MMREnd: 10}, nil, true},
+		{"wider end", &delegationcert.OnchainDelegationProof{MMRStart: 1, MMREnd: 1000}, ErrOnchainProofRangeMismatch, false},
+		{"wider start", &delegationcert.OnchainDelegationProof{MMRStart: 0, MMREnd: 10}, ErrOnchainProofRangeMismatch, false},
+		{"narrower", &delegationcert.OnchainDelegationProof{MMRStart: 2, MMREnd: 9}, ErrOnchainProofRangeMismatch, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := verifyLeaseWithProof(t, c.proof)
+			if c.wantAccept {
+				if err != nil {
+					t.Fatalf("expected lease accepted, got %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+		})
+	}
 }
