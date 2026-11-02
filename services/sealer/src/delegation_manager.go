@@ -200,20 +200,14 @@ func (m *DelegationLeaseManager) SetDelegateKeys(keys *DelegateKeySet) {
 }
 
 // leaseCoversMMRRange reports whether lease authorizes sealing through
-// [mmrStart, mmrEnd] (inclusive). Prefers the on-chain proof bounds (what
-// univocity checks); falls back to the COSE certificate payload when the
-// issuer omitted onchainProof.
+// [mmrStart, mmrEnd] (inclusive). Coverage is the certificate's range, the
+// one offline receipt verification checks. VerifyDelegationLease admits a
+// lease only when any on-chain proof signs exactly that range, so the
+// certificate's range is also the range univocity checks at publication.
 func leaseCoversMMRRange(lease *DelegationLease, mmrStart, mmrEnd uint64) bool {
-	if lease == nil {
-		return false
-	}
-	if lease.OnchainProof != nil {
-		return lease.OnchainProof.MMRStart <= mmrStart &&
-			lease.OnchainProof.MMREnd >= mmrEnd
-	}
 	// No parsed certificate covers nothing. ParseCertificate refuses a
 	// certificate without both bounds, so a non-nil Info has real ones.
-	if lease.Info == nil {
+	if lease == nil || lease.Info == nil {
 		return false
 	}
 	return lease.Info.MMRStart <= mmrStart && lease.Info.MMREnd >= mmrEnd

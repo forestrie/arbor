@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"testing"
 	"time"
 
@@ -182,4 +183,84 @@ func pemPublicKey(t *testing.T, pub *ecdsa.PublicKey) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+}
+
+// verifyLeaseWithProof signs a certificate over cert and verifies an issuer
+// response carrying proof against the seal window win.
+func verifyLeaseWithProof(
+	t *testing.T,
+	cert, win [2]uint64,
+	proof *delegationcert.OnchainDelegationProof,
+) error {
+	t.Helper()
+	custody, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleg, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	_, err = VerifyDelegationLease(
+		LogSigningKey{PublicKeyPEM: pemPublicKey(t, &custody.PublicKey), Alg: "ES256", AlgInt: coseAlgES256},
+		&IssuerLeaseResponse{
+			Certificate:  buildSignedCert(t, custody, &deleg.PublicKey, cert[0], cert[1]),
+			OnchainProof: proof,
+			IssuedAt:     now,
+			ExpiresAt:    now.Add(time.Hour),
+		},
+		LeaseVerificationInput{
+			LogIdHex: phaseDLogID,
+			MMRStart: win[0],
+			MMREnd:   win[1],
+			Curve:    delegationcert.Secp256r1,
+			HeldKeys: heldKeysFor(t, deleg),
+		},
+		nil,
+	)
+	return err
+}
+
+// The on-chain proof's range must equal the certificate's: univocity checks
+// the proof at publication, offline verification checks the certificate, and
+// a lease is reused for any window its range covers.
+func TestVerifyDelegationLease_OnchainProofRange(t *testing.T) {
+	proof := func(start, end uint64) *delegationcert.OnchainDelegationProof {
+		return &delegationcert.OnchainDelegationProof{MMRStart: start, MMREnd: end}
+	}
+	exact := [2]uint64{1, 10}
+	// Production shape: a wide standing certificate serves a narrow seal
+	// window, so the proof must equal the certificate, not the window.
+	wide, narrow := [2]uint64{0, 1000}, [2]uint64{5, 6}
+	cases := []struct {
+		name      string
+		cert, win [2]uint64
+		proof     *delegationcert.OnchainDelegationProof
+		wantErr   error
+	}{
+		{"nil proof", exact, exact, nil, nil},
+		{"matching proof", exact, exact, proof(1, 10), nil},
+		{"wider end", exact, exact, proof(1, 1000), ErrOnchainProofRangeMismatch},
+		{"wider start", exact, exact, proof(0, 10), ErrOnchainProofRangeMismatch},
+		{"narrower", exact, exact, proof(2, 9), ErrOnchainProofRangeMismatch},
+		{"wide cert, proof equals cert", wide, narrow, proof(0, 1000), nil},
+		{"wide cert, proof equals window", wide, narrow, proof(5, 6), ErrOnchainProofRangeMismatch},
+		{"wide cert, proof wider than cert", wide, narrow, proof(0, 2000), ErrOnchainProofRangeMismatch},
+		{"wide cert, nil proof", wide, narrow, nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := verifyLeaseWithProof(t, c.cert, c.win, c.proof)
+			if c.wantErr == nil {
+				if err != nil {
+					t.Fatalf("expected lease accepted, got %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.wantErr) {
+				t.Fatalf("got %v, want %v", err, c.wantErr)
+			}
+		})
+	}
 }

@@ -107,6 +107,18 @@ func VerifyDelegationLease(
 			start, end, req.MMRStart, req.MMREnd,
 		)
 	}
+	// The issuer response is untrusted, and the on-chain proof is signed
+	// independently of the certificate. Univocity checks the proof's range
+	// at publication; offline receipt verification checks the certificate's.
+	// They must be equal, or a lease could seal a window the certificate
+	// does not cover and publish a checkpoint offline verification rejects.
+	if p := issuerResp.OnchainProof; p != nil &&
+		(p.MMRStart != start || p.MMREnd != end) {
+		return nil, fmt.Errorf(
+			"%w: proof [%d,%d], certificate [%d,%d]",
+			ErrOnchainProofRangeMismatch, p.MMRStart, p.MMREnd, start, end,
+		)
+	}
 	if info.PayloadExpiresAtUnix == 0 {
 		return nil, fmt.Errorf("delegation certificate missing expires_at")
 	}

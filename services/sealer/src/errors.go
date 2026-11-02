@@ -16,4 +16,10 @@ var (
 	// they are, so this is a wiring error, never a cue to fall back
 	// (devdocs plan-2609-12 slice 10).
 	ErrNoStandingDelegateKeys = errors.New("no standing delegate keys installed")
+	// ErrOnchainProofRangeMismatch indicates the issuer's on-chain delegation
+	// proof signs a different MMR range from the delegation certificate.
+	// Univocity checks the proof at publication and offline verification
+	// checks the certificate, so the two ranges must be equal or a
+	// checkpoint can publish on-chain yet fail offline verification.
+	ErrOnchainProofRangeMismatch = errors.New("on-chain delegation proof range does not match certificate range")
 )
