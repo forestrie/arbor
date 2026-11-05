@@ -83,8 +83,10 @@ func NewCommitter(cfg ranger.Config, httpClient *ranger.HTTPClient, logger *slog
 }
 
 // CommitLogGroup commits entries from the DO ingress queue for a single log.
-// Returns a CommitResult with the count of successfully committed entries
-// and the first leaf index, which the consumer acks with.
+// It commits every entry or returns an error: on error the result is nil and
+// the caller must not ack. On success the CommitResult carries the count
+// (always len(entries)) and the first leaf index, which the consumer acks
+// with.
 //
 // This method is called by the ingress consumer for each log group in parallel.
 // See: arbor/docs/arc-cloudflare-do-ingress.md
@@ -147,50 +149,36 @@ func (c *Committer) CommitLogGroup(
 		massifKeys = append(massifKeys, key)
 	}
 
+	// Any failure returns an error and a nil result, so the consumer does not
+	// ack and the whole batch redelivers. Never skip an entry: the
+	// forestrie-ingress ack is limit-based (row i gets leaf F+i), so a skip
+	// shifts every later row onto the wrong leaf (FOR-653). A failure after a
+	// mid-batch rollover leaves that massif written; the redelivery appends
+	// the batch again and is acked onto those leaves, so the earlier copies
+	// are unreferenced duplicates. That costs leaves only on the failure path.
 	for i, entry := range entries {
 		if len(entry.ContentHash) != sha256.Size {
-			c.logger.Warn("invalid content hash length",
-				"logId", logIDHex,
-				"index", i,
-				"hashLen", len(entry.ContentHash),
-			)
-			continue
+			return nil, fmt.Errorf("entry %d of log %s: content hash is %d bytes, want %d",
+				i, logIDHex, len(entry.ContentHash), sha256.Size)
 		}
 
 		idTimestamp, err := mc.NextIDTimestamp(ctx, c.idState)
 		if err != nil {
-			c.logger.Warn("failed to generate id timestamp",
-				"logId", logIDHex,
-				"index", i,
-				"error", err,
-			)
-			continue
+			return nil, fmt.Errorf("entry %d of log %s: id timestamp: %w", i, logIDHex, err)
 		}
 
-		idTimestampBytes := make([]byte, 8)
-		binary.BigEndian.PutUint64(idTimestampBytes, idTimestamp)
+		var idTimestampBytes [8]byte
+		binary.BigEndian.PutUint64(idTimestampBytes[:], idTimestamp)
 
 		hasher := sha256.New()
-		hasher.Write(idTimestampBytes)
+		hasher.Write(idTimestampBytes[:])
 		hasher.Write(entry.ContentHash)
 		leafHash := hasher.Sum(nil)
-
-		if len(leafHash) != massifs.ValueBytes {
-			c.logger.Warn("invalid leaf hash length",
-				"logId", logIDHex,
-				"index", i,
-				"hashLen", len(leafHash),
-			)
-			continue
-		}
 
 		mmrSize, err = mc.AddIndexedEntry(leafHash)
 		if errors.Is(err, massifs.ErrMassifFull) {
 			if err = massifs.CommitContext(ctx, store, &mc); err != nil {
-				return &ingress.CommitResult{
-					Committed:      committedCount,
-					FirstLeafIndex: firstLeafIndex,
-				}, fmt.Errorf("commit on massif full: %w", err)
+				return nil, fmt.Errorf("commit on massif full: %w", err)
 			}
 			recordMassifKey(mc.Start.MassifIndex)
 
@@ -198,10 +186,7 @@ func (c *Committer) CommitLogGroup(
 			lastCommit = i
 			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
 			if err != nil {
-				return &ingress.CommitResult{
-					Committed:      committedCount,
-					FirstLeafIndex: firstLeafIndex,
-				}, fmt.Errorf("get append context after rollover: %w", err)
+				return nil, fmt.Errorf("get append context after rollover: %w", err)
 			}
 
 			mmrSize, err = mc.AddIndexedEntry(leafHash)
@@ -215,12 +200,7 @@ func (c *Committer) CommitLogGroup(
 			}
 		}
 		if err != nil {
-			c.logger.Warn("failed to add leaf",
-				"logId", logIDHex,
-				"index", i,
-				"error", err,
-			)
-			continue
+			return nil, fmt.Errorf("entry %d of log %s: add leaf: %w", i, logIDHex, err)
 		}
 
 		// AddIndexedEntry returns MMR size (node count) after the append. Derive the
@@ -232,10 +212,7 @@ func (c *Committer) CommitLogGroup(
 		}
 
 		if err := mc.IndexLeaf(idTimestamp, entry.ContentHash); err != nil {
-			return &ingress.CommitResult{
-				Committed:      committedCount,
-				FirstLeafIndex: firstLeafIndex,
-			}, fmt.Errorf("update v2 index: %w", err)
+			return nil, fmt.Errorf("update v2 index: %w", err)
 		}
 
 		mc.SetLastIDTimestamp(idTimestamp)
@@ -243,14 +220,9 @@ func (c *Committer) CommitLogGroup(
 	}
 
 	if err := massifs.CommitContext(ctx, store, &mc); err != nil {
-		return &ingress.CommitResult{
-			Committed:      committedCount,
-			FirstLeafIndex: firstLeafIndex,
-		}, fmt.Errorf("final commit: %w", err)
+		return nil, fmt.Errorf("final commit: %w", err)
 	}
-	if committedCount > 0 {
-		recordMassifKey(mc.Start.MassifIndex)
-	}
+	recordMassifKey(mc.Start.MassifIndex)
 	c.logNotice(ctx,
 		"committed",
 		"logId", logIDHex,

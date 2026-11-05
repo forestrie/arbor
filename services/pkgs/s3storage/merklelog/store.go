@@ -265,8 +265,15 @@ func (s *Store) CheckpointRead(ctx context.Context, massifIndex uint32) ([]byte,
 	return result.Data, nil
 }
 
-// Put implements massifs.ObjectWriter using unconditional (or create-only) writes.
-// For consistent updates (If-Match), use PutWithETag.
+// Put implements massifs.ObjectWriter, which massifs.CommitContext uses to
+// write a massif. Massif writes carry both concurrency controls: a create
+// (failIfExists) requires the object not to exist (If-None-Match: *), and an
+// update requires it to be the one last read (If-Match on the cached ETag),
+// so of two writers appending to the same massif the second fails rather
+// than replacing the first (FOR-656). An update to a massif this store has
+// not read is refused, as in the Azure store. Other object types keep
+// unconditional or create-only writes; use PutWithETag for consistent
+// updates to them.
 func (s *Store) Put(
 	ctx context.Context,
 	massifIndex uint32,
@@ -274,7 +281,18 @@ func (s *Store) Put(
 	data []byte,
 	failIfExists bool,
 ) error {
-	return s.PutWithETag(ctx, massifIndex, ty, data, failIfExists, "")
+	etag := ""
+	if ty == massifstorage.ObjectMassifData && !failIfExists {
+		cached, ok, err := s.MassifETag(massifIndex)
+		if err != nil {
+			return err
+		}
+		if !ok || cached == "" {
+			return fmt.Errorf("update massif %d: no ETag from a prior read", massifIndex)
+		}
+		etag = cached
+	}
+	return s.PutWithETag(ctx, massifIndex, ty, data, failIfExists, etag)
 }
 
 // PutWithETag writes the object with explicit conditional semantics.
