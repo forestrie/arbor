@@ -22,17 +22,14 @@ import (
 // (If-Match on the ETag from GetAppendContext). Creating a massif is the
 // other half (If-None-Match: *) and already holds.
 //
-// The Azure store enforces this: go-merklelog-azure
-// storage/objectheadreplacer.go sets WithEtagMatch on every update and
-// refuses a non-creating put without an ETag. The R2 store ranger uses does
-// not: CommitContext calls Store.Put, which writes with an empty ETag, so the
-// second of two writers silently replaces the first (FOR-656).
+// The Azure store has always enforced this (go-merklelog-azure
+// storage/objectheadreplacer.go). The R2 Store.Put used to write appends
+// with an empty ETag, so the second of two writers silently replaced the
+// first (FOR-656).
 //
 // Two stores over one client stand in for two rangers on the same log,
 // e.g. while the SequencingQueue moves the log between pollers.
 func TestMassifAppendRequiresUnchangedObject(t *testing.T) {
-	t.Skip("FOR-656: R2 massif appends send no If-Match; remove this skip with the fix")
-
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := merklelogtest.NewMemClient()
