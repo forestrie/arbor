@@ -19,12 +19,17 @@ import (
 
 // ackGoldenUint64MaxHex is EncodeAckRequest(ackGoldenUint64Max()).
 // canopy's ack handler tests decode the same bytes; change both together.
-const ackGoldenUint64MaxHex = "a5" +
+const ackGoldenUint64MaxHex = "a7" +
 	"656c696d697401" + // "limit": 1
 	"656c6f6749645010" + "1112131415161718191a1b1c1d1e1f" + // "logId": h'10..1f'
+	"65736571486901" + // "seqHi": 1
 	"657365714c6f01" + // "seqLo": 1
+	"6b6c65617365457870697279" + "1b0000018bcfe5dd30" + // "leaseExpiry": 1700000030000
 	"6c6d6173736966486569676874" + "1821" + // "massifHeight": 33
 	"6e66697273744c656166496e646578" + "1bffffffffffffffff" // "firstLeafIndex": 2^64-1
+
+// ackGoldenLeaseExpiry is a pull lease in ms, past 2^32 as real ones are.
+const ackGoldenLeaseExpiry uint64 = 1_700_000_030_000
 
 func ackGoldenUint64Max() AckRequest {
 	logID := make([]byte, 16)
@@ -34,6 +39,8 @@ func ackGoldenUint64Max() AckRequest {
 	return AckRequest{
 		LogId:          logID,
 		SeqLo:          1,
+		SeqHi:          1,
+		LeaseExpiry:    ackGoldenLeaseExpiry,
 		Limit:          1,
 		FirstLeafIndex: math.MaxUint64,
 		MassifHeight:   33,

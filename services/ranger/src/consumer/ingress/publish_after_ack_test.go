@@ -51,9 +51,13 @@ func testGroup() LogGroup {
 	return LogGroup{
 		LogId:   []byte{0x30, 0x62, 0xea, 0x57, 0xc1, 0x84, 0x41, 0xd8, 0xbd, 0x61, 0x29, 0x6b, 0x02, 0xc6, 0x80, 0xd8},
 		SeqLo:   1,
+		SeqHi:   1,
 		Entries: []Entry{{ContentHash: make([]byte, 32)}},
 	}
 }
+
+// testLeaseExpiry is the pull lease testGroup was pulled under.
+const testLeaseExpiry uint64 = 1_700_000_030_000
 
 // TestProcessLogGroupDoesNotWaitOnHintPublish is the R1 acceptance
 // (plan-2607-03): the seal-hint publish is detached, so a slow or dead hint
@@ -72,7 +76,7 @@ func TestProcessLogGroupDoesNotWaitOnHintPublish(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		c.processLogGroup(context.Background(), testGroup())
+		c.processLogGroup(context.Background(), testGroup(), testLeaseExpiry)
 		close(done)
 	}()
 
@@ -126,7 +130,7 @@ func TestProcessLogGroupNoHintOnAckFailure(t *testing.T) {
 		ackURL:     srv.URL,
 	}
 
-	c.processLogGroup(context.Background(), testGroup())
+	c.processLogGroup(context.Background(), testGroup(), testLeaseExpiry)
 
 	select {
 	case got := <-pub.calls:
@@ -146,7 +150,7 @@ func TestProcessLogGroupNoHintWhenNoKeys(t *testing.T) {
 		committer: &stubCommitter{result: &CommitResult{Committed: 1}},
 		sealHints: pub,
 	}
-	c.processLogGroup(context.Background(), testGroup())
+	c.processLogGroup(context.Background(), testGroup(), testLeaseExpiry)
 	select {
 	case got := <-pub.calls:
 		t.Fatalf("publisher invoked with no keys: %v", got)
@@ -156,5 +160,5 @@ func TestProcessLogGroupNoHintWhenNoKeys(t *testing.T) {
 	// nil publisher (feature off) must be safe on the same path.
 	c.sealHints = nil
 	c.committer = &stubCommitter{result: &CommitResult{Committed: 1, MassifObjectKeys: []string{"k"}}}
-	c.processLogGroup(context.Background(), testGroup())
+	c.processLogGroup(context.Background(), testGroup(), testLeaseExpiry)
 }

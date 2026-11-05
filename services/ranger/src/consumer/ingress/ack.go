@@ -13,6 +13,11 @@ import (
 // With return path unification (Phase 9), ack also records leaf indices
 // to enable direct registration status queries from the DO.
 //
+// SeqLo, SeqHi and LeaseExpiry echo the pulled LogGroup and the pull's
+// lease. The DO marks only the rows that pull leased, and refuses the ack
+// (409, nothing marked) unless exactly Limit of them are still pending under
+// that lease, e.g. after a re-pull past the visibility timeout (FOR-655).
+//
 // MassifHeight is the one-based height the committer writes massifs at: a
 // massif holds 2^(h-1) leaves (urkle.LeafCountForMassifHeight). The DO stores
 // no massif index; readers derive it with the equivalent of
@@ -21,6 +26,8 @@ import (
 type AckRequest struct {
 	LogId          []byte `cbor:"logId"`
 	SeqLo          uint64 `cbor:"seqLo"`
+	SeqHi          uint64 `cbor:"seqHi"`
+	LeaseExpiry    uint64 `cbor:"leaseExpiry"`
 	Limit          uint64 `cbor:"limit"`
 	FirstLeafIndex uint64 `cbor:"firstLeafIndex"`
 	MassifHeight   uint64 `cbor:"massifHeight"`

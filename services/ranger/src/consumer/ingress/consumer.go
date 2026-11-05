@@ -256,7 +256,7 @@ func (c *Consumer) pollCycle(ctx context.Context) (int, error) {
 		wg.Add(1)
 		go func(g LogGroup) {
 			defer wg.Done()
-			c.processLogGroup(ctx, g)
+			c.processLogGroup(ctx, g, resp.LeaseExpiry)
 		}(group)
 	}
 	wg.Wait()
@@ -264,8 +264,9 @@ func (c *Consumer) pollCycle(ctx context.Context) (int, error) {
 	return entryCount, nil
 }
 
-// processLogGroup commits entries for a single log and acks them.
-func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
+// processLogGroup commits entries for a single log and acks them under the
+// pull's lease (leaseExpiry from the PullResponse).
+func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup, leaseExpiry uint64) {
 	logIdHex := hex.EncodeToString(group.LogId)
 
 	commitStart := time.Now()
@@ -307,7 +308,7 @@ func (c *Consumer) processLogGroup(ctx context.Context, group LogGroup) {
 
 	// Ack using limit-based ack with sequencing metadata.
 	// See: arbor/docs/arc-cloudflare-do-ingress.md section 2.3 and 3.12
-	if err := c.ackFirst(ctx, group.LogId, group.SeqLo, result); err != nil {
+	if err := c.ackFirst(ctx, group, leaseExpiry, result); err != nil {
 		// IMPORTANT: Entries were committed but ack failed.
 		// They will redeliver and may cause duplicate commits.
 		// See arc-cloudflare-do-ingress.md section 3.8 and 3.10 for
@@ -381,16 +382,22 @@ func (c *Consumer) pull(ctx context.Context) (*PullResponse, error) {
 	return DecodePullResponse(respBody)
 }
 
-// ackFirst acknowledges committed entries using limit-based ack.
-// Includes sequencing metadata (firstLeafIndex, massifHeight) for return path unification.
-func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, result *CommitResult) error {
+// ackFirst acknowledges a committed LogGroup using limit-based ack, naming
+// the batch by its seq range and the pull's lease so the DO can refuse an ack
+// that no longer matches the rows it leased (FOR-655). It includes
+// firstLeafIndex and massifHeight for return path unification. An ack the DO
+// did not apply in full is an error: the batch redelivers and the retry's
+// leaves are the ones acked.
+func (c *Consumer) ackFirst(ctx context.Context, group LogGroup, leaseExpiry uint64, result *CommitResult) error {
 	if c.cfg.SuppressAcknowledge {
 		return nil
 	}
 
 	req := AckRequest{
-		LogId:          logId,
-		SeqLo:          seqLo,
+		LogId:          group.LogId,
+		SeqLo:          group.SeqLo,
+		SeqHi:          group.SeqHi,
+		LeaseExpiry:    leaseExpiry,
 		Limit:          uint64(result.Committed),
 		FirstLeafIndex: result.FirstLeafIndex,
 		MassifHeight:   uint64(c.cfg.MassifHeight),
@@ -418,6 +425,18 @@ func (c *Consumer) ackFirst(ctx context.Context, logId []byte, seqLo uint64, res
 	if httpResp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 		return fmt.Errorf("ack returned status %d: body_sha256=%s", httpResp.StatusCode, logredact.SHA256Hex(respBody))
+	}
+
+	respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
+	if err != nil {
+		return fmt.Errorf("read ack response: %w", err)
+	}
+	ackResp, err := DecodeAckResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("decode ack response: %w", err)
+	}
+	if uint64(ackResp.Acked) != req.Limit {
+		return fmt.Errorf("ack applied %d of %d entries", ackResp.Acked, req.Limit)
 	}
 
 	return nil
