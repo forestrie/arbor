@@ -149,31 +149,23 @@ func (c *Committer) CommitLogGroup(
 		massifKeys = append(massifKeys, key)
 	}
 
-	// Decide the whole batch before the first write. The forestrie-ingress
-	// ack is limit-based: the SequencingQueue assigns leaf F+i to the i-th
-	// unsequenced row, so skipping an entry would shift every later row onto
-	// the wrong leaf (FOR-653). Any failure here returns with nothing written,
-	// the consumer does not ack, and the batch redelivers. Redelivery is
-	// safe even after a partial write: the retry appends the whole batch
-	// contiguously and the ack maps rows onto those leaves, leaving any
-	// earlier copies as unreferenced duplicates. Deciding first just avoids
-	// spending leaves on them.
-	idTimestamps := make([]uint64, len(entries))
+	// Any failure returns an error and a nil result, so the consumer does not
+	// ack and the whole batch redelivers. Never skip an entry: the
+	// forestrie-ingress ack is limit-based (row i gets leaf F+i), so a skip
+	// shifts every later row onto the wrong leaf (FOR-653). A failure after a
+	// mid-batch rollover leaves that massif written; the redelivery appends
+	// the batch again and is acked onto those leaves, so the earlier copies
+	// are unreferenced duplicates. That costs leaves only on the failure path.
 	for i, entry := range entries {
 		if len(entry.ContentHash) != sha256.Size {
 			return nil, fmt.Errorf("entry %d of log %s: content hash is %d bytes, want %d",
 				i, logIDHex, len(entry.ContentHash), sha256.Size)
 		}
-		// IDState.NextID is monotonic, and NextIDTimestamp also keeps each
-		// id above the massif's last, so the batch's ids strictly increase.
-		idTimestamps[i], err = mc.NextIDTimestamp(ctx, c.idState)
+
+		idTimestamp, err := mc.NextIDTimestamp(ctx, c.idState)
 		if err != nil {
 			return nil, fmt.Errorf("entry %d of log %s: id timestamp: %w", i, logIDHex, err)
 		}
-	}
-
-	for i, entry := range entries {
-		idTimestamp := idTimestamps[i]
 
 		var idTimestampBytes [8]byte
 		binary.BigEndian.PutUint64(idTimestampBytes[:], idTimestamp)
