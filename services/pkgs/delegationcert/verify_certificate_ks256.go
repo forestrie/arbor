@@ -84,8 +84,9 @@ func VerifyCertificateSignatureKS256(
 	}
 	// Recovery alone accepts both s and n-s, so a high-s signature is the
 	// malleated twin of a valid one and is refused before recovery, as
-	// canopy and univocity's verifyKS256Raw also refuse it. The ERC-1271
-	// path above is untouched: a contract judges its own signature format.
+	// canopy and the univocity contract's verifyKS256Raw also refuse it.
+	// The ERC-1271 path above is untouched: a contract judges its own
+	// signature format.
 	// See forestrie/protocol spec/checkpoints-and-receipts.md and
 	// vectors/fixtures/ks256-low-s.json.
 	r := new(big.Int).SetBytes(signature[:32])
