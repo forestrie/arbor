@@ -18,8 +18,10 @@ import (
 // forests/forest/{R}/grants/{class}/{subject}.cbor plus the logId->R index
 // entry, both written once and both read publicly (publishproof resolves
 // and publishes from them). A reservation, made by canopy's prepare, is a
-// private record holding the grant and its lapse time; nothing public
-// refers to it, so letting it lapse never touches a committed claim.
+// separate record at forests/reservations/{subject}.cbor holding the grant
+// and its lapse time. It sits in the same publicly readable bucket, so it
+// is not secret, but nothing that resolves or publishes logs reads it, so
+// letting it lapse never touches a committed claim.
 
 // Claim intents posted with a create grant.
 const (
