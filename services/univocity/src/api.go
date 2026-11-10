@@ -24,11 +24,6 @@ type API struct {
 	// AdminToken authenticates destructive admin endpoints (delete). When empty
 	// the admin endpoints are disabled.
 	AdminToken string
-	// AllowUnanchoredGenesis permits storing genesis/grants when the on-chain
-	// bootstrap anchor cannot be reached (local/dev/e2e against a stack with no
-	// deployed contract). Never enable in production.
-	AllowUnanchoredGenesis bool
-
 	// Bootstrap caches per-(chainId,contract) on-chain bootstrap keys.
 	Bootstrap *bootstrapCache
 }

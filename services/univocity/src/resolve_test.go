@@ -241,13 +241,13 @@ func TestResolve_NeverEnumerates(t *testing.T) {
 func TestPostGenesis_ClaimFirstRejectsBoundLogId(t *testing.T) {
 	logger, _ := NewLogger(0)
 	store := newFakeStore()
+	boot := mustKS256Key(t)
 	api := API{
-		Logger: logger,
-		Store:  store,
-		// Pool nil + AllowUnanchoredGenesis: anchor verification is skipped
-		// so the test isolates the claim ordering.
-		AllowUnanchoredGenesis: true,
-		APIToken:               "token",
+		Logger:    logger,
+		Pool:      &mockPool{chain: newChainColdAnchoredKS256(boot)},
+		Store:     store,
+		Bootstrap: NewBootstrapCache(),
+		APIToken:  "token",
 	}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
@@ -257,7 +257,6 @@ func TestPostGenesis_ClaimFirstRejectsBoundLogId(t *testing.T) {
 	// The would-be forest root is already a subject in another forest.
 	store.index[r.String()] = other
 
-	boot := mustKS256Key(t)
 	body := buildGenesisDocKS256(t, r, boot, 84532,
 		common.HexToAddress("0x0000000000000000000000000000000000000002"))
 	req := httptest.NewRequest(http.MethodPost, "/api/forest/"+r.String()+"/genesis",
@@ -280,17 +279,18 @@ func TestPostGenesis_ClaimFirstRejectsBoundLogId(t *testing.T) {
 func TestPostGenesis_ClaimFirstIdempotentRetry(t *testing.T) {
 	logger, _ := NewLogger(0)
 	store := newFakeStore()
+	boot := mustKS256Key(t)
 	api := API{
-		Logger:                 logger,
-		Store:                  store,
-		AllowUnanchoredGenesis: true,
-		APIToken:               "token",
+		Logger:    logger,
+		Pool:      &mockPool{chain: newChainColdAnchoredKS256(boot)},
+		Store:     store,
+		Bootstrap: NewBootstrapCache(),
+		APIToken:  "token",
 	}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
 	r := testLogID(22)
-	boot := mustKS256Key(t)
 	body := buildGenesisDocKS256(t, r, boot, 84532,
 		common.HexToAddress("0x0000000000000000000000000000000000000003"))
 
@@ -312,5 +312,39 @@ func TestPostGenesis_ClaimFirstIdempotentRetry(t *testing.T) {
 	// existing genesis-exists 409, index unchanged.
 	if rec := post(); rec.Code != http.StatusConflict {
 		t.Fatalf("retry want 409 genesis-exists got %d", rec.Code)
+	}
+}
+
+// The forest root's key comes only from the contract: a genesis document
+// naming any other key is refused before anything is stored.
+func TestPostGenesis_KeyDiffersFromContractRefused(t *testing.T) {
+	logger, _ := NewLogger(0)
+	deployer := mustKS256Key(t)
+	user := mustKS256Key(t)
+	store := newFakeStore()
+	api := API{
+		Logger:    logger,
+		Pool:      &mockPool{chain: newChainColdAnchoredKS256(deployer)},
+		Store:     store,
+		Bootstrap: NewBootstrapCache(),
+		APIToken:  "token",
+	}
+	mux := http.NewServeMux()
+	api.RegisterRoutes(mux)
+
+	r := testLogID(23)
+	body := buildGenesisDocKS256(t, r, user, 84532,
+		common.HexToAddress("0x0000000000000000000000000000000000000004"))
+	req := httptest.NewRequest(http.MethodPost, "/api/forest/"+r.String()+"/genesis",
+		strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("genesis key mismatch want 422 got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(store.genesis) != 0 || len(store.index) != 0 {
+		t.Fatal("a refused genesis must store nothing")
 	}
 }

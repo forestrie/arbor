@@ -40,69 +40,29 @@ func isContractReadUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "attempting to unmarshal an empty string")
 }
 
-// bootstrapConfigFromStore loads genesis (alg,key) from the owned store when the
-// on-chain anchor is unavailable (unanchored dev/e2e mode).
-func (a API) bootstrapConfigFromStore(ctx context.Context, forest ForestEntry) (int64, []byte, error) {
-	if a.Store == nil {
-		return 0, nil, ErrStoreNotConfigured
-	}
-	body, err := a.Store.GetGenesis(ctx, forest.R)
-	if err != nil {
-		return 0, nil, err
-	}
-	doc, err := parseGenesisDoc(body)
-	if err != nil {
-		return 0, nil, err
-	}
-	return doc.Alg, doc.GenesisKeyBytes(), nil
-}
-
-// bootstrapConfig returns the on-chain bootstrap (alg,key) for a forest, cached
-// per (chainId, contract, R). Prefer on-chain bootstrapConfig(); when stored
-// genesis declares a different root than the contract deployer key, prefer
-// genesis (Mode C BYOK — ADR-0006). When AllowUnanchoredGenesis is set, fall
-// back to the stored genesis document if the anchor is unavailable.
+// bootstrapConfig returns the contract's bootstrap (alg,key) for a forest:
+// the forest root's key, which comes only from the contract (devdocs
+// ADR-0075 decision 7). It is immutable per (chainId, contract), so a valid
+// answer is cached for good; a failed read is never cached.
 func (a API) bootstrapConfig(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
 ) (int64, []byte, error) {
-	cacheKey := fmt.Sprintf("%d|%s|%s", forest.ChainID, forest.Contract.Hex(), forest.R.String())
+	cacheKey := fmt.Sprintf("%d|%s", forest.ChainID, forest.Contract.Hex())
 	if a.Bootstrap != nil {
 		if e, ok := a.Bootstrap.get(cacheKey); ok {
 			return e.alg, e.key, nil
 		}
 	}
 	alg, key, err := reader.BootstrapConfig(ctx)
-	if err != nil || !validBootstrapIdentity(alg, key) {
-		if a.AllowUnanchoredGenesis {
-			storeAlg, storeKey, serr := a.bootstrapConfigFromStore(ctx, forest)
-			if serr == nil && validBootstrapIdentity(storeAlg, storeKey) {
-				if a.Bootstrap != nil {
-					a.Bootstrap.put(cacheKey, storeAlg, storeKey)
-				}
-				return storeAlg, storeKey, nil
-			}
-		}
-		if err != nil {
-			return 0, nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
-		}
+	if err != nil {
+		return 0, nil, fmt.Errorf("%w: %v", ErrBootstrapUnavailable, err)
+	}
+	if !validBootstrapIdentity(alg, key) {
 		return 0, nil, fmt.Errorf("bootstrap key invalid for alg %d (len %d)", alg, len(key))
 	}
-	// When stored genesis declares a different root than the contract deployer
-	// key, prefer genesis (Mode C BYOK — ADR-0006 / ARC-0022).
-	storeAlg, storeKey, serr := a.bootstrapConfigFromStore(ctx, forest)
-	if serr == nil &&
-		validBootstrapIdentity(storeAlg, storeKey) &&
-		!bootstrapKeysEqual(storeAlg, storeKey, alg, key) {
-		if a.Bootstrap != nil {
-			a.Bootstrap.put(cacheKey, storeAlg, storeKey)
-		}
-		return storeAlg, storeKey, nil
-	}
-	// Do not cache chain-only bootstrap before genesis exists: verifyGenesisAnchor
-	// may call bootstrapConfig during genesis POST before the doc is persisted.
-	if a.Bootstrap != nil && serr == nil {
+	if a.Bootstrap != nil {
 		a.Bootstrap.put(cacheKey, alg, key)
 	}
 	return alg, key, nil
@@ -124,11 +84,7 @@ func (a API) isLogInitialized(
 	reader ChainReader,
 	logID logid.UUID,
 ) (bool, error) {
-	ok, err := reader.IsLogInitialized(ctx, logID)
-	if err != nil && a.AllowUnanchoredGenesis && isContractReadUnavailable(err) {
-		return false, nil
-	}
-	return ok, err
+	return reader.IsLogInitialized(ctx, logID)
 }
 
 // verifyGrantChain verifies a creation grant's envelope is signed by its owner's

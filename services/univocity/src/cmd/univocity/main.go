@@ -95,14 +95,13 @@ func main() {
 	setupHealthChecks(mux)
 
 	api := univocity.API{
-		Logger:                 logger,
-		Pool:                   pool,
-		Forests:                univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
-		Store:                  univocity.NewS3Store(s3Client),
-		APIToken:               cfg.APIToken,
-		AdminToken:             cfg.AdminToken,
-		AllowUnanchoredGenesis: cfg.AllowUnanchoredGenesis,
-		Bootstrap:              univocity.NewBootstrapCache(),
+		Logger:     logger,
+		Pool:       pool,
+		Forests:    univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
+		Store:      univocity.NewS3Store(s3Client),
+		APIToken:   cfg.APIToken,
+		AdminToken: cfg.AdminToken,
+		Bootstrap:  univocity.NewBootstrapCache(),
 	}
 	api.RegisterRoutes(mux)
 

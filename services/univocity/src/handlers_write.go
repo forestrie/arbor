@@ -56,6 +56,11 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.verifyGenesisAnchor(r, doc); err != nil {
+		if errors.Is(err, errGenesisKeyMismatch) {
+			a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
+				"genesis key mismatch", err.Error())
+			return
+		}
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
 			"anchor verification failed", err.Error())
 		return
@@ -116,38 +121,28 @@ func (a API) handleGetGenesis(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// verifyGenesisAnchor checks genesis.key == on-chain bootstrapConfig() for the
-// forest's chain/contract. When the anchor cannot be reached it errors unless
-// AllowUnanchoredGenesis is set (local/dev/e2e).
+// errGenesisKeyMismatch reports a genesis document whose key is not the
+// contract's bootstrap key.
+var errGenesisKeyMismatch = errors.New("genesis key differs from the contract's bootstrapConfig()")
+
+// verifyGenesisAnchor requires genesis.key == the contract's bootstrapConfig()
+// for the forest's chain/contract: the root's key comes only from the
+// contract (devdocs ADR-0075 decision 7), so a genesis naming another key is
+// refused, and one whose contract cannot be read cannot be checked.
 func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 	if a.Pool == nil {
-		if a.AllowUnanchoredGenesis {
-			return nil
-		}
 		return errors.New("rpc pool not configured")
 	}
 	reader, err := a.Pool.Reader(doc.Forest.ChainID, doc.Forest.Contract)
 	if err != nil {
-		if a.AllowUnanchoredGenesis {
-			a.Logger.Warn("genesis anchor skipped: reader unavailable",
-				"R", doc.Forest.R.String(), "error", err)
-			return nil
-		}
 		return err
 	}
 	bootAlg, bootKey, err := a.bootstrapConfig(r.Context(), doc.Forest, reader)
 	if err != nil {
-		if a.AllowUnanchoredGenesis && errors.Is(err, ErrBootstrapUnavailable) {
-			a.Logger.Warn("genesis anchor skipped: bootstrap unavailable",
-				"R", doc.Forest.R.String(), "error", err)
-			return nil
-		}
 		return err
 	}
 	if !bootstrapKeysEqual(doc.Alg, doc.GenesisKeyBytes(), bootAlg, bootKey) {
-		// Genesis-declared root may differ from contract bootstrapConfig()
-		// (Mode C BYOK). Grant verification uses stored genesis identity.
-		return nil
+		return errGenesisKeyMismatch
 	}
 	return nil
 }
@@ -198,14 +193,9 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.verifyGrantChain(r.Context(), forest, reader, ts); err != nil {
-		if errors.Is(err, ErrBootstrapUnavailable) && a.AllowUnanchoredGenesis {
-			a.Logger.Warn("grant chain anchor skipped (unanchored mode)",
-				"subject", subject.String(), "error", err)
-		} else {
-			a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
-				"grant chain invalid", err.Error())
-			return
-		}
+		a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
+			"grant chain invalid", err.Error())
+		return
 	}
 	created, existing, err := a.Store.IndexCreate(r.Context(), subject, root)
 	if err != nil {
