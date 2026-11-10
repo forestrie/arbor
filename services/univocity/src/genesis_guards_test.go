@@ -100,3 +100,56 @@ func TestPostGenesis_LapsedReservationDoesNotBlock(t *testing.T) {
 
 	wantStatus(t, f.postGenesis(A), http.StatusCreated, "genesis after the reservation lapsed")
 }
+
+// withNegativeCache gives the fixture a forest cache whose negative entries
+// outlast the test, so only a write that clears one makes the log visible.
+func (f *claimFixture) withNegativeCache() {
+	f.t.Helper()
+	f.api.Forests = NewForestCache(100, time.Hour)
+	f.remount()
+}
+
+// A read of an unknown log caches its miss. A write that makes the log
+// resolvable must clear that entry, or the log reads as unknown until it
+// lapses: a new forest root's grants would be refused as unclaimed.
+func TestNegativeCache_ClearedByGenesis(t *testing.T) {
+	f := newClaimFixture(t)
+	f.withNegativeCache()
+	R2 := testLogID(44)
+	_, rec := f.authority(R2.String())
+	wantStatus(t, rec, http.StatusNotFound, "authority before genesis")
+
+	wantStatus(t, f.postGenesis(R2), http.StatusCreated, "genesis")
+
+	_, rec = f.authority(R2.String())
+	wantStatus(t, rec, http.StatusOK, "authority right after genesis")
+}
+
+func TestNegativeCache_ClearedByReservation(t *testing.T) {
+	f := newClaimFixture(t)
+	f.withNegativeCache()
+	A := testLogID(45)
+	_, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusNotFound, "authority before prepare")
+
+	wantStatus(t, f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentReserve),
+		http.StatusCreated, "reserve A")
+
+	resp, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusOK, "authority right after prepare")
+	wantState(t, resp, stateReserved, "right after prepare")
+}
+
+func TestNegativeCache_ClearedByCommit(t *testing.T) {
+	f := newClaimFixture(t)
+	f.withNegativeCache()
+	A := testLogID(46)
+	_, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusNotFound, "authority before register-grant")
+
+	wantStatus(t, f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentCommit),
+		http.StatusCreated, "commit A")
+
+	_, rec = f.authority(A.String())
+	wantStatus(t, rec, http.StatusOK, "authority right after register-grant")
+}

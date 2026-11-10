@@ -64,6 +64,14 @@ func (c *ForestCache) PutPositive(logID logid.UUID, e ForestEntry) {
 	}
 }
 
+// ForgetNegative drops logID's negative entry, so its next lookup reads the
+// store.
+func (c *ForestCache) ForgetNegative(logID logid.UUID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.negative, logID.String())
+}
+
 // PutNegative records an unknown logId, bounded by maxSize with evict-oldest —
 // the 404 path is public, so an unbounded map would be a memory-exhaustion
 // vector via random-logId spray (plan-2607-11 R3).

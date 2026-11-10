@@ -166,6 +166,16 @@ func (a API) withReader(forest ForestEntry) (ForestEntry, ChainReader, error) {
 	return forest, reader, nil
 }
 
+// forgetUnresolved drops a cached miss for logID. Every write that makes a
+// log resolvable (genesis, a reservation, a committed claim) calls it, or a
+// lookup just before the write would hide the log until the miss lapses.
+// It clears this process's cache only; other replicas wait out the TTL.
+func (a API) forgetUnresolved(logID logid.UUID) {
+	if a.Forests != nil {
+		a.Forests.ForgetNegative(logID)
+	}
+}
+
 func (a API) cachePositive(logID logid.UUID, e ForestEntry) {
 	if a.Forests != nil {
 		a.Forests.PutPositive(logID, e)

@@ -121,6 +121,7 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "store genesis failed", err.Error())
 		return
 	}
+	a.forgetUnresolved(doc.Forest.R)
 	if !created {
 		a.writeProblem(w, r, http.StatusConflict, "about:blank",
 			"genesis exists", "genesis.cbor already exists for this forest")
