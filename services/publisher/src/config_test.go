@@ -71,8 +71,25 @@ func TestValidateDaemonRequiresQueue(t *testing.T) {
 	cfg.QueueURL = "https://api.cloudflare.com/x"
 	cfg.QueueToken = "tok"
 	cfg.QueueBatchSize = 31
+	cfg.UnivocityAuthorityURL = "http://univocity.arbor.svc:8080"
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("daemon config rejected: %v", err)
+	}
+}
+
+// The daemon refuses to start unless it can ask univocity whether a log is
+// conflicted; the permissionless CLI publishes without it.
+func TestValidateDaemonRequiresUnivocityAuthority(t *testing.T) {
+	for name, url := range map[string]string{"unset": "", "not a url": "univocity:8080"} {
+		cfg := validDaemonConfig()
+		cfg.UnivocityAuthorityURL = url
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s: daemon config accepted without UNIVOCITY_AUTHORITY_URL", name)
+		}
+	}
+	cli := baseValidCLIConfig()
+	if err := cli.ValidateCLI(); err != nil {
+		t.Errorf("CLI config rejected without UNIVOCITY_AUTHORITY_URL: %v", err)
 	}
 }
 
@@ -82,6 +99,7 @@ func validDaemonConfig() Config {
 	c.QueueURL = "https://api.cloudflare.com/x"
 	c.QueueToken = "tok"
 	c.QueueBatchSize = 31
+	c.UnivocityAuthorityURL = "http://univocity.arbor.svc:8080"
 	return c
 }
 

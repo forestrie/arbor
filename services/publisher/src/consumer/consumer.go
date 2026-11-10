@@ -438,14 +438,15 @@ func (q *QueueConsumer) releaseDeferred(ctx context.Context, deferred []deferred
 // an unpublishable primary (StatusReverted) the primary is terminally acked but
 // the siblings are NOT: a lower massif is not necessarily unpublishable, so it is
 // left to redeliver and be adjudicated on its own. On retry, siblings also
-// redeliver with the primary.
+// redeliver with the primary. A conflicted log is never published again, so
+// its siblings are dropped with the primary.
 func (q *QueueConsumer) finishGroup(ctx context.Context, g logGroup, res publisher.PublishResult) {
 	q.finish(ctx, g.primary, g.key, res)
 	anchored := res.Status == publisher.StatusPublished || res.Status == publisher.StatusAlreadyAnchored
 	// Under the resync sweep, an owner-gated primary is acked (see finish);
 	// its subsumed lower-massif siblings follow it — the sweep re-drives from
 	// R2 + chain state, not from the queue.
-	if anchored || q.resyncAcksOwnerGated(res.Status) {
+	if anchored || res.Status == publisher.StatusConflicted || q.resyncAcksOwnerGated(res.Status) {
 		for _, sib := range g.siblings {
 			q.ackMsg(ctx, sib)
 		}
@@ -472,7 +473,7 @@ func (q *QueueConsumer) resyncAcksOwnerGated(status publisher.PublishStatus) boo
 }
 
 // finish records metrics for a terminal result and acks the message when the
-// outcome permits (published / already-anchored / reverted); Retry and
+// outcome permits (published / already-anchored / reverted / conflicted); Retry and
 // OwnerNotAnchored are left for redelivery. A StatusReverted (unpublishable)
 // result is terminally acked AND alerted at ERROR — the checkpoint is dropped
 // from the queue and only self-heals via a later seal (adr-0008), so it warrants
@@ -508,6 +509,8 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 		q.logger.Error("virgin-log revert deferred, not terminal (FOR-411)", attrs...)
 	case res.Status == publisher.StatusReverted:
 		q.logger.Error("unpublishable checkpoint terminally acked", attrs...)
+	case res.Status == publisher.StatusConflicted:
+		q.logger.Warn("checkpoint of a conflicted log dropped", attrs...)
 	default:
 		q.logger.Info("publish result", attrs...)
 	}
@@ -524,8 +527,12 @@ func (q *QueueConsumer) finish(ctx context.Context, msg QueueMessage, key string
 }
 
 // virginLogRevert reports a mined revert against a log with no on-chain
-// state (onchainSize 0): the ADR-0008 terminal-ack contract assumes a later
-// seal re-drives the range, which is unreliable for a genesis log (FOR-411).
+// state (onchainSize 0, as re-read after the revert): the ADR-0008
+// terminal-ack contract assumes a later seal re-drives the range, which is
+// unreliable for a genesis log (FOR-411). A first checkpoint whose revert
+// finds the log registered by another publish is terminal like any other:
+// the log's next publish is checked against univocity, which reports the
+// log conflicted if that registration disagrees with its claim.
 func virginLogRevert(res publisher.PublishResult) bool {
 	if res.Status != publisher.StatusReverted || res.OnchainSize != 0 {
 		return false

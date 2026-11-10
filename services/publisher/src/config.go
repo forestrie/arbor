@@ -56,6 +56,12 @@ type Config struct {
 	// return 403. No fallback to R2URL (P3).
 	GrantStoreURL string
 
+	// UnivocityAuthorityURL is the univocity service base URL. The publisher
+	// asks GET /api/logs/{logId}/authority before publishing and drops a log
+	// univocity reports conflicted (devdocs ADR-0075 decision 8). Required
+	// by the daemon; optional for the CLI.
+	UnivocityAuthorityURL string
+
 	// On-chain submission tuning (P13 — operational constants, not baked in).
 	// publishCheckpoint gas is predictable, so we use a fixed limit rather than
 	// EstimateGas. Transactions are EIP-1559 (DynamicFeeTx). When both fee caps
@@ -279,6 +285,7 @@ func LoadConfig() Config {
 		RPCURLs:                 rpcURLs,
 		PublisherKeyHex:         os.Getenv("PUBLISHER_EOA_KEY"),
 		GrantStoreURL:           os.Getenv("GRANT_STORE_URL"),
+		UnivocityAuthorityURL:   os.Getenv("UNIVOCITY_AUTHORITY_URL"),
 		R2URL:                   os.Getenv("R2_URL"),
 		R2Token:                 r2Token,
 		AWSAccessKeyID:          os.Getenv("AWS_ACCESS_KEY_ID"),
@@ -352,6 +359,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 	logConfigValue(logger, "PUBLISHER_BACKOFF_BASE", c.BackoffBase)
 	logConfigValue(logger, "PUBLISHER_POLL_JITTER", fmt.Sprintf("%g", c.PollJitter))
 	logConfigValue(logger, "GRANT_STORE_URL", c.GrantStoreURL)
+	logConfigValue(logger, "UNIVOCITY_AUTHORITY_URL", c.UnivocityAuthorityURL)
 	logConfigValue(logger, "R2_URL", c.R2URL)
 	logSecretDigest(logger, "R2_TOKEN", c.R2Token)
 	logSecretDigest(logger, "AWS_ACCESS_KEY_ID", c.AWSAccessKeyID)
@@ -377,6 +385,9 @@ func (c Config) Validate() error {
 	}
 	if c.QueueBatchSize > 32 {
 		return fmt.Errorf("QUEUE_BATCH_SIZE must be 32 or less (Cloudflare limit)")
+	}
+	if err := validateHTTPSURL(c.UnivocityAuthorityURL); err != nil {
+		return fmt.Errorf("UNIVOCITY_AUTHORITY_URL is required (univocity service base URL): %w", err)
 	}
 	if c.resyncParseErr != nil {
 		return c.resyncParseErr

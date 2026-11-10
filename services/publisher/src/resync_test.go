@@ -1255,3 +1255,32 @@ func TestRevertClassification(t *testing.T) {
 		}
 	}
 }
+
+// TestSweepConflictedLogIsNotRetried: a conflicted log is never published
+// again. The sweep settles it at its highest seal, in the window or past
+// it: no submission, no lower massif tried, no poison or strand verdict.
+func TestSweepConflictedLogIsNotRetried(t *testing.T) {
+	stepConflicted := step{status: StatusConflicted}
+	for name, lister := range map[string]*fakeLister{
+		"in window": onePage(ckpt(robertLog, 0), ckpt(robertLog, 1)),
+		"aged":      onePageAged(resyncHorizon+time.Hour, ckpt(robertLog, 0), ckpt(robertLog, 1)),
+	} {
+		pub := newFakeCore(map[string][]step{
+			ckpt(robertLog, 1): {stepConflicted},
+			ckpt(robertLog, 0): {stepPublish},
+		})
+		r := newTestResync(pub, lister, nil, nil)
+		stats, err := r.SweepOnce(context.Background())
+		if err != nil {
+			t.Fatalf("%s: SweepOnce: %v", name, err)
+		}
+		if stats.Conflicted != 1 || stats.Unpublishable != 0 || stats.Stranded != 0 ||
+			stats.Errors != 0 || stats.Gaps != 0 {
+			t.Fatalf("%s: stats = %+v, want conflicted=1 only", name, stats)
+		}
+		if len(pub.submits) != 0 || len(pub.assembles) != 1 {
+			t.Fatalf("%s: assembles=%v submits=%v, want the top seal assembled once",
+				name, pub.assembles, pub.submits)
+		}
+	}
+}

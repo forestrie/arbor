@@ -59,6 +59,9 @@ type SubmitResult struct {
 	// Reason is the decoded revert name (e.g. "GrantRequirement") or the raw
 	// revert string when the selector is unrecognised. Empty on success.
 	Reason string
+	// OnchainSize is the log's on-chain size as re-read after a mined revert
+	// (Superseded or Reverted). Zero otherwise.
+	OnchainSize uint64
 }
 
 func (r SubmitResult) String() string {
@@ -323,10 +326,10 @@ func (w *ChainWriter) revertOutcome(
 	}
 	if onchain.Size >= sealedSize {
 		return SubmitResult{Outcome: OutcomeSuperseded, ChainID: chainID, TxHash: txHash,
-			GasUsed: gasUsed, Reason: reason}
+			GasUsed: gasUsed, Reason: reason, OnchainSize: onchain.Size}
 	}
 	return SubmitResult{Outcome: OutcomeReverted, ChainID: chainID, TxHash: txHash,
-		GasUsed: gasUsed, Reason: reason}
+		GasUsed: gasUsed, Reason: reason, OnchainSize: onchain.Size}
 }
 
 // Close closes all dialed clients.

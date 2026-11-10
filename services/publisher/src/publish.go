@@ -44,6 +44,10 @@ const (
 	// RPC/infra error), so the same message can still succeed. Retry (do not ack)
 	// — redelivery re-anchors idempotently.
 	StatusRetry
+	// StatusConflicted — univocity reports the log conflicted: its first
+	// on-chain registration disagrees with its claim (devdocs ADR-0075
+	// decision 8). Final: ack, and never publish the log again.
+	StatusConflicted
 )
 
 func (s PublishStatus) String() string {
@@ -60,6 +64,8 @@ func (s PublishStatus) String() string {
 		return "reverted"
 	case StatusRetry:
 		return "retry"
+	case StatusConflicted:
+		return "conflicted"
 	default:
 		return "unknown"
 	}
@@ -75,21 +81,24 @@ type PublishResult struct {
 	Contract common.Address
 	TxHash   common.Hash
 	// SealedSize is the target seal's mmr size; OnchainSize is the resolved
-	// contract's logState size before this attempt (anchor-lag inputs).
+	// contract's logState size before this attempt (anchor-lag inputs), or,
+	// for a mined revert, as re-read after it.
 	SealedSize  uint64
 	OnchainSize uint64
 	Reason      string // decoded revert name, or skip explanation
 }
 
-// ShouldAck reports whether the queue message may be acked. Three terminal
+// ShouldAck reports whether the queue message may be acked. Four terminal
 // statuses ack: Published (we anchored it), AlreadyAnchored (a fresh logState
-// read shows it is anchored/subsumed), and Reverted (mined revert, unpublishable
+// read shows it is anchored/subsumed), Reverted (mined revert, unpublishable
 // as submitted — acked + alerted; it self-heals via the next seal's catch-up,
-// adr-0008). Retry and OwnerNotAnchored leave the message for redelivery.
+// adr-0008), and Conflicted (never published). Retry and OwnerNotAnchored
+// leave the message for redelivery.
 func (r PublishResult) ShouldAck() bool {
 	return r.Status == StatusPublished ||
 		r.Status == StatusAlreadyAnchored ||
-		r.Status == StatusReverted
+		r.Status == StatusReverted ||
+		r.Status == StatusConflicted
 }
 
 // Publisher is the one-shot publish core: it turns a checkpoint object key into
@@ -101,10 +110,14 @@ type Publisher struct {
 	// leaves remembers where each create grant was found in its owner log,
 	// and how far a miss has scanned, so a log's publishes scan its owner
 	// log once.
-	leaves  *publishproof.GrantLeafIndex
-	readers MassifReaderFactory
-	writer  *ChainWriter
-	logger  *slog.Logger
+	leaves *publishproof.GrantLeafIndex
+	// authority, when set, is asked before each publish whether univocity
+	// reports the log conflicted. The daemon always sets it; the
+	// permissionless CLI sets it only when configured.
+	authority LogAuthority
+	readers   MassifReaderFactory
+	writer    *ChainWriter
+	logger    *slog.Logger
 }
 
 // NewPublisher wires the core from config. doer is the shared pooled HTTP
@@ -120,13 +133,17 @@ func NewPublisher(cfg Config, httpClient *HTTPClient, logger *slog.Logger) (*Pub
 	if err != nil {
 		return nil, err
 	}
-	return &Publisher{
+	p := &Publisher{
 		grants:  publishproof.NewPublicBucketGetter(cfg.GrantStoreURL, httpClient.GetClient()),
 		leaves:  publishproof.NewGrantLeafIndex(),
 		readers: NewReaders(cfg, httpClient, logger),
 		writer:  writer,
 		logger:  logger,
-	}, nil
+	}
+	if cfg.UnivocityAuthorityURL != "" {
+		p.authority = NewUnivocityAuthority(cfg.UnivocityAuthorityURL, httpClient.GetClient())
+	}
+	return p, nil
 }
 
 // Close releases dialed chain clients.
@@ -146,14 +163,29 @@ func (p *Publisher) SubmitBatch(ctx context.Context, reqs []AssembledPublish) {
 // + RPC, no nonce. When ready is true, calldata is set and res carries the
 // forest/contract/size context (Status unset; the caller submits and finalises
 // with FinalizeResult). When ready is false, res carries a terminal early-exit
-// Status (already-anchored → ack; owner-not-anchored / chain-not-configured →
-// retry). A non-nil error is an unexpected infrastructure failure worth retrying.
+// Status (already-anchored / conflicted → ack; owner-not-anchored /
+// chain-not-configured → retry). A non-nil error is an unexpected
+// infrastructure failure worth retrying.
 func (p *Publisher) Assemble(ctx context.Context, key string) (calldata []byte, res PublishResult, ready bool, err error) {
 	ck, err := ParseCheckpointKey(key)
 	if err != nil {
 		return nil, PublishResult{}, false, err
 	}
 	res = PublishResult{Key: key, LogID: ck.LogID}
+
+	// 0. A log univocity reports conflicted is never published again. With
+	//    no answer the publish is retried, never made unchecked.
+	if p.authority != nil {
+		conflicted, err := p.authority.Conflicted(ctx, ck.LogID)
+		if err != nil {
+			return nil, res, false, fmt.Errorf("log authority %s: %w", ck.LogID, err)
+		}
+		if conflicted {
+			res.Status = StatusConflicted
+			res.Reason = "univocity reports the log conflicted"
+			return nil, res, false, nil
+		}
+	}
 
 	// 1. Resolve the forest's (R, chainId, contract) from public R2 genesis.
 	fc, err := publishproof.ResolveForestContract(ctx, p.grants, ck.LogID)
@@ -250,7 +282,11 @@ func FinalizeResult(res PublishResult, sub SubmitResult) PublishResult {
 	case OutcomeReverted:
 		// Mined revert, on-chain still below sealed: unpublishable as submitted.
 		// Terminal ack + alert; self-heals via the next seal's catch-up (adr-0008).
+		// The size is the one re-read after the revert, so a first checkpoint
+		// that lost a race to another registration no longer counts as a
+		// revert on a log with no on-chain state.
 		res.Status = StatusReverted
+		res.OnchainSize = sub.OnchainSize
 	default: // OutcomeUnsubmitted — never mined; retry via redelivery.
 		res.Status = StatusRetry
 	}
