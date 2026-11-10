@@ -284,9 +284,17 @@ var errNoClaim = errors.New("log has no claim in this forest")
 
 // claimedGrant returns subject's claim in forest root: the committed grant,
 // else a live reservation. A lapsed reservation is absent.
+//
+// The reservation is read first: a commit writes the grant before it drops
+// the reservation, so reading in the other order could miss both while a
+// commit runs, and the sweep would take the log as unclaimed.
 func (a API) claimedGrant(ctx context.Context, root, subject logid.UUID) (claim, error) {
 	if a.Store == nil {
 		return claim{}, ErrStoreNotConfigured
+	}
+	res, held, err := a.readReservation(ctx, subject)
+	if err != nil {
+		return claim{}, err
 	}
 	stmt, err := a.Store.GetGrant(ctx, root, subject)
 	if err == nil {
@@ -294,10 +302,6 @@ func (a API) claimedGrant(ctx context.Context, root, subject logid.UUID) (claim,
 	}
 	if !isStoreMiss(err) {
 		return claim{}, fmt.Errorf("read grant: %w", err)
-	}
-	res, held, err := a.readReservation(ctx, subject)
-	if err != nil {
-		return claim{}, err
 	}
 	if !held || !res.live(a.now()) || res.root != root {
 		return claim{}, fmt.Errorf("%w: %s", errNoClaim, subject)

@@ -2,6 +2,7 @@ package univocity
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"net/http"
 	"net/http/httptest"
@@ -247,4 +248,41 @@ func TestPostGrant_OtherClassCannotReplaceCommittedGrant(t *testing.T) {
 	}
 	rec = f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentReserve)
 	wantStatus(t, rec, http.StatusConflict, "reserve auth-log grant for the same log")
+}
+
+// commitDuringGrantRead commits a reserved grant (writes the grant, then
+// drops the reservation, as commitClaim does) the first time a read of
+// that grant misses, so the read races the commit.
+type commitDuringGrantRead struct {
+	*fakeStore
+	subject logid.UUID
+	commit  func()
+	done    bool
+}
+
+func (s *commitDuringGrantRead) GetGrant(ctx context.Context, r, subject logid.UUID) ([]byte, error) {
+	body, err := s.fakeStore.GetGrant(ctx, r, subject)
+	if err != nil && subject == s.subject && !s.done {
+		s.done = true
+		s.commit()
+	}
+	return body, err
+}
+
+// A log being committed always has a claim: its reservation until the
+// grant is written, its grant after. The sweep relies on this when it
+// checks the reservations beneath a log.
+func TestClaimedGrant_SeesAClaimWhileTheLogIsCommitted(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	stmt := f.grant(A, f.R, f.boot, mustKey(t))
+	wantStatus(t, f.post(stmt, intentReserve), http.StatusCreated, "reserve")
+	f.api.Store = &commitDuringGrantRead{fakeStore: f.store, subject: A, commit: func() {
+		f.store.grants[f.store.grantStoreKey(f.R, A, GrantClassAuthLog)] = stmt
+		delete(f.store.reservations, A.String())
+	}}
+
+	if _, err := f.api.claimedGrant(t.Context(), f.R, A); err != nil {
+		t.Fatalf("claim read during commit: %v", err)
+	}
 }
