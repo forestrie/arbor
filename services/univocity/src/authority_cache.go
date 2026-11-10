@@ -23,9 +23,14 @@ type AuthorityCache struct {
 	entries   map[logid.UUID]authorityEntry
 	conflicts map[logid.UUID]Authority
 	leaves    map[logid.UUID]struct{}
-	order     []logid.UUID
-	maxSize   int
-	recheck   time.Duration
+	// rooted holds the contracts a root registration has been seen on. A
+	// root answer for one that is not final is stale: the root is final or
+	// conflicted. It may come from a read in flight across the
+	// registration, or from an RPC backend that lags, so it is not cached.
+	rooted  map[watchedKey]struct{}
+	order   []logid.UUID
+	maxSize int
+	recheck time.Duration
 }
 
 type authorityEntry struct {
@@ -43,6 +48,7 @@ func NewAuthorityCache(maxSize int, recheck time.Duration) *AuthorityCache {
 		entries:   map[logid.UUID]authorityEntry{},
 		conflicts: map[logid.UUID]Authority{},
 		leaves:    map[logid.UUID]struct{}{},
+		rooted:    map[watchedKey]struct{}{},
 		maxSize:   maxSize,
 		recheck:   recheck,
 	}
@@ -89,6 +95,11 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !x.Final && x.LogID == x.RootLogID {
+		if _, ok := c.rooted[watchedKey{chainID: x.ChainID, contract: x.Contract}]; ok {
+			return
+		}
+	}
 	old, exists := c.entries[x.LogID]
 	if exists && old.x.Final && !x.Final {
 		// A read that saw the chain a moment before the final answer must
@@ -118,15 +129,17 @@ func (c *AuthorityCache) evict(id logid.UUID) {
 }
 
 // evictPendingRoots drops the answers, not yet final, of the forest roots
-// bound to a contract. A contract takes one root, the first to publish
-// there, so a root registration on it settles every such root: the one
-// registered turns final, and any other turns conflicted.
+// bound to a contract, and stops caching such answers for it. A contract
+// takes one root, the first to publish there, so a root registration on it
+// settles every such root: the one registered turns final, and any other
+// turns conflicted.
 func (c *AuthorityCache) evictPendingRoots(chainID uint64, contract common.Address) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.rooted[watchedKey{chainID: chainID, contract: contract}] = struct{}{}
 	c.dropLocked(func(k logid.UUID, e authorityEntry) bool {
 		return !e.x.Final && k == e.x.RootLogID &&
 			e.x.ChainID == chainID && e.x.Contract == contract

@@ -2,6 +2,7 @@ package univocity
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"errors"
 	"net/http"
@@ -363,6 +364,49 @@ func TestRegistrationWatcher_LosingRootTurnsConflicted(t *testing.T) {
 	resp, _ = f.authority(f.R.String())
 	if resp.State != stateConflicted || !resp.Final {
 		t.Fatalf("root after another root took its contract %+v; want conflicted, final", resp)
+	}
+}
+
+// hookChain runs hook once, during the next RootLogId call, after the value
+// is read: a read in flight while the chain moves on.
+type hookChain struct {
+	*mockChain
+	hook func()
+}
+
+func (h *hookChain) RootLogId(ctx context.Context) (logid.UUID, error) {
+	v, err := h.mockChain.RootLogId(ctx)
+	if f := h.hook; f != nil {
+		h.hook = nil
+		f()
+	}
+	return v, err
+}
+
+// A read of the losing root that saw the contract unrooted, and caches its
+// answer only after the winner's registration was processed, must not keep
+// the loser anchored until the recheck: the next read reads conflicted.
+func TestRegistrationWatcher_LosingRootReadInFlightIsNotKept(t *testing.T) {
+	f := newClaimFixture(t)
+	f.api.Registrations = NewRegistrationWatcher()
+	hc := &hookChain{mockChain: f.chain}
+	f.api.Pool = &mockPool{chain: hc}
+	f.remount()
+	f.authority(f.R.String()) // loads the forest, so the watcher follows its contract
+	f.api.pollRegistrations(t.Context())
+	f.api.Authorities.evict(f.R)
+
+	winner := testLogID(99)
+	hc.hook = func() {
+		f.chain.rootLogId = winner
+		f.chain.emitRegistration(winner, winner)
+		f.api.pollRegistrations(t.Context())
+	}
+	f.authority(f.R.String()) // in flight across the winner's registration
+
+	resp, _ := f.authority(f.R.String())
+	if resp.State != stateConflicted || !resp.Final {
+		t.Fatalf("losing root after the winner's registration %+v; want conflicted, final", resp)
 	}
 }
 
