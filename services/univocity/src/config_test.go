@@ -57,6 +57,7 @@ func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("UNIVOCITY_RPC_URLS", `{"84532":"http://localhost:8545"}`)
 	t.Setenv("GENESIS_R2_URL", "https://r2.example")
+	t.Setenv("R2_URL", "https://logs.r2.example")
 	t.Setenv("AWS_ACCESS_KEY_ID", "akid")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
 }

@@ -1,0 +1,245 @@
+package univocity
+
+import (
+	"bytes"
+	"crypto/ecdsa"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/fxamacker/cbor/v2"
+)
+
+func (f *claimFixture) authority(id string) (authorityResponse, *httptest.ResponseRecorder) {
+	f.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/"+id+"/authority", nil)
+	rec := httptest.NewRecorder()
+	f.mux.ServeHTTP(rec, req)
+	var resp authorityResponse
+	if rec.Code == http.StatusOK {
+		if err := cbor.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			f.t.Fatalf("decode authority: %v", err)
+		}
+	}
+	return resp, rec
+}
+
+// A root's key comes only from its contract, so a root whose contract is not
+// deployed has no key and is not anchored (protocol ADR-0070 decision 1).
+func TestAuthority_RootWithoutContractIsPending(t *testing.T) {
+	f := newClaimFixture(t)
+	f.api.Pool = &mockPool{chain: mockChainEmptyResponse{}}
+	f.remount()
+
+	resp, rec := f.authority(f.R.String())
+	wantStatus(t, rec, http.StatusOK, "root authority")
+	if resp.State == stateAnchored || resp.Final || len(resp.Key) != 0 {
+		t.Fatalf("undeployed root reported %+v; want pending with no key", resp)
+	}
+}
+
+func TestAuthority_RootWithContractIsAnchoredAndFinal(t *testing.T) {
+	f := newClaimFixture(t)
+	resp, rec := f.authority(f.R.String())
+	wantStatus(t, rec, http.StatusOK, "root authority")
+	if resp.State != stateAnchored || !resp.Final || resp.Alg != coseAlgES256 ||
+		string(resp.Key) != string(xyConcat(f.boot)) {
+		t.Fatalf("deployed root reported %+v; want anchored, final, bootstrap key", resp)
+	}
+}
+
+// rootLog marks the forest root as published on chain at size.
+func (f *claimFixture) publishRoot(size uint64) {
+	f.t.Helper()
+	f.chain.setLog(f.R, mockLog{
+		config: LogConfig{Kind: LogKindAuthority, AuthLogId: f.R, RootKey: xyConcat(f.boot)},
+		state:  f.logs.published(f.R, size),
+	})
+}
+
+func wantState(t *testing.T, resp authorityResponse, state string, what string) {
+	t.Helper()
+	if resp.State != state {
+		t.Fatalf("%s: state %q, want %q (%+v)", what, resp.State, state, resp)
+	}
+}
+
+func TestAuthority_ChildProgressesFromReservedToAnchored(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	aKey := mustKey(t)
+	stmt := f.grant(A, f.R, f.boot, aKey)
+
+	wantStatus(t, f.post(stmt, intentReserve), http.StatusCreated, "reserve")
+	resp, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusOK, "authority")
+	wantState(t, resp, stateReserved, "prepared")
+	if resp.ExpiresAt != f.now.Add(7*24*time.Hour).Unix() || string(resp.Key) != string(xyConcat(aKey)) || resp.Final {
+		t.Fatalf("reserved answer %+v", resp)
+	}
+
+	wantStatus(t, f.post(stmt, intentCommit), http.StatusOK, "commit")
+	resp, _ = f.authority(A.String())
+	wantState(t, resp, stateCommitted, "registered")
+
+	// Ranger sequences the create grant into the owner's log. Nothing tells
+	// univocity its idtimestamp; the leaf scan finds it.
+	f.logs.appendLeaf(f.R, [32]byte{1})
+	size := f.logs.appendLeaf(f.R, contentHashOf(t, stmt))
+	resp, _ = f.authority(A.String())
+	wantState(t, resp, stateSequenced, "sequenced")
+
+	// A published checkpoint of the owner below the leaf does not cover it.
+	f.publishRoot(1)
+	resp, _ = f.authority(A.String())
+	wantState(t, resp, stateSequenced, "checkpoint before the leaf")
+
+	f.publishRoot(size)
+	resp, _ = f.authority(A.String())
+	wantState(t, resp, stateAnchored, "covered by a published checkpoint")
+	if resp.Final || len(resp.BlockedBy) != 0 || string(resp.Key) != string(xyConcat(aKey)) {
+		t.Fatalf("anchored answer %+v; want not final, unblocked, grantData key", resp)
+	}
+}
+
+func TestAuthority_GrandchildIsBlockedByItsPendingParent(t *testing.T) {
+	f := newClaimFixture(t)
+	A, G := testLogID(2), testLogID(3)
+	aKey := mustKey(t)
+	aStmt := f.grant(A, f.R, f.boot, aKey)
+	wantStatus(t, f.post(aStmt, intentCommit), http.StatusCreated, "commit A")
+	wantStatus(t, f.post(f.grant(G, A, aKey, mustKey(t)), intentReserve), http.StatusCreated, "reserve G")
+
+	resp, _ := f.authority(G.String())
+	wantState(t, resp, stateReserved, "grandchild")
+	if string(resp.BlockedBy) != string(A[:]) {
+		t.Fatalf("blockedBy %x, want parent %s", resp.BlockedBy, A)
+	}
+
+	f.publishRoot(f.logs.appendLeaf(f.R, contentHashOf(t, aStmt)))
+	resp, _ = f.authority(G.String())
+	if len(resp.BlockedBy) != 0 {
+		t.Fatalf("blockedBy %x once the parent is anchored, want none", resp.BlockedBy)
+	}
+}
+
+// canopy refuses first; univocity's refusal is the backstop, so a committed
+// claim always has an anchored owner (devdocs ADR-0075 decision 8).
+func TestPostGrant_CommitUnderPendingOwnerIsRefused(t *testing.T) {
+	f := newClaimFixture(t)
+	A, G := testLogID(2), testLogID(3)
+	aKey := mustKey(t)
+	aStmt := f.grant(A, f.R, f.boot, aKey)
+	wantStatus(t, f.post(aStmt, intentCommit), http.StatusCreated, "commit A")
+
+	gStmt := f.grant(G, A, aKey, mustKey(t))
+	rec := f.post(gStmt, intentCommit)
+	wantStatus(t, rec, http.StatusConflict, "commit under a pending owner")
+	if !bytes.Contains(rec.Body.Bytes(), []byte("owner-not-anchored")) {
+		t.Fatalf("want owner-not-anchored, got %s", rec.Body.String())
+	}
+	if _, found, _ := f.store.IndexGet(t.Context(), G); found {
+		t.Fatal("a refused commit claims nothing")
+	}
+
+	f.publishRoot(f.logs.appendLeaf(f.R, contentHashOf(t, aStmt)))
+	wantStatus(t, f.post(gStmt, intentCommit), http.StatusCreated, "commit once the owner is anchored")
+}
+
+// The chain is read when a log anchors, not once per statement (protocol
+// ADR-0070 decision 3).
+func TestAuthority_RepeatReadOfAnchoredLogMakesNoChainCall(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	stmt := f.grant(A, f.R, f.boot, mustKey(t))
+	wantStatus(t, f.post(stmt, intentCommit), http.StatusCreated, "commit")
+	f.publishRoot(f.logs.appendLeaf(f.R, contentHashOf(t, stmt)))
+
+	for _, id := range []string{f.R.String(), A.String()} {
+		resp, _ := f.authority(id)
+		wantState(t, resp, stateAnchored, "first read "+id)
+		before := f.chain.callCount()
+		resp, _ = f.authority(id)
+		wantState(t, resp, stateAnchored, "repeat read "+id)
+		if got := f.chain.callCount() - before; got != 0 {
+			t.Fatalf("repeat read of anchored %s made %d chain calls", id, got)
+		}
+	}
+}
+
+// anchoredChild commits and anchors a child of R, returning its key.
+func (f *claimFixture) anchoredChild(A logid.UUID) *ecdsa.PrivateKey {
+	f.t.Helper()
+	key := mustKey(f.t)
+	stmt := f.grant(A, f.R, f.boot, key)
+	wantStatus(f.t, f.post(stmt, intentCommit), http.StatusCreated, "commit "+A.String())
+	f.publishRoot(f.logs.appendLeaf(f.R, contentHashOf(f.t, stmt)))
+	return key
+}
+
+func (f *claimFixture) registerOnChain(id, owner logid.UUID, key []byte) {
+	f.chain.setLog(id, mockLog{config: LogConfig{Kind: LogKindData, AuthLogId: owner, RootKey: key}})
+}
+
+func TestAuthority_FirstRegistrationMatchingClaimIsFinal(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	key := f.anchoredChild(A)
+	f.registerOnChain(A, f.R, xyConcat(key))
+
+	resp, _ := f.authority(A.String())
+	wantState(t, resp, stateAnchored, "registered as claimed")
+	if !resp.Final || resp.Source != "chain" {
+		t.Fatalf("matching first registration %+v; want final, from chain", resp)
+	}
+}
+
+func TestAuthority_FirstRegistrationDifferingFromClaimIsConflicted(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owner func(f *claimFixture) logid.UUID
+		key   func(claimed *ecdsa.PrivateKey) []byte
+	}{
+		{"other owner", func(*claimFixture) logid.UUID { return testLogID(9) },
+			func(k *ecdsa.PrivateKey) []byte { return xyConcat(k) }},
+		{"other key", func(f *claimFixture) logid.UUID { return f.R },
+			func(*ecdsa.PrivateKey) []byte { return xyConcat(mustKey(t)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newClaimFixture(t)
+			A, C := testLogID(2), testLogID(3)
+			key := f.anchoredChild(A)
+			wantStatus(t, f.post(f.grant(C, A, key, mustKey(t)), intentReserve), http.StatusCreated, "reserve C")
+
+			// An anchored answer given before the log's first checkpoint.
+			resp, _ := f.authority(A.String())
+			wantState(t, resp, stateAnchored, "before first checkpoint")
+
+			chainOwner, chainKey := tc.owner(f), tc.key(key)
+			alarms := ConflictsDetected()
+			f.registerOnChain(A, chainOwner, chainKey)
+			f.now = f.now.Add(10 * time.Minute) // past the anchored re-check
+
+			resp, _ = f.authority(A.String())
+			wantState(t, resp, stateConflicted, "after a differing first registration")
+			if !resp.Final || string(resp.OwnerLogID) != string(chainOwner[:]) || string(resp.Key) != string(chainKey) {
+				t.Fatalf("conflicted answer %+v; want final with the chain's owner and key", resp)
+			}
+			if ConflictsDetected() != alarms+1 {
+				t.Fatal("a conflict must raise the alarm")
+			}
+
+			// Children report it, and it never changes after.
+			child, _ := f.authority(C.String())
+			if string(child.BlockedBy) != string(A[:]) {
+				t.Fatalf("child blockedBy %x, want conflicted parent", child.BlockedBy)
+			}
+			f.registerOnChain(A, f.R, xyConcat(key))
+			f.now = f.now.Add(24 * time.Hour)
+			resp, _ = f.authority(A.String())
+			wantState(t, resp, stateConflicted, "later")
+		})
+	}
+}

@@ -6,6 +6,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 )
 
 type mockChain struct {
@@ -15,6 +16,41 @@ type mockChain struct {
 	logInitialized           bool
 	logConfig                LogConfig
 	logRootKeyX, logRootKeyY [32]byte
+
+	// logs overrides the single-log fields above per log id.
+	mu    sync.Mutex
+	logs  map[logid.UUID]mockLog
+	calls int
+}
+
+// mockLog is one log's on-chain record.
+type mockLog struct {
+	config LogConfig // Kind != Undefined means initialized
+	state  publishproof.LogState
+}
+
+func (m *mockChain) setLog(id logid.UUID, l mockLog) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.logs == nil {
+		m.logs = map[logid.UUID]mockLog{}
+	}
+	m.logs[id] = l
+}
+
+func (m *mockChain) log(id logid.UUID) (mockLog, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	l, ok := m.logs[id]
+	return l, ok
+}
+
+// callCount returns the number of per-log chain reads so far.
+func (m *mockChain) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
 }
 
 func (m *mockChain) RootLogId(context.Context) (logid.UUID, error) {
@@ -22,15 +58,29 @@ func (m *mockChain) RootLogId(context.Context) (logid.UUID, error) {
 }
 
 func (m *mockChain) BootstrapConfig(context.Context) (int64, []byte, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
 	return m.bootstrapAlg, m.bootstrapKey, nil
 }
 
-func (m *mockChain) IsLogInitialized(_ context.Context, _ logid.UUID) (bool, error) {
+func (m *mockChain) IsLogInitialized(_ context.Context, id logid.UUID) (bool, error) {
+	if l, ok := m.log(id); ok {
+		return l.config.Kind != LogKindUndefined, nil
+	}
 	return m.logInitialized, nil
 }
 
-func (m *mockChain) LogConfig(_ context.Context, _ logid.UUID) (LogConfig, error) {
+func (m *mockChain) LogConfig(_ context.Context, id logid.UUID) (LogConfig, error) {
+	if l, ok := m.log(id); ok {
+		return l.config, nil
+	}
 	return m.logConfig, nil
+}
+
+func (m *mockChain) LogState(_ context.Context, id logid.UUID) (publishproof.LogState, error) {
+	l, _ := m.log(id)
+	return l.state, nil
 }
 
 func (m *mockChain) LogRootKey(_ context.Context, _ logid.UUID) ([32]byte, [32]byte, error) {

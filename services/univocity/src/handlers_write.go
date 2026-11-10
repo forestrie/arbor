@@ -213,6 +213,9 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 			"invalid grant class", err.Error())
 		return
 	}
+	if req.Intent == intentCommit && !a.requireOwnerAnchored(w, r, forest, reader, ts.Grant) {
+		return
+	}
 	var res claimResult
 	if req.Intent == intentReserve {
 		res, err = a.reserveClaim(r.Context(), root, ts)
@@ -233,6 +236,33 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.writeClaim(w, r, res)
+}
+
+// requireOwnerAnchored refuses to commit a grant whose owner is not anchored:
+// a committed grant is sequenced at once, and its leaf can only be anchored
+// by a published checkpoint of an anchored owner (devdocs ADR-0075
+// decision 8). canopy-api refuses first; this is the backstop.
+func (a API) requireOwnerAnchored(
+	w http.ResponseWriter,
+	r *http.Request,
+	forest ForestEntry,
+	reader ChainReader,
+	g Grant,
+) bool {
+	if g.LogID == forest.R {
+		return true // the root's own grant: its key is the contract's
+	}
+	owner, err := a.authorityIn(r.Context(), forest, reader, g.OwnerLogID, 0)
+	if err != nil {
+		a.writeAuthorityError(w, r, err)
+		return false
+	}
+	if !owner.usable() {
+		a.writeProblem(w, r, http.StatusConflict, "about:blank", "owner-not-anchored",
+			"owner "+g.OwnerLogID.String()+" is "+owner.State+"; commit once it is anchored")
+		return false
+	}
+	return true
 }
 
 func (a API) writeClaim(w http.ResponseWriter, r *http.Request, res claimResult) {

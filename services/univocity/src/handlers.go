@@ -224,24 +224,28 @@ func (a API) handleLogIDPublicRoot(w http.ResponseWriter, r *http.Request) {
 	a.writePublicRoot(w, r, reader, logId, true, entry)
 }
 
-// authorityResponse is the CBOR authority binding for a logId: the authoritative
-// root identity (alg,key) plus the forest root and chain binding. Unlike
-// public-root it resolves *cold* logs from the chain-valid stored grant chain.
+// authorityResponse is the CBOR authority answer for a claimed log (see
+// Authority). Only state anchored with no blockedBy grants authority.
 type authorityResponse struct {
-	LogID     []byte `cbor:"logId,omitempty"`
-	RootLogID []byte `cbor:"rootLogId,omitempty"`
-	Alg       int64  `cbor:"alg,omitempty"`
-	Key       []byte `cbor:"key,omitempty"`
-	ChainID   string `cbor:"chainId,omitempty"`
-	Contract  string `cbor:"contract,omitempty"`
-	Source    string `cbor:"source,omitempty"`
+	LogID      []byte `cbor:"logId,omitempty"`
+	RootLogID  []byte `cbor:"rootLogId,omitempty"`
+	OwnerLogID []byte `cbor:"ownerLogId,omitempty"`
+	State      string `cbor:"state"`
+	Alg        int64  `cbor:"alg,omitempty"`
+	Key        []byte `cbor:"key,omitempty"`
+	ChainID    string `cbor:"chainId,omitempty"`
+	Contract   string `cbor:"contract,omitempty"`
+	Source     string `cbor:"source,omitempty"`
+	ExpiresAt  int64  `cbor:"expiresAt,omitempty"`
+	BlockedBy  []byte `cbor:"blockedBy,omitempty"`
+	Final      bool   `cbor:"final"`
 }
 
-// handleLogIDAuthority resolves the authoritative root key + chain binding for a
-// logId. It is the trusted lookup the sealer uses before signing a checkpoint:
-// the sealer verifies the (untrusted) delegation certificate locally against the
-// returned key, so this endpoint is a pure, non-mutating resolution (no
-// certificate is sent and there is no allow/deny verdict here).
+// handleLogIDAuthority answers a claimed log's authority. It is the only
+// source of root keys for canopy-api and the sealer (devdocs ADR-0075
+// decision 5): callers use the key only when the state is anchored and
+// blockedBy is absent, and verify delegation certificates against it
+// locally.
 func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 	logID, ok := logIDFromPathValue(r.PathValue("logId"))
 	if !ok {
@@ -261,13 +265,22 @@ func (a API) handleLogIDAuthority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := authorityResponse{
-		LogID:     res.LogID[:],
-		RootLogID: res.RootLogID[:],
-		Alg:       res.Alg,
-		Key:       res.Key,
-		ChainID:   strconv.FormatUint(res.ChainID, 10),
-		Contract:  res.Contract.Hex(),
-		Source:    res.Source,
+		LogID:      res.LogID[:],
+		RootLogID:  res.RootLogID[:],
+		OwnerLogID: res.OwnerLogID[:],
+		State:      res.State,
+		Alg:        res.Alg,
+		Key:        res.Key,
+		ChainID:    strconv.FormatUint(res.ChainID, 10),
+		Contract:   res.Contract.Hex(),
+		Source:     res.Source,
+		Final:      res.Final,
+	}
+	if !res.ExpiresAt.IsZero() {
+		resp.ExpiresAt = res.ExpiresAt.Unix()
+	}
+	if !res.BlockedBy.IsZero() {
+		resp.BlockedBy = res.BlockedBy[:]
 	}
 	out, err := canonicalCBOR.Marshal(resp)
 	if err != nil {
@@ -285,7 +298,8 @@ func (a API) writeAuthorityError(w http.ResponseWriter, r *http.Request, err err
 	case errors.Is(err, ErrLogNotResolved):
 		a.writeProblem(w, r, http.StatusNotFound, "about:blank",
 			"log not resolved", err.Error()+notResolvedRemedy)
-	case errors.Is(err, ErrChainNotConfigured), errors.Is(err, ErrStoreNotConfigured):
+	case errors.Is(err, ErrChainNotConfigured), errors.Is(err, ErrStoreNotConfigured),
+		errors.Is(err, errMassifsNotConfigured):
 		a.writeProblem(w, r, http.StatusServiceUnavailable, "about:blank",
 			"chain not configured", err.Error())
 	default:

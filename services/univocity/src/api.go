@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 )
 
 // API provides the HTTP API for the univocity trust-root service.
@@ -34,6 +36,13 @@ type API struct {
 	ReservationTTL time.Duration
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+
+	// Authorities caches final and anchored authority answers.
+	Authorities *AuthorityCache
+	// Massifs reads owner logs' massifs for the create-grant leaf scan.
+	Massifs MassifReaders
+	// Leaves remembers leaf-scan progress per owner log and grant.
+	Leaves *publishproof.GrantLeafIndex
 }
 
 // DefaultReservationTTL is the lapse time of a reservation (devdocs
@@ -69,10 +78,10 @@ func (a API) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/logs/{logId}/root", a.handleLogIDRoot)
 	mux.HandleFunc("GET /api/logs/{logId}/public-root", a.handleLogIDPublicRoot)
-	// Authority resolution for a (possibly cold) log: the authoritative root key
-	// (chain logRootKey when initialized, else the chain-valid stored grantData)
-	// plus chain binding. Non-mutating GET; the sealer verifies the delegation
-	// certificate locally against the returned key.
+	// Authority for a claimed log: its state (reserved, committed,
+	// sequenced, anchored or conflicted), root key, first unanchored
+	// ancestor and whether the answer is final. Non-mutating GET; operators
+	// only (canopy-api, the sealer, the publisher).
 	mux.HandleFunc("GET /api/logs/{logId}/authority", a.handleLogIDAuthority)
 
 	// Owned store: genesis + grants (token-auth).

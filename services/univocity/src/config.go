@@ -21,8 +21,13 @@ type Config struct {
 
 	RPCURLs map[uint64]string
 
-	GenesisR2URL       string
-	GenesisR2Token     string
+	GenesisR2URL   string
+	GenesisR2Token string
+	// R2URL is the MMR log bucket (S3 API), where univocity scans owner logs
+	// for create grants. The same R2 credentials read it.
+	R2URL string
+	// MassifHeight is the logs' massif height (as ranger's MASSIF_HEIGHT).
+	MassifHeight       uint8
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSRegion          string
@@ -88,6 +93,15 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("GENESIS_R2_URL is required")
 	}
 
+	r2URL := strings.TrimSpace(os.Getenv("R2_URL"))
+	if r2URL == "" {
+		return Config{}, errors.New("R2_URL is required (MMR log bucket, for the create-grant leaf scan)")
+	}
+	massifHeight := getIntPositive("MASSIF_HEIGHT", 14)
+	if massifHeight > 64 {
+		return Config{}, fmt.Errorf("MASSIF_HEIGHT %d out of range 1..64", massifHeight)
+	}
+
 	r2Token := strings.TrimSpace(os.Getenv("R2_TOKEN"))
 	awsAccessKey := strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
 	awsSecret := strings.TrimSpace(os.Getenv("AWS_SECRET_ACCESS_KEY"))
@@ -119,6 +133,8 @@ func LoadConfig() (Config, error) {
 		RPCURLs:                   rpcURLs,
 		GenesisR2URL:              genesisURL,
 		GenesisR2Token:            r2Token,
+		R2URL:                     r2URL,
+		MassifHeight:              uint8(massifHeight),
 		AWSAccessKeyID:            awsAccessKey,
 		AWSSecretAccessKey:        awsSecret,
 		AWSRegion:                 getEnvOrDefault("AWS_REGION", "auto"),
@@ -168,6 +184,8 @@ func (c Config) LogConfig(logger *slog.Logger) {
 		"SHUTDOWN_TIMEOUT", c.ShutdownTimeout,
 		"RPC_CHAIN_IDS", chainIDs,
 		"GENESIS_R2_URL", nonSecret(c.GenesisR2URL),
+		"R2_URL", nonSecret(c.R2URL),
+		"MASSIF_HEIGHT", c.MassifHeight,
 		"LOG_FOREST_NEG_TTL", c.LogForestNegTTL,
 		"LOG_FOREST_CACHE_SIZE", c.LogForestCacheSize,
 		"UNIVOCITY_API_TOKEN", nonSecret(c.APIToken),

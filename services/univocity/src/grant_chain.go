@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
@@ -15,18 +14,6 @@ const maxGrantChainDepth = 32
 // ErrBootstrapUnavailable indicates the on-chain bootstrap anchor could not be
 // read (chain not configured or contract call failed).
 var ErrBootstrapUnavailable = errors.New("on-chain bootstrap anchor unavailable")
-
-// AuthorityResult is the resolved authority for a logId: the authoritative root
-// identity (alg + opaque key) plus the forest root and chain binding.
-type AuthorityResult struct {
-	LogID     logid.UUID
-	RootLogID logid.UUID
-	Alg       int64
-	Key       []byte // opaque 64 (ES256) or 20 (KS256)
-	ChainID   uint64
-	Contract  common.Address
-	Source    string // "chain" | "grant"
-}
 
 // isContractReadUnavailable reports RPC/ABI failures typical when no contract
 // is deployed at the genesis-bound address (empty eth_call return data).
@@ -180,89 +167,6 @@ func (a API) ownerRootKey(
 		return 0, nil, errors.New("owner grantData is not a valid opaque root key")
 	}
 	return alg, key, nil
-}
-
-// logRootKey resolves the opaque root identity that signs a log's delegation /
-// checkpoint: on-chain logConfig.rootKey when initialized, else the (chain-valid)
-// stored grantData. For the forest root it is the on-chain bootstrap key.
-func (a API) logRootKey(
-	ctx context.Context,
-	forest ForestEntry,
-	reader ChainReader,
-	logID logid.UUID,
-) (alg int64, key []byte, source string, err error) {
-	if logID == forest.R {
-		alg, key, err := a.bootstrapConfig(ctx, forest, reader)
-		return alg, key, "chain", err
-	}
-	initialized, err := a.isLogInitialized(ctx, reader, logID)
-	if err != nil {
-		return 0, nil, "", fmt.Errorf("isLogInitialized: %w", err)
-	}
-	if initialized {
-		cfg, err := reader.LogConfig(ctx, logID)
-		if err != nil {
-			return 0, nil, "", fmt.Errorf("logConfig: %w", err)
-		}
-		alg, key, ok := grantDataIdentity(cfg.RootKey)
-		if !ok {
-			return 0, nil, "", fmt.Errorf("on-chain rootKey has invalid length %d", len(cfg.RootKey))
-		}
-		return alg, key, "chain", nil
-	}
-	c, err := a.claimedGrant(ctx, forest.R, logID)
-	if errors.Is(err, errNoClaim) {
-		return 0, nil, "", notResolved("log %s has no claim in forest %s", logID, forest.R)
-	}
-	if err != nil {
-		return 0, nil, "", fmt.Errorf("grant unavailable: %w", err)
-	}
-	ts, err := decodeTransparentStatement(c.statement)
-	if err != nil {
-		return 0, nil, "", fmt.Errorf("decode grant: %w", err)
-	}
-	if ts.Grant.LogID != logID {
-		return 0, nil, "", errors.New("grant subject mismatch")
-	}
-	if err := a.verifyGrantChain(ctx, forest, reader, ts); err != nil {
-		return 0, nil, "", err
-	}
-	alg, key, ok := grantDataIdentity(ts.Grant.GrantData)
-	if !ok {
-		return 0, nil, "", errors.New("grantData is not a valid opaque root key")
-	}
-	return alg, key, "grant", nil
-}
-
-// resolveAuthority resolves the authoritative root key + chain binding for a
-// logId via point lookups (index -> forest, or a verified rootLogId hint;
-// then chain logRootKey or the chain-valid stored grant chain). It performs
-// no certificate verification: the sealer verifies the (untrusted) delegation
-// certificate locally against the returned key.
-func (a API) resolveAuthority(
-	ctx context.Context,
-	logID logid.UUID,
-	hint logid.UUID,
-) (AuthorityResult, error) {
-	forest, reader, err := a.resolveForestForLog(ctx, logID, hint)
-	if err != nil {
-		return AuthorityResult{}, err
-	}
-	alg, key, source, err := a.logRootKey(ctx, forest, reader, logID)
-	if err != nil {
-		return AuthorityResult{}, err
-	}
-	keyCopy := make([]byte, len(key))
-	copy(keyCopy, key)
-	return AuthorityResult{
-		LogID:     logID,
-		RootLogID: forest.R,
-		Alg:       alg,
-		Key:       keyCopy,
-		ChainID:   forest.ChainID,
-		Contract:  forest.Contract,
-		Source:    source,
-	}, nil
 }
 
 // loadForest reads and parses a forest genesis document from the owned store.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -20,6 +21,7 @@ type claimFixture struct {
 	api   *API
 	store *fakeStore
 	chain *mockChain
+	logs  *memLogs
 	mux   *http.ServeMux
 	boot  *ecdsa.PrivateKey
 	R     logid.UUID
@@ -36,7 +38,7 @@ func newClaimFixture(t *testing.T) *claimFixture {
 	store.index[R.String()] = R
 	chain := newChainColdAnchored(boot)
 	f := &claimFixture{t: t, store: store, chain: chain, boot: boot, R: R,
-		now: time.Unix(1_800_000_000, 0)}
+		logs: newMemLogs(t), now: time.Unix(1_800_000_000, 0)}
 	f.api = &API{
 		Logger:         logger,
 		Pool:           &mockPool{chain: chain},
@@ -45,10 +47,18 @@ func newClaimFixture(t *testing.T) *claimFixture {
 		Bootstrap:      NewBootstrapCache(),
 		ReservationTTL: 7 * 24 * time.Hour,
 		Now:            func() time.Time { return f.now },
+		Authorities:    NewAuthorityCache(100, 5*time.Minute),
+		Massifs:        f.logs.readers(),
+		Leaves:         publishproof.NewGrantLeafIndex(),
 	}
+	f.remount()
+	return f
+}
+
+// remount re-registers the routes: handlers capture the API by value.
+func (f *claimFixture) remount() {
 	f.mux = http.NewServeMux()
 	f.api.RegisterRoutes(f.mux)
-	return f
 }
 
 // grant builds a create grant for subject, signed by signer as owner's key.

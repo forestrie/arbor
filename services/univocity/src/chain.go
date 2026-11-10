@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 )
 
 var ErrChainNotConfigured = errors.New("chainId not configured")
@@ -143,6 +144,9 @@ type ChainReader interface {
 	IsLogInitialized(ctx context.Context, logId logid.UUID) (bool, error)
 	LogConfig(ctx context.Context, logId logid.UUID) (LogConfig, error)
 	LogRootKey(ctx context.Context, logId logid.UUID) (rootKeyX, rootKeyY [32]byte, err error)
+	// LogState returns the log's published size and accumulator; zero for a
+	// log never published.
+	LogState(ctx context.Context, logId logid.UUID) (publishproof.LogState, error)
 	ERC1271Verifier
 }
 
@@ -268,6 +272,10 @@ func (c *UnivocityContract) LogRootKey(ctx context.Context, logId logid.UUID) (r
 	rootKeyX = vals[0].([32]byte)
 	rootKeyY = vals[1].([32]byte)
 	return rootKeyX, rootKeyY, nil
+}
+
+func (c *UnivocityContract) LogState(ctx context.Context, logId logid.UUID) (publishproof.LogState, error) {
+	return publishproof.ReadLogState(ctx, c.client, c.addr, logId.ToContractBytes32())
 }
 
 func (c *UnivocityContract) HasCode(ctx context.Context, addr common.Address) (bool, error) {

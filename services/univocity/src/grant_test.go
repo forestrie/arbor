@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -538,7 +539,8 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	store.grants[store.grantStoreKey(R, A, GrantClassAuthLog)] = buildGrantStatement(t, boot, childGrant)
 
-	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
+	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache(),
+		Massifs: newMemLogs(t).readers(), Leaves: publishproof.NewGrantLeafIndex()}
 
 	res, err := api.resolveAuthority(context.Background(), A, logid.UUID{})
 	if err != nil {
@@ -578,6 +580,10 @@ func (mockChainEmptyResponse) LogConfig(context.Context, logid.UUID) (LogConfig,
 
 func (mockChainEmptyResponse) LogRootKey(context.Context, logid.UUID) ([32]byte, [32]byte, error) {
 	return [32]byte{}, [32]byte{}, errors.New("empty contract response")
+}
+
+func (mockChainEmptyResponse) LogState(context.Context, logid.UUID) (publishproof.LogState, error) {
+	return publishproof.LogState{}, errors.New("empty contract response")
 }
 
 func (mockChainEmptyResponse) HasCode(context.Context, common.Address) (bool, error) {
@@ -652,6 +658,8 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		Store:     store,
 		APIToken:  "secret",
 		Bootstrap: NewBootstrapCache(),
+		Massifs:   newMemLogs(t).readers(),
+		Leaves:    publishproof.NewGrantLeafIndex(),
 	}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
