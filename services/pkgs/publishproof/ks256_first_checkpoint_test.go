@@ -38,9 +38,7 @@ import (
 func TestKS256RootFirstCheckpointPublishes(t *testing.T) {
 	f := newKS256Forest(t, "80818283-8485-4687-a889-8a8b8c8d8e8f")
 
-	sealed := f.publish(f.rootUUID, f.authority, "first checkpoint of a KS256 forest root")
-
-	f.requireAnchored(f.rootUUID, sealed)
+	f.publishFirst(f.rootUUID, f.authority, "first checkpoint of a KS256 forest root")
 	require.Equal(t, crypto.PubkeyToAddress(f.rootKey.PublicKey).Bytes(), f.rootKeyOf(f.rootUUID),
 		"the root's recorded rootKey must be the bootstrap address")
 }
@@ -59,9 +57,7 @@ func TestKS256EOAChildFirstCheckpointPublishesWithGrantDataAsRootKey(t *testing.
 	child := f.openLog(childUUID, childKey)
 	child.addEntry(f.nextIdtimestamp(), bytes32FromLow(t, "c0"))
 	child.commitAndSeal()
-	sealed := f.publish(childUUID, child, "first checkpoint of a KS256 EOA child")
-
-	f.requireAnchored(childUUID, sealed)
+	f.publishFirst(childUUID, child, "first checkpoint of a KS256 EOA child")
 	require.Equal(t, childAddr.Bytes(), f.rootKeyOf(childUUID),
 		"the child's recorded rootKey must be its grant's grantData")
 }
@@ -87,9 +83,7 @@ func TestERC1271ChildFirstCheckpointPublishes(t *testing.T) {
 	safe := f.openLog(safeUUID, ownerKey)
 	safe.addEntry(f.nextIdtimestamp(), bytes32FromLow(t, "c0"))
 	safe.commitAndSeal()
-	sealed := f.publish(safeUUID, safe, "first checkpoint of an ERC-1271 child")
-
-	f.requireAnchored(safeUUID, sealed)
+	f.publishFirst(safeUUID, safe, "first checkpoint of an ERC-1271 child")
 	require.Equal(t, wallet.Bytes(), f.rootKeyOf(safeUUID),
 		"the ERC-1271 child's recorded rootKey must be the account's address")
 }
@@ -196,6 +190,14 @@ func (f *ks256Forest) publish(id logid.UUID, l *fixtureLog, what string) SealedS
 	require.NoError(f.t, err, what)
 	f.chain.publishCheckpoint(calldata, what)
 	return sealed
+}
+
+// publishFirst publishes l's first checkpoint: the contract must hold no
+// state for the log before, and exactly the sealed state after.
+func (f *ks256Forest) publishFirst(id logid.UUID, l *fixtureLog, what string) {
+	f.t.Helper()
+	require.Zero(f.t, f.logState(id).Size, "%s: the log must have no on-chain state yet", what)
+	f.requireAnchored(id, f.publish(id, l, what))
 }
 
 // requireAnchored asserts the contract holds exactly the sealed state for id.
