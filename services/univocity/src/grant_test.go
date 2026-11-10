@@ -213,6 +213,9 @@ type fakeStore struct {
 	versions     map[string]int
 	// listCalls pins the plan-2607-10 contract: resolution never enumerates.
 	listCalls int
+	// afterGenesisMiss, when set, runs once just after a genesis lookup
+	// misses: a write landing while a read is in flight.
+	afterGenesisMiss func(r logid.UUID)
 }
 
 func newFakeStore() *fakeStore {
@@ -267,6 +270,10 @@ func (s *fakeStore) grantStoreKey(r, subject logid.UUID, class GrantClass) strin
 func (s *fakeStore) GetGenesis(_ context.Context, r logid.UUID) ([]byte, error) {
 	b, ok := s.genesis[r.String()]
 	if !ok {
+		if f := s.afterGenesisMiss; f != nil {
+			s.afterGenesisMiss = nil
+			f(r)
+		}
 		return nil, errStoreMiss
 	}
 	return b, nil

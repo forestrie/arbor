@@ -126,6 +126,25 @@ func TestNegativeCache_ClearedByGenesis(t *testing.T) {
 	wantStatus(t, rec, http.StatusOK, "authority right after genesis")
 }
 
+// A read that misses in the store while a genesis for the same log lands
+// must not cache its miss after the genesis cleared it: the log would read
+// as unknown for the whole negative TTL.
+func TestNegativeCache_ReadInFlightAcrossGenesisIsNotCached(t *testing.T) {
+	f := newClaimFixture(t)
+	f.withNegativeCache()
+	R2 := testLogID(51)
+	f.store.afterGenesisMiss = func(r logid.UUID) {
+		if r == R2 {
+			wantStatus(t, f.postGenesis(R2), http.StatusCreated, "genesis during the read")
+		}
+	}
+	_, rec := f.authority(R2.String())
+	wantStatus(t, rec, http.StatusNotFound, "the read in flight")
+
+	_, rec = f.authority(R2.String())
+	wantStatus(t, rec, http.StatusOK, "authority after the genesis")
+}
+
 func TestNegativeCache_ClearedByReservation(t *testing.T) {
 	f := newClaimFixture(t)
 	f.withNegativeCache()
