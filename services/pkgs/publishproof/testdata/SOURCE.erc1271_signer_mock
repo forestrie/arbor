@@ -1,0 +1,24 @@
+ERC-1271 smart-account fixture for the Safe child publish test
+(ks256_first_checkpoint_test.go).
+
+erc1271-signer-mock.json holds the creation bytecode and ABI of
+ERC1271SignerMock, copied unmodified from forestrie/univocity
+test/checkpoints/UnivocityEIP1271.t.sol at commit
+879a411614627eb8a56eef34319e278276a6a8ee (lines 15-63). It answers
+ERC-1271 for a 65-byte signature its owner makes over the hash it is
+asked about, which is how the contract sees a one-owner Safe.
+
+Compiled with forge 1.5.1 and solc 0.8.30, matching univocity's
+foundry.toml (evm cancun, optimizer on, 200 runs). To regenerate, put
+the contract (SPDX line, `pragma solidity ^0.8.24;`, then those lines)
+in src/ERC1271SignerMock.sol of an empty directory and run:
+
+  forge build --root . --contracts src --use 0.8.30 \
+    --evm-version cancun --optimize --optimizer-runs 200
+
+then write {contract, creationBytecode: bytecode.object, abi} from
+out/ERC1271SignerMock.sol/ERC1271SignerMock.json.
+
+sha256:
+  9e0e1c75321f2bf1bfa5f19aefcf08655010e2524bf7c48abc9821c88d410ee9  ERC1271SignerMock.sol (as compiled)
+  7c765f398054ade47130e7969a0e06e98c518cd0db49f119a7797b4c1e1d8555  erc1271-signer-mock.json
