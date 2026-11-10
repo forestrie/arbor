@@ -105,7 +105,7 @@ func TestForestCache_NegativeBounded(t *testing.T) {
 		var id logid.UUID
 		id[14] = byte(i >> 8)
 		id[15] = byte(i)
-		c.PutNegative(id)
+		c.PutNegative(id, c.Stamp())
 	}
 	c.mu.Lock()
 	n := len(c.negative)
@@ -118,6 +118,24 @@ func TestForestCache_NegativeBounded(t *testing.T) {
 	last[15] = 39
 	if _, _, neg := c.Get(last); !neg {
 		t.Fatal("newest negative entry must survive eviction")
+	}
+}
+
+// A read that missed in the store before a write made the log resolvable
+// must not cache its miss after the write cleared it, or the log reads as
+// unknown for the whole negative TTL.
+func TestForestCache_MissFromBeforeAWriteIsNotCached(t *testing.T) {
+	c := NewForestCache(8, time.Hour)
+	id := testLogID(50)
+	stamp := c.Stamp()       // a read begins, and misses in the store
+	c.ForgetNegative(id)     // a write makes the log resolvable
+	c.PutNegative(id, stamp) // the read's miss lands after it
+	if _, _, neg := c.Get(id); neg {
+		t.Fatal("a miss from before the write hid the log")
+	}
+	c.PutNegative(id, c.Stamp()) // a miss read after the write is cached
+	if _, _, neg := c.Get(id); !neg {
+		t.Fatal("a miss from after the write was not cached")
 	}
 }
 

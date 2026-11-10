@@ -52,7 +52,9 @@ func (a API) resolveForestForLog(
 		}
 		return a.withReader(forest)
 	}
+	var stamp uint64
 	if a.Forests != nil {
+		stamp = a.Forests.Stamp()
 		if e, ok, neg := a.Forests.Get(logID); neg {
 			return ForestEntry{}, nil, notResolved(
 				"log %s is not indexed by this univocity instance", logID)
@@ -114,7 +116,7 @@ func (a API) resolveForestForLog(
 		return ForestEntry{}, nil, fmt.Errorf("load forest: %w", err)
 	}
 	if a.Forests != nil {
-		a.Forests.PutNegative(logID)
+		a.Forests.PutNegative(logID, stamp)
 	}
 	return ForestEntry{}, nil, notResolved(
 		"log %s is not indexed by this univocity instance", logID)
