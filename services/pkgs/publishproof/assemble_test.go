@@ -42,8 +42,13 @@ func storedGrantFor(
 // publishCheckpoint calldata for bootstrap, authority extend, first child-log
 // checkpoint, and delegated extend is assembled entirely from public objects —
 // the v3 checkpoint (signature, proofs, delegation), the stored grant
-// transparent statements (PublishGrant, idtimestamp), and the owner-log
-// massif (grant leaf position, inclusion proof). No hand-built grant material.
+// transparent statements (PublishGrant), and the owner-log massif (grant leaf
+// position and idtimestamp, inclusion proof). No hand-built grant material.
+//
+// The stored grants carry no idtimestamp: nothing writes one onto a stored
+// grant (devdocs ADR-0075 decision 10), so the child's first checkpoint
+// publishes although no registration status poll was ever made for its
+// create grant.
 func TestAssemblePublishFromStoredGrants(t *testing.T) {
 	ctx := t.Context()
 	client := startAnvil(t)
@@ -64,14 +69,16 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 
 	objects := newMemObjectClient()
 	grants := mapGetter(objects.objects)
+	leaves := NewGrantLeafIndex()
 
-	// Stored grants: the root self-grant uses the zero idtimestamp (the live
-	// convention observed on forest-dev-5); the data-log grant is sequenced.
+	// Stored grants carry no idtimestamp. The root self-grant is sequenced
+	// under the zero idtimestamp (the live convention observed on
+	// forest-dev-5); the data-log grant under idt1.
 	idt1 := idTimestamp(2)
 	storedGrantFor(t, objects, rootUUID, rootUUID, "auth-log",
 		gfCreate|gfExtend|gfAuthLog, [8]byte{}, rootPub)
 	storedGrantFor(t, objects, rootUUID, targetUUID, "data-log",
-		gfCreate|gfExtend|gfDataLog, idt1, rootPub)
+		gfCreate|gfExtend|gfDataLog, [8]byte{}, rootPub)
 
 	rootGrant, err := ReadStoredGrant(ctx, grants, rootUUID, rootUUID)
 	require.NoError(t, err)
@@ -91,7 +98,7 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 	zeroState := LogState{Accumulator: [][32]byte{}, Size: 0}
 
 	// Bootstrap the root log: no on-chain state on either side.
-	calldata, sealed, err := AssemblePublish(ctx, grants, rootUUID, rootUUID,
+	calldata, sealed, err := AssemblePublish(ctx, grants, leaves, rootUUID, rootUUID,
 		authority.reader(), 0, authority.reader(), zeroState, zeroState)
 	require.NoError(t, err)
 	require.Equal(t, uint64(1), sealed.MMRSize)
@@ -103,10 +110,10 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 
 	// Extend the authority log with the target grant entry.
 	require.Equal(t, uint64(3),
-		authority.addEntry(binary.BigEndian.Uint64(targetGrant.IDTimestampBe[:]), targetContent))
+		authority.addEntry(binary.BigEndian.Uint64(idt1[:]), targetContent))
 	authority.commitAndSeal()
 
-	calldata, sealed, err = AssemblePublish(ctx, grants, rootUUID, rootUUID,
+	calldata, sealed, err = AssemblePublish(ctx, grants, leaves, rootUUID, rootUUID,
 		authority.reader(), 0, authority.reader(), rootState, rootState)
 	require.NoError(t, err)
 	require.Equal(t, uint64(3), sealed.MMRSize)
@@ -147,13 +154,13 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 	// Owner not anchored: assembling against a zero owner state must refuse.
 	firstSize := target.addLeaves(dataLeaves[:3]...)
 	target.commitAndSeal()
-	_, _, err = AssemblePublish(ctx, grants, rootUUID, targetUUID,
+	_, _, err = AssemblePublish(ctx, grants, leaves, rootUUID, targetUUID,
 		target.reader(), 0, authority.reader(), zeroState, zeroState)
 	require.ErrorIs(t, err, ErrOwnerNotAnchored)
 
 	// First target checkpoint: grant leaf found in the authority massif and
 	// proven against the owner's on-chain accumulator.
-	calldata, sealed, err = AssemblePublish(ctx, grants, rootUUID, targetUUID,
+	calldata, sealed, err = AssemblePublish(ctx, grants, leaves, rootUUID, targetUUID,
 		target.reader(), 0, authority.reader(), zeroState, rootState)
 	require.NoError(t, err)
 	require.Equal(t, firstSize, sealed.MMRSize)
@@ -165,14 +172,14 @@ func TestAssemblePublishFromStoredGrants(t *testing.T) {
 	require.Equal(t, sealed.Accumulator, targetState.Accumulator)
 
 	// Already anchored: re-assembling the same seal must refuse.
-	_, _, err = AssemblePublish(ctx, grants, rootUUID, targetUUID,
+	_, _, err = AssemblePublish(ctx, grants, leaves, rootUUID, targetUUID,
 		target.reader(), 0, authority.reader(), targetState, rootState)
 	require.ErrorIs(t, err, ErrAlreadyAnchored)
 
 	// Delegated extend.
 	extendSize := target.addLeaves(dataLeaves[3:]...)
 	target.commitAndSeal()
-	calldata, sealed, err = AssemblePublish(ctx, grants, rootUUID, targetUUID,
+	calldata, sealed, err = AssemblePublish(ctx, grants, leaves, rootUUID, targetUUID,
 		target.reader(), 0, authority.reader(), targetState, rootState)
 	require.NoError(t, err)
 	require.Equal(t, extendSize, sealed.MMRSize)

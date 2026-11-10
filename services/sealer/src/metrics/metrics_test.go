@@ -44,3 +44,18 @@ func TestObserveCheckpointLag(t *testing.T) {
 		t.Fatalf("expected 1 registered histogram series, got %d", count)
 	}
 }
+
+// TestIncCheckpointDeferred: a seal waiting on univocity to anchor its log
+// is counted apart from one waiting on a delegation, and an unknown reason
+// is counted as pending, so label cardinality stays bounded.
+func TestIncCheckpointDeferred(t *testing.T) {
+	m := NewMetrics(prometheus.NewRegistry())
+	for _, reason := range []string{"pending", "expired", "authority_pending", "authority_pending", "something-else"} {
+		m.IncCheckpointDeferred(reason)
+	}
+	for reason, want := range map[string]float64{"pending": 2, "expired": 1, "authority_pending": 2} {
+		if got := testutil.ToFloat64(m.CheckpointDeferredTotal.WithLabelValues(reason)); got != want {
+			t.Errorf("%s count = %v, want %v", reason, got, want)
+		}
+	}
+}

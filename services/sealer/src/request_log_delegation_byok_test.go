@@ -5,128 +5,32 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"fmt"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/forestrie/arbor/services/pkgs/delegationcert"
-	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
 
-// These tests prove the plan-0003 two-seam BYOK architecture without
-// requiring deployed Univocity contracts. The Sealer is wired to:
-//
-//   - HTTPTrustRootClient -> fake trust-root server (CBOR x,y of a
-//     test-owned root key; non-Custodian)
-//   - HTTPDelegationIssuer -> fake delegation issuer server that signs
-//     certificates with the same test-owned root key (non-Custodian)
-//
-// Sealer fetches the root over HTTP, fetches the delegation over HTTP from
-// a *different* URL, and verifies one against the other.
+// The sealer takes a log's root key from univocity and its certificate from
+// a separate delegation issuer (non-Custodian here, runner-owned), and
+// verifies one against the other. The issuer helpers below are shared with
+// the univocity authority tests.
 
 const byokIssuerToken = "issuer-token"
 
-func TestRequestLogDelegationLease_BYOKHTTPTrustRoot(t *testing.T) {
-	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logID := "0123456789abcdef0123456789abcdef"
-
-	var trustRootCalledFor string
-	trustSrv := newBYOKTrustRootServer(t, logID, &rootPriv.PublicKey, &trustRootCalledFor)
-	defer trustSrv.Close()
-
-	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
-	defer issuerSrv.Close()
-
-	trustRoot := &HTTPTrustRootClient{
-		BaseURL:    trustSrv.URL,
-		HTTPClient: NewHTTPClient(nil),
-	}
-
-	lease, err := requestLeaseForTest(t,
-		context.Background(),
-		NewHTTPClient(nil),
-		trustRoot,
-		&HTTPDelegationIssuer{
-			BaseURL:    issuerSrv.URL,
-			Token:      byokIssuerToken,
-			HTTPClient: NewHTTPClient(nil),
-		},
-		"secp256r1",
-		30*time.Minute,
-		logID,
-		7,
-		21,
-	)
-	if err != nil {
-		t.Fatalf("expected BYOK lease, got %v", err)
-	}
-	if len(lease.CertBytes) == 0 {
-		t.Fatal("expected lease certificate")
-	}
-
-	wantAPISeg, err := logIDAPISegment(logID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if trustRootCalledFor != wantAPISeg {
-		t.Fatalf("trust root not fetched for log: got %q want %q", trustRootCalledFor, wantAPISeg)
-	}
-}
-
-func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongRoot(t *testing.T) {
-	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Trust-root advertises a DIFFERENT pubkey from the one the issuer signs with.
-	wrongRootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logID := "1123456789abcdef0123456789abcdef"
-
-	trustSrv := newBYOKTrustRootServer(t, logID, &wrongRootPriv.PublicKey, nil)
-	defer trustSrv.Close()
-
-	issuerSrv := newBYOKIssuerServer(t, rootPriv, logID, nil)
-	defer issuerSrv.Close()
-
-	_, err = requestLeaseForTest(t,
-		context.Background(),
-		NewHTTPClient(nil),
-		&HTTPTrustRootClient{BaseURL: trustSrv.URL, HTTPClient: NewHTTPClient(nil)},
-		&HTTPDelegationIssuer{
-			BaseURL:    issuerSrv.URL,
-			Token:      byokIssuerToken,
-			HTTPClient: NewHTTPClient(nil),
-		},
-		"secp256r1",
-		30*time.Minute,
-		logID,
-		7,
-		21,
-	)
-	if err == nil {
-		t.Fatal("expected wrong trust root to fail verification")
-	}
-}
-
-func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongLog(t *testing.T) {
+func TestRequestLogDelegationLease_BYOKRejectsCertificateForAnotherLog(t *testing.T) {
 	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	logID := "2123456789abcdef0123456789abcdef"
 
-	trustSrv := newBYOKTrustRootServer(t, logID, &rootPriv.PublicKey, nil)
-	defer trustSrv.Close()
+	authSrv := newAuthorityServer(t, &rootPriv.PublicKey, 0)
+	defer authSrv.Close()
 
 	// Issuer signs a certificate for a different log id than the caller asked for.
 	issuerSrv := newBYOKIssuerServer(t, rootPriv, "ffffffffffffffffffffffffffffffff", nil)
@@ -135,7 +39,7 @@ func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongLog(t *testing.T) {
 	_, err = requestLeaseForTest(t,
 		context.Background(),
 		NewHTTPClient(nil),
-		&HTTPTrustRootClient{BaseURL: trustSrv.URL, HTTPClient: NewHTTPClient(nil)},
+		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{
 			BaseURL:    issuerSrv.URL,
 			Token:      byokIssuerToken,
@@ -152,72 +56,18 @@ func TestRequestLogDelegationLease_BYOKHTTPRejectsWrongLog(t *testing.T) {
 	}
 }
 
-// newBYOKTrustRootServer stands up a fake trust-root HTTP service that
-// returns the CBOR plan-0003 shape for the given log id.
-//
-// If gotLog is non-nil it captures the log id seen by the handler so the
-// caller can assert Sealer hit the trust-root URL for the expected log.
-func newBYOKTrustRootServer(
-	t *testing.T,
-	logIDHex string,
-	pub *ecdsa.PublicKey,
-	gotLog *string,
-) *httptest.Server {
-	t.Helper()
-	logUUID, err := logid.FromHex32(logIDHex)
-	if err != nil {
-		t.Fatalf("parse log id hex: %v", err)
+// certLogIDFor is the log a fake issuer's certificate names: certLogID,
+// or the requested log when certLogID is empty.
+func certLogIDFor(certLogID string, req delegationcert.DelegationIssueRequest) string {
+	if certLogID != "" {
+		return certLogID
 	}
-	wantAPISeg := logUUID.String()
-	logIDBytes := logUUID[:]
-	x := make([]byte, 32)
-	y := make([]byte, 32)
-	pub.X.FillBytes(x)
-	pub.Y.FillBytes(y)
-
-	prefix := "/api/logs/"
-	suffix := "/public-root"
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if !strings.HasPrefix(r.URL.Path, prefix) || !strings.HasSuffix(r.URL.Path, suffix) {
-			http.NotFound(w, r)
-			return
-		}
-		if r.Header.Get("Accept") != "application/cbor" {
-			t.Errorf("trust root: missing Accept: application/cbor (got %q)", r.Header.Get("Accept"))
-			http.Error(w, "bad accept", http.StatusBadRequest)
-			return
-		}
-		seenLog := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, prefix), suffix)
-		if gotLog != nil {
-			*gotLog = seenLog
-		}
-		if seenLog != wantAPISeg {
-			http.Error(w, fmt.Sprintf("unknown log %s", seenLog), http.StatusNotFound)
-			return
-		}
-
-		body, err := cbor.Marshal(TrustRootResponse{
-			LogID: logIDBytes,
-			Alg:   "ES256",
-			X:     x,
-			Y:     y,
-		})
-		if err != nil {
-			t.Errorf("encode trust root: %v", err)
-			http.Error(w, "encode", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/cbor")
-		_, _ = w.Write(body)
-	}))
+	return hex.EncodeToString(req.LogID)
 }
 
 // newBYOKIssuerServer stands up a fake delegation issuer that signs the
-// returned certificate with rootPriv (non-Custodian, runner-owned).
+// returned certificate with rootPriv (non-Custodian, runner-owned). The
+// certificate names certLogID, or the requested log when it is empty.
 func newBYOKIssuerServer(
 	t *testing.T,
 	rootPriv *ecdsa.PrivateKey,
@@ -260,7 +110,7 @@ func newBYOKIssuerServer(
 			curve,
 			kid,
 			delegationcert.DelegationInput{
-				LogID:        certLogID,
+				LogID:        certLogIDFor(certLogID, req),
 				MmrStart:     req.MMRStart,
 				MmrEnd:       req.MMREnd,
 				DelegatedKey: delegatedKey,

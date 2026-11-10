@@ -57,5 +57,5 @@ func verifyGrantInclusion(leaf [32]byte, inclusion InclusionProof, accumulator [
 			return nil
 		}
 	}
-	return fmt.Errorf("grant inclusion proof does not reproduce any owner on-chain accumulator peak")
+	return fmt.Errorf("grant inclusion proof does not reproduce any peak of the accumulator it is proved against")
 }

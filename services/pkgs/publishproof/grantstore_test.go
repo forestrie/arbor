@@ -2,7 +2,6 @@ package publishproof
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"math/big"
@@ -11,9 +10,7 @@ import (
 	"testing"
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
-	"github.com/forestrie/go-merklelog/massifs"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
-	"github.com/forestrie/go-merklelog/mmr"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -106,8 +103,9 @@ var (
 )
 
 // A stored data-log grant yields the calldata PublishGrant (flags in the low
-// bytes of the uint256 grant, request from the grant class) and the sequenced
-// idtimestamp.
+// bytes of the uint256 grant, request from the grant class). An idtimestamp
+// header, if present, is ignored: the publisher takes the idtimestamp from
+// the grant's leaf in the owner log.
 func TestReadStoredGrantDataLog(t *testing.T) {
 	r := testLogID(t, "10000000-0000-4000-8000-000000000001")
 	dataLog := testLogID(t, "20000000-0000-4000-8000-000000000002")
@@ -127,7 +125,6 @@ func TestReadStoredGrantDataLog(t *testing.T) {
 
 	require.Equal(t, dataLog, got.LogID)
 	require.Equal(t, r, got.OwnerLogID)
-	require.Equal(t, [8]byte(testIdts), got.IDTimestampBe)
 
 	wantLog := dataLog.ToPaddedWire32()
 	wantOwner := r.ToPaddedWire32()
@@ -142,8 +139,7 @@ func TestReadStoredGrantDataLog(t *testing.T) {
 }
 
 // When no data-log grant exists the auth-log class is consulted, and the
-// request becomes GC_AUTH_LOG. A missing idtimestamp header is the zero
-// idtimestamp (the root self-grant convention).
+// request becomes GC_AUTH_LOG.
 func TestReadStoredGrantAuthLogFallback(t *testing.T) {
 	r := testLogID(t, "10000000-0000-4000-8000-000000000001")
 
@@ -156,7 +152,6 @@ func TestReadStoredGrantAuthLogFallback(t *testing.T) {
 
 	got, err := ReadStoredGrant(t.Context(), store, r, r)
 	require.NoError(t, err)
-	require.Equal(t, [8]byte{}, got.IDTimestampBe)
 	require.Equal(t, new(big.Int).SetBytes([]byte{0, 0, 0, 3, 0, 0, 0, 1}), got.Grant.Grant)
 	// auth-log class -> GC_AUTH_LOG request (1 << 224).
 	require.Equal(t, new(big.Int).Lsh(big.NewInt(1), 224), got.Grant.Request)
@@ -195,81 +190,9 @@ func TestReadStoredGrantErrors(t *testing.T) {
 	})
 }
 
-// indexedFixtureMassif builds a massif the way ranger's committer does: for
-// each (idtimestamp, contentHash) entry the mmr leaf is
-// sha256(idtsBE || contentHash), appended and indexed under the idtimestamp.
-// Returns the context and the resulting mmr size.
-func indexedFixtureMassif(t *testing.T, entries []fixtureEntry) (*massifs.MassifContext, uint64) {
-	t.Helper()
-	mc, err := massifs.CreateFirstMassifContext(t.Context(), 0, fixtureMassifHeight)
-	require.NoError(t, err)
-	var size uint64
-	for _, e := range entries {
-		var idtsBE [8]byte
-		binary.BigEndian.PutUint64(idtsBE[:], e.idts)
-		leaf := sha256.Sum256(append(idtsBE[:], e.contentHash[:]...))
-		size, err = mc.AddIndexedEntry(leaf[:])
-		require.NoError(t, err)
-		require.NoError(t, mc.IndexLeaf(e.idts, e.contentHash[:]))
-	}
-	return &mc, size
-}
-
 type fixtureEntry struct {
 	idts        uint64
 	contentHash [32]byte
-}
-
-// The grant leaf position is computable: idtimestamps are committed in
-// strictly increasing order (ranger NextIDTimestamp), so leaf order equals
-// key order and the v2 index leaf table binary-searches by idtimestamp. The
-// mmr leaf at the found ordinal must verify as the grant leaf commitment.
-func TestGrantLeafMMRIndex(t *testing.T) {
-	entries := []fixtureEntry{
-		{idts: 0, contentHash: sha256.Sum256([]byte("root-grant"))}, // zero-key root self-grant
-		{idts: 100, contentHash: sha256.Sum256([]byte("g1"))},
-		{idts: 250, contentHash: sha256.Sum256([]byte("g2"))},
-		{idts: 251, contentHash: sha256.Sum256([]byte("g3"))},
-	}
-	mc, size := indexedFixtureMassif(t, entries)
-
-	leafFor := func(e fixtureEntry) [32]byte {
-		var idtsBE [8]byte
-		binary.BigEndian.PutUint64(idtsBE[:], e.idts)
-		return sha256.Sum256(append(idtsBE[:], e.contentHash[:]...))
-	}
-
-	// Every entry is found at its ordinal's node index, including the
-	// zero-idtimestamp root grant at leaf 0.
-	for i, e := range entries {
-		var idts [8]byte
-		binary.BigEndian.PutUint64(idts[:], e.idts)
-		node, err := GrantLeafMMRIndex(mc, size, idts, leafFor(e))
-		require.NoError(t, err)
-		require.Equal(t, mmr.MMRIndex(uint64(i)), node)
-	}
-
-	// An idtimestamp between committed keys is absent.
-	var absent [8]byte
-	binary.BigEndian.PutUint64(absent[:], 200)
-	_, err := GrantLeafMMRIndex(mc, size, absent, leafFor(entries[1]))
-	require.ErrorIs(t, err, ErrGrantLeafNotFound)
-
-	// A present idtimestamp whose leaf does not verify is an integrity failure
-	// (the stored grant does not match what was sequenced), distinct from the
-	// not-anchored case.
-	var idts100 [8]byte
-	binary.BigEndian.PutUint64(idts100[:], 100)
-	_, err = GrantLeafMMRIndex(mc, size, idts100, [32]byte{0xde, 0xad})
-	require.ErrorIs(t, err, ErrGrantLeafMismatch)
-
-	// The on-chain bound is respected: a leaf beyond the anchored size is
-	// not found even though it exists in the massif.
-	var idts251 [8]byte
-	binary.BigEndian.PutUint64(idts251[:], 251)
-	boundSize := mmr.MMRIndex(3) // complete size covering only leaves 0..2
-	_, err = GrantLeafMMRIndex(mc, boundSize, idts251, leafFor(entries[3]))
-	require.ErrorIs(t, err, ErrGrantLeafNotFound)
 }
 
 // --- protocol grant-vector conformance (FOR-580: retired keys 7/8) ---

@@ -261,8 +261,10 @@ func TestClassifyReceiptReReadAuthority(t *testing.T) {
 	}
 	// Revert and on-chain still below sealed -> Reverted, terminal ack+alert
 	// (unpublishable as submitted; self-heals via the next seal, adr-0008).
-	if r := withLogState(5, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeReverted || !r.ShouldAck() {
-		t.Errorf("onchain<sealed = %v (ack=%v), want Reverted/ack", r.Outcome, r.ShouldAck())
+	// The re-read size travels with it: a first checkpoint whose revert finds
+	// the log registered is no longer a revert on a log with no state.
+	if r := withLogState(5, nil).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeReverted || !r.ShouldAck() || r.OnchainSize != 5 {
+		t.Errorf("onchain<sealed = %v (ack=%v, onchain=%d), want Reverted/ack at 5", r.Outcome, r.ShouldAck(), r.OnchainSize)
 	}
 	// Re-read error -> Unsubmitted (nack, never ack on uncertainty).
 	if r := withLogState(0, errors.New("rpc down")).classifyReceipt(ctx, newFakeSender(0), 1, addr, logID, 10, tx, failed); r.Outcome != OutcomeUnsubmitted || r.ShouldAck() {

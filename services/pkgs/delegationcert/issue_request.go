@@ -6,11 +6,10 @@ package delegationcert
 // binding of chain provenance to delegation material. They are not
 // consumed by any signer or verifier today and are marshalled with
 // omitempty so issuers and consumers that do not emit them remain
-// wire-compatible. See the matching note on sealer's TrustRootResponse:
-// the eventual binding direction is open and the chain id / contract
-// address may end up embedded in (or derived from) the public log data,
-// in which case any verifier obtains them from log data alone and these
-// wire fields become redundant.
+// wire-compatible. The eventual binding direction is open: the chain id /
+// contract address may end up embedded in (or derived from) the public log
+// data, in which case any verifier obtains them from log data alone and
+// these wire fields become redundant.
 type DelegationIssueRequest struct {
 	Version             uint64 `cbor:"version,omitempty"`
 	Domain              string `cbor:"domain,omitempty"`

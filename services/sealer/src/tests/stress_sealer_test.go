@@ -9,13 +9,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/hex"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -76,7 +73,7 @@ func Test_SealerCheckpointLog_racingCheckpointLogs_minio(t *testing.T) {
 	t.Cleanup(fakeCustodian.Close)
 
 	cfg := sealer.Config{
-		TrustRootURL:          fakeCustodian.URL,
+		UnivocityAuthorityURL: fakeCustodian.URL,
 		DelegationIssuerURL:   fakeCustodian.URL,
 		DelegationIssuerToken: "test-custodian-token",
 		CustodianURL:          fakeCustodian.URL,
@@ -282,7 +279,7 @@ func runCheckpointLogs(
 	ctx := t.Context()
 
 	leaseMgr := sealer.NewDelegationLeaseManager(
-		sealer.NewSelectingTrustRootClient(cfg, httpClient),
+		&sealer.HTTPAuthorityResolver{BaseURL: cfg.UnivocityAuthorityURL, HTTPClient: httpClient},
 		&sealer.HTTPDelegationIssuer{
 			BaseURL:    cfg.DelegationIssuerURL,
 			Token:      cfg.DelegationIssuerToken,
@@ -399,6 +396,16 @@ type fakeCustodianState struct {
 	privateKey *ecdsa.PrivateKey
 }
 
+// fakeAuthority is univocity's authority answer for an anchored log.
+type fakeAuthority struct {
+	State string `cbor:"state"`
+	Alg   int64  `cbor:"alg"`
+	Key   []byte `cbor:"key"`
+	Final bool   `cbor:"final"`
+}
+
+// newFakeCustodian stands in for both the delegation issuer (the custodian)
+// and univocity, which reports one P-256 key as every log's anchored root.
 func newFakeCustodian(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -409,24 +416,12 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 	state := &fakeCustodianState{privateKey: priv}
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Match GET /api/keys/<logIdHex>/public - return public key as CBOR
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/public") {
-			// Return the custody key in PEM format via CBOR
-			pubKeyDER, err := x509.MarshalPKIXPublicKey(&state.privateKey.PublicKey)
-			if err != nil {
-				http.Error(w, "marshal pub", http.StatusInternalServerError)
-				return
-			}
-			pubKeyPEM := pem.EncodeToMemory(&pem.Block{
-				Type:  "PUBLIC KEY",
-				Bytes: pubKeyDER,
-			})
-
-			resp := sealer.CustodianPublicKeyResponse{
-				PublicKey: string(pubKeyPEM),
-				Alg:       "ES256",
-			}
-			respBytes, _ := cbor.Marshal(resp)
+		// GET /api/logs/<logId>/authority - univocity's root key for the log
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/authority") {
+			key := make([]byte, 64)
+			state.privateKey.PublicKey.X.FillBytes(key[:32])
+			state.privateKey.PublicKey.Y.FillBytes(key[32:])
+			respBytes, _ := cbor.Marshal(fakeAuthority{State: "anchored", Alg: -7, Key: key, Final: true})
 			w.Header().Set("Content-Type", "application/cbor")
 			_, _ = w.Write(respBytes)
 			return
@@ -502,42 +497,6 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 				IssuedAt:    int64(issuedAt),
 				ExpiresAt:   int64(expiresAt),
 				Certificate: certBytes,
-			}
-			respBytes, _ := cbor.Marshal(resp)
-			w.Header().Set("Content-Type", "application/cbor")
-			_, _ = w.Write(respBytes)
-			return
-		}
-
-		// Match POST /api/keys/<logIdHex>/sign - sign digest using CBOR
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sign") {
-			body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
-			if err != nil {
-				http.Error(w, "read", http.StatusBadRequest)
-				return
-			}
-
-			var req sealer.CustodianSignRequest
-			if err := cbor.Unmarshal(body, &req); err != nil {
-				http.Error(w, "cbor unmarshal", http.StatusBadRequest)
-				return
-			}
-
-			// Sign the digest with the custody key
-			var rVal, sVal *big.Int
-			rVal, sVal, err = ecdsa.Sign(rand.Reader, state.privateKey, req.PayloadHash)
-			if err != nil {
-				http.Error(w, "sign", http.StatusInternalServerError)
-				return
-			}
-
-			// Return r||s concatenated signature (fixed 64 bytes for P-256)
-			sig := make([]byte, 64)
-			rVal.FillBytes(sig[0:32])
-			sVal.FillBytes(sig[32:64])
-
-			resp := sealer.CustodianSignResponse{
-				Signature: sig,
 			}
 			respBytes, _ := cbor.Marshal(resp)
 			w.Header().Set("Content-Type", "application/cbor")

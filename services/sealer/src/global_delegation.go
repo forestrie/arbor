@@ -28,13 +28,10 @@ type DelegationLease struct {
 	// does not produce it.
 	OnchainProof *delegationcert.OnchainDelegationProof
 
-	// Authority binding from the univocity authorize decision (empty when the
-	// legacy trust-root path is used). Binds the lease to a specific chain /
-	// contract, closing the cross-deployment replay gap (plan-0003).
-	RootLogIDHex    string
-	ChainID         string
-	ContractAddress string
-	AuthSource      string // "chain" | "grant"
+	// authorityFinal and authorityCheckedAt record univocity's answer the
+	// lease rests on: whether it was final, and when it was last given.
+	authorityFinal     bool
+	authorityCheckedAt time.Time
 }
 
 // COSESigner returns a veraison/go-cose Signer + kid + public key to use with

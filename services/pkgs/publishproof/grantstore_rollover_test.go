@@ -19,9 +19,9 @@ import (
 
 // rolloverMassifHeight is deliberately tiny (2^(3-1) = 4 leaves per massif) so a
 // handful of entries rolls the owner authority log past its first massif. That
-// is the condition FindGrantLeafMMRIndex / GrantLeafMMRIndex must handle: once
-// the grant leaf lives in a massif with FirstIndex != 0, a massif-local leaf
-// ordinal is no longer a global mmr leaf index (R2 in plan-2607-03 / FOR-329).
+// is the condition the grant leaf scan must handle: once the grant leaf lives
+// in a massif with FirstIndex != 0, a massif-local leaf ordinal is no longer a
+// global mmr leaf index (R2 in plan-2607-03).
 const rolloverMassifHeight = uint8(3)
 
 // rolledOwnerLog builds a real owner authority log in the R2 object layout that
@@ -106,11 +106,11 @@ func leafCommitment(e fixtureEntry) [32]byte {
 // A grant whose leaf lives in a massif past the first one is located at its
 // correct *global* mmr index (local ordinal -> global via mc.Start.FirstIndex),
 // and its inclusion proof verifies against the owner's on-chain accumulator.
-// This guards the primary R2 defect (grantstore.go used the massif-local ordinal
-// as a global leaf index — correct only for a single-massif owner log). The
-// separate boundary-crossing routing half of the fix (ownerNodeGetter) is guarded
-// by TestGrantInclusionProofCrossesMassifBoundary.
-func TestFindGrantLeafMMRIndexMultiMassif(t *testing.T) {
+// This guards the primary R2 defect (a massif-local ordinal used as a global
+// leaf index is correct only for a single-massif owner log). The separate
+// boundary-crossing routing half of the fix (ownerNodeGetter) is guarded by
+// TestGrantInclusionProofCrossesMassifBoundary.
+func TestScanGrantLeafMultiMassifProvesAgainstAccumulator(t *testing.T) {
 	ctx := t.Context()
 
 	// 4 leaves/massif: leaves 0..3 land in massif 0, leaves 4..5 in massif 1.
@@ -133,15 +133,11 @@ func TestFindGrantLeafMMRIndexMultiMassif(t *testing.T) {
 	// The target grant is the last entry: global leaf 5, massif 1, local ordinal 1.
 	target := entries[5]
 	const localOrdinal = uint64(1)
-	leaf := leafCommitment(target)
 
-	var idts [8]byte
-	binary.BigEndian.PutUint64(idts[:], target.idts)
-
-	// FindGrantLeafMMRIndex walks massif 0 (miss) then massif 1 (hit) and returns
-	// the grant leaf's *global* mmr node index.
-	got, err := FindGrantLeafMMRIndex(ctx, reader, size, idts, leaf)
+	gl, found, _, err := ScanGrantLeaf(ctx, reader, target.contentHash, 0)
 	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, leafCommitment(target), gl.Leaf)
 
 	// The correct global index is first-massif-index + local ordinal, taken from
 	// massif 1's own start header.
@@ -149,22 +145,13 @@ func TestFindGrantLeafMMRIndexMultiMassif(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, mc1.Start.FirstIndex, "massif 1 must have a non-zero FirstIndex")
 	wantGlobal := urkle.LeafOrdinalToMMRIndex(mc1.Start.FirstIndex, localOrdinal)
-	require.Equal(t, wantGlobal, got)
+	require.Equal(t, wantGlobal, gl.MMRIndex)
 
-	// Regression guard: the pre-fix code used the massif-local ordinal as a global
-	// leaf index (mmr.MMRIndex(localOrdinal)). That value differs from the correct
-	// global index, so a reintroduction of the bug would fail the assertion above.
+	// Regression guard: a massif-local ordinal used as a global leaf index
+	// (mmr.MMRIndex(localOrdinal)) differs from the correct global index.
 	buggyLocal := mmr.MMRIndex(localOrdinal)
-	require.NotEqual(t, buggyLocal, got,
+	require.NotEqual(t, buggyLocal, gl.MMRIndex,
 		"global index must not collapse to the massif-local computation")
-
-	// The single head-massif view alone cannot find a grant that rolled into it
-	// from an earlier ordinal space unless the first-index mapping is applied:
-	// searching massif 0 for this grant misses (its idtimestamp is not in range).
-	mc0, err := massifs.GetMassifContext(ctx, reader, 0)
-	require.NoError(t, err)
-	_, err = GrantLeafMMRIndex(&mc0, size, idts, leaf)
-	require.ErrorIs(t, err, ErrGrantLeafNotFound)
 
 	// The grant leaf's inclusion proof, read through the ownerNodeGetter,
 	// reproduces one of the owner's on-chain accumulator peaks. (Here the two
@@ -172,9 +159,9 @@ func TestFindGrantLeafMMRIndexMultiMassif(t *testing.T) {
 	// within massif 1; a path that actually spans massifs is exercised by
 	// TestGrantInclusionProofCrossesMassifBoundary.)
 	nodes := newOwnerNodeGetter(ctx, reader, rolloverMassifHeight)
-	inclusion, err := BuildInclusionProof(nodes, size, got)
+	inclusion, err := BuildInclusionProof(nodes, size, gl.MMRIndex)
 	require.NoError(t, err)
-	require.NoError(t, verifyGrantInclusion(leaf, inclusion, acc))
+	require.NoError(t, verifyGrantInclusion(gl.Leaf, inclusion, acc))
 }
 
 // A grant leaf in massif 0 of an owner log whose massifs are unified under a
@@ -182,8 +169,8 @@ func TestFindGrantLeafMMRIndexMultiMassif(t *testing.T) {
 // in a *later* massif. Assembling that proof therefore requires ownerNodeGetter's
 // cross-massif routing (MassifIndexFromMMRIndex -> owning blob); a single massif
 // context cannot supply the far node. This is the second half of the R2 fix
-// (plan-2607-03), which TestFindGrantLeafMMRIndexMultiMassif does not exercise
-// because there the two massifs sit under separate peaks.
+// (plan-2607-03), which TestScanGrantLeafMultiMassifProvesAgainstAccumulator
+// does not exercise because there the two massifs sit under separate peaks.
 func TestGrantInclusionProofCrossesMassifBoundary(t *testing.T) {
 	ctx := t.Context()
 
@@ -206,13 +193,10 @@ func TestGrantInclusionProofCrossesMassifBoundary(t *testing.T) {
 	require.Equal(t, uint32(1), head, "fixture must span two full massifs")
 
 	// The root self-grant at leaf 0 lives in massif 0.
-	grant := entries[0]
-	leaf := leafCommitment(grant)
-	var idts [8]byte
-	binary.BigEndian.PutUint64(idts[:], grant.idts)
-
-	node, err := FindGrantLeafMMRIndex(ctx, reader, size, idts, leaf)
+	gl, found, _, err := ScanGrantLeaf(ctx, reader, entries[0].contentHash, 0)
 	require.NoError(t, err)
+	require.True(t, found)
+	node, leaf := gl.MMRIndex, gl.Leaf
 	require.Equal(t, uint64(0), node, "the leaf-0 self-grant is global mmr node 0")
 
 	// The authentication path must read a node stored in massif 1, so the proof

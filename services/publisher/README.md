@@ -51,6 +51,7 @@ redelivers anything else.
 | `PUBLISHER_RECEIPT_TIMEOUT` / `PUBLISHER_RECEIPT_POLL_INTERVAL` | receipt wait | `60s` / `200ms` |
 | `VISIBILITY_TIMEOUT` | queue lease — must exceed the receipt timeout | `90s` |
 | `QUEUE_URL` / `QUEUE_TOKEN` / `QUEUE_BATCH_SIZE` | Cloudflare queue (daemon only) | — / — / `31` |
+| `UNIVOCITY_AUTHORITY_URL` | univocity service base URL; a log it reports `conflicted` is never published again, and its queued checkpoints are dropped | required (daemon); optional (CLI) |
 
 ## Build & test
 

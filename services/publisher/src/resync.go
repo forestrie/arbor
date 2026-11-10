@@ -233,9 +233,13 @@ type SweepStats struct {
 	// mined revert or assemble-terminal status); lower massifs of the same
 	// log are attempted in their place (W3).
 	Unpublishable int
+	// Conflicted counts logs univocity reports conflicted. They are never
+	// published again, so nothing below their highest seal is tried.
+	Conflicted int
 	// AgedOut counts candidates older than resyncHorizon. None is driven;
 	// each is classified (or deferred) rather than assumed stranded, and
-	// lands in exactly one of Covered, Stranded, AgedDeferred or Errors.
+	// lands in exactly one of Covered, Stranded, AgedDeferred, Conflicted
+	// or Errors.
 	AgedOut int
 	// AgedChecked counts aged-out candidates classified this sweep with a
 	// read-only Assemble (bounded by resyncMaxAgedChecksPerSweep; a settled
@@ -468,14 +472,16 @@ func (r *Resync) Run(ctx context.Context) {
 				r.logger.Warn("resync sweep",
 					"listed", stats.Listed, "gaps", stats.Gaps, "handoffs", stats.Handoffs,
 					"covered", stats.Covered, "blocked", stats.Blocked,
-					"unpublishable", stats.Unpublishable, "poisonSkipped", stats.PoisonSkipped,
+					"unpublishable", stats.Unpublishable, "conflicted", stats.Conflicted,
+					"poisonSkipped", stats.PoisonSkipped,
 					"stranded", stats.Stranded, "strandRechecks", stats.StrandRechecks,
 					"agedOut", stats.AgedOut, "agedChecked", stats.AgedChecked,
 					"agedDeferred", stats.AgedDeferred,
 					"capDeferred", stats.CapDeferred, "errors", stats.Errors)
 			} else {
 				r.logger.Info("resync sweep clean", "listed", stats.Listed,
-					"handoffs", stats.Handoffs, "poisonSkipped", stats.PoisonSkipped,
+					"handoffs", stats.Handoffs, "conflicted", stats.Conflicted,
+					"poisonSkipped", stats.PoisonSkipped,
 					"agedOut", stats.AgedOut, "agedChecked", stats.AgedChecked,
 					"agedDeferred", stats.AgedDeferred)
 			}
@@ -755,6 +761,12 @@ func (r *Resync) assembleCandidate(ctx context.Context, g *logSeals, stats *Swee
 				r.logger.Info("stranded checkpoint now anchored", "key", key,
 					"strandedSince", e.since.UTC().Format(time.RFC3339))
 			}
+			return assembled{}, 0, true
+		case StatusConflicted:
+			// Final for the whole log, in the window or past it: not a
+			// strand and not poison, and no lower massif can publish.
+			// The consumer logs the drop; the sweep only counts it.
+			stats.Conflicted++
 			return assembled{}, 0, true
 		case StatusChainNotConfigured:
 			// Unverifiable, not unanchored (D3): this publisher cannot read

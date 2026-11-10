@@ -175,3 +175,43 @@ func TestFinishGroupVirginRevertHandsToHealthySweep(t *testing.T) {
 		t.Fatalf("virgin-revert handoff must be recorded")
 	}
 }
+
+// TestFinishGroupConflictedDropsTheLogsWork: a conflicted log is never
+// published again, so its queued checkpoints are all acked: the primary and
+// every subsumed sibling, with or without the resync sweep.
+func TestFinishGroupConflictedDropsTheLogsWork(t *testing.T) {
+	q, acked := ackRecorder(t)
+	q.finishGroup(context.Background(), group(), publisher.PublishResult{Status: publisher.StatusConflicted})
+	got := acked()
+	for _, want := range []string{"lease-p", "lease-s0", "lease-s1"} {
+		if !has(got, want) {
+			t.Fatalf("acked %v, want %s acked", got, want)
+		}
+	}
+}
+
+// TestFinishGroupFirstCheckpointRevertOnRegisteredLogIsTerminal: a first
+// checkpoint (assembled against a log with no on-chain state) whose revert
+// leaves the log registered on chain lost a race to another registration.
+// It is not retried: the log is no longer virgin, and univocity's
+// authority check decides whether the log's next publish goes ahead or the
+// log is conflicted.
+func TestFinishGroupFirstCheckpointRevertOnRegisteredLogIsTerminal(t *testing.T) {
+	assembled := publisher.PublishResult{OnchainSize: 0, SealedSize: 10}
+	for name, c := range map[string]struct {
+		reread uint64
+		acked  bool
+	}{
+		"log registered meanwhile": {reread: 4, acked: true},
+		"log still unregistered":   {reread: 0, acked: false},
+	} {
+		q, acked := ackRecorder(t)
+		res := publisher.FinalizeResult(assembled, publisher.SubmitResult{
+			Outcome: publisher.OutcomeReverted, Reason: "InvalidPaymentReceipt", OnchainSize: c.reread,
+		})
+		q.finishGroup(context.Background(), group(), res)
+		if got := has(acked(), "lease-p"); got != c.acked {
+			t.Fatalf("%s: primary acked=%v, want %v", name, got, c.acked)
+		}
+	}
+}

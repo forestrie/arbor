@@ -9,6 +9,7 @@ require (
 	github.com/forestrie/arbor/services/pkgs/publishproof v0.0.0
 	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0
 	github.com/forestrie/go-merklelog/massifs v0.0.3
+	github.com/fxamacker/cbor/v2 v2.9.0
 	github.com/prometheus/client_golang v1.23.2
 )
 
@@ -31,7 +32,6 @@ require (
 	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000 // indirect
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/forestrie/go-univocity v0.0.0-00010101000000-000000000000 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect

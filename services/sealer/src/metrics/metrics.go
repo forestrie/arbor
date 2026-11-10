@@ -102,10 +102,11 @@ func (m *Metrics) RecordAck(success bool) {
 }
 
 // IncCheckpointDeferred increments the checkpoint-deferred counter for the given
-// reason ("pending" = no covering delegation yet; "expired" = lease expired).
+// reason ("pending" = no covering delegation yet; "expired" = lease expired;
+// "authority_pending" = univocity has not anchored the log).
 func (m *Metrics) IncCheckpointDeferred(reason string) {
 	switch reason {
-	case "pending", "expired":
+	case "pending", "expired", "authority_pending":
 	default:
 		reason = "pending"
 	}

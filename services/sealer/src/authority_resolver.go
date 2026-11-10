@@ -2,7 +2,6 @@ package sealer
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,34 +13,43 @@ import (
 )
 
 // AuthorityBinding is the authority univocity resolves for a log: the
-// authoritative root key plus the chain binding. The sealer verifies the
-// (untrusted) delegation certificate locally against SigningKey; the actual
-// authorization decision is that local verification, not this lookup.
+// authoritative root key, and whether the answer is final. The chain binding
+// comes from public R2 genesis, never from univocity (devdocs ADR-0047). The
+// sealer verifies the (untrusted) delegation certificate locally against
+// SigningKey; the actual authorization decision is that local verification,
+// not this lookup.
 type AuthorityBinding struct {
-	SigningKey      LogSigningKey
-	RootLogIDHex    string
-	ChainID         string
-	ContractAddress string
-	Source          string
+	SigningKey LogSigningKey
+	// Final is univocity's word that the answer cannot change.
+	Final bool
 }
 
-// AuthorityResolver asks the trusted univocity service for the authoritative
-// root key (and chain binding) of a log, resolving cold logs from the
-// chain-valid grant chain. It is a non-mutating lookup keyed by logId; the
-// delegation certificate is never sent.
+// AuthorityResolver asks univocity, the only source of root keys (devdocs
+// ADR-0075 decision 5), for the root key of a log. The forest's chain
+// binding comes from public R2 genesis, never from univocity (ADR-0047). It is a
+// non-mutating lookup keyed by logId; the delegation certificate is never
+// sent. It returns a key only for a log univocity reports anchored with no
+// ancestor blocking it. Otherwise it fails with ErrAuthorityPending, which is
+// transient, or ErrLogConflicted, which is final.
 type AuthorityResolver interface {
 	ResolveAuthority(ctx context.Context, logIdHex string) (AuthorityBinding, error)
 }
 
-// authorityResponse mirrors univocity's GET /api/logs/{logId}/authority output.
+// Univocity's authority states that the sealer acts on; every other state
+// (reserved, committed, sequenced) is pending.
+const (
+	authorityAnchored   = "anchored"
+	authorityConflicted = "conflicted"
+)
+
+// authorityResponse mirrors univocity's GET /api/logs/{logId}/authority
+// output (arbor services/univocity handlers.go).
 type authorityResponse struct {
-	LogID     []byte `cbor:"logId,omitempty"`
-	RootLogID []byte `cbor:"rootLogId,omitempty"`
+	State     string `cbor:"state"`
 	Alg       int64  `cbor:"alg,omitempty"`
 	Key       []byte `cbor:"key,omitempty"`
-	ChainID   string `cbor:"chainId,omitempty"`
-	Contract  string `cbor:"contract,omitempty"`
-	Source    string `cbor:"source,omitempty"`
+	BlockedBy []byte `cbor:"blockedBy,omitempty"`
+	Final     bool   `cbor:"final"`
 }
 
 // AuthorityStatusError reports a non-200 authority response with its HTTP
@@ -72,7 +80,8 @@ type HTTPAuthorityResolver struct {
 	HTTPClient *HTTPClient
 }
 
-// ResolveAuthority fetches the authoritative root key + chain binding for a log.
+// ResolveAuthority fetches the root key for an anchored log; see
+// AuthorityResolver.
 func (c *HTTPAuthorityResolver) ResolveAuthority(
 	ctx context.Context,
 	logIdHex string,
@@ -119,21 +128,23 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 		}
 	}
 
-	signingKey, err := LogSigningKeyFromTrustRootCBOR(body)
-	if err != nil {
-		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
-	}
-
 	var record authorityResponse
 	if err := cbor.Unmarshal(body, &record); err != nil {
 		return AuthorityBinding{}, fmt.Errorf("decode authority response: %w", err)
 	}
-	rootUUID := logid.FromPaddedWire32(record.RootLogID)
-	return AuthorityBinding{
-		SigningKey:      signingKey,
-		RootLogIDHex:    hex.EncodeToString(rootUUID[:]),
-		ChainID:         strings.TrimSpace(record.ChainID),
-		ContractAddress: strings.TrimSpace(record.Contract),
-		Source:          strings.TrimSpace(record.Source),
-	}, nil
+	switch {
+	case record.State == authorityConflicted:
+		return AuthorityBinding{}, fmt.Errorf("%w: log %s", ErrLogConflicted, logIdHex)
+	case record.State != authorityAnchored:
+		return AuthorityBinding{}, fmt.Errorf("%w: log %s is %q", ErrAuthorityPending, logIdHex, record.State)
+	case len(record.BlockedBy) > 0:
+		return AuthorityBinding{}, fmt.Errorf("%w: log %s is blocked by ancestor %s",
+			ErrAuthorityPending, logIdHex, logid.FromPaddedWire32(record.BlockedBy))
+	}
+
+	signingKey, err := logSigningKeyFromAlgKey(record.Alg, record.Key)
+	if err != nil {
+		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
+	}
+	return AuthorityBinding{SigningKey: signingKey, Final: record.Final}, nil
 }

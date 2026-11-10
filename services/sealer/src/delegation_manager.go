@@ -3,6 +3,7 @@ package sealer
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -20,6 +21,11 @@ const (
 	defaultRenewBefore = 5 * time.Minute
 	// defaultMaxLeases is the maximum number of per-log leases to cache.
 	defaultMaxLeases = 1000
+	// defaultAuthorityRecheck is how long a lease taken on an anchored
+	// answer that is not yet final is used before univocity is asked again
+	// (devdocs ADR-0075: such answers are cached only briefly, so a
+	// conflict takes effect promptly).
+	defaultAuthorityRecheck = 30 * time.Second
 )
 
 // leaseEntry wraps a lease with its key for LRU eviction.
@@ -31,7 +37,6 @@ type leaseEntry struct {
 // DelegationLeaseManager manages per-log, time-limited delegation leases
 // for the sealer process. Uses LRU eviction when the cache is full.
 type DelegationLeaseManager struct {
-	trustRoot    TrustRootClient
 	resolver     AuthorityResolver
 	issuer       DelegationIssuer
 	erc1271      delegationcert.ERC1271Verifier
@@ -42,10 +47,19 @@ type DelegationLeaseManager struct {
 	ttl          time.Duration
 	renewBefore  time.Duration
 	delegateKeys *DelegateKeySet
+	// conflicted holds the logs univocity reported conflicted. The answer is
+	// final, so such a log is refused without asking again. Conflicts are
+	// rare alarms, so the set is not bounded.
+	conflicted map[string]struct{}
+	// authorityRecheck bounds how long a lease is used on a non-final
+	// answer before univocity is asked again.
+	authorityRecheck time.Duration
 }
 
+// NewDelegationLeaseManager returns a manager that takes root keys only from
+// resolver (univocity) and certificates from issuer.
 func NewDelegationLeaseManager(
-	trustRoot TrustRootClient,
+	resolver AuthorityResolver,
 	issuer DelegationIssuer,
 	ttl, renewBefore time.Duration,
 ) *DelegationLeaseManager {
@@ -56,32 +70,31 @@ func NewDelegationLeaseManager(
 		renewBefore = defaultRenewBefore
 	}
 	return &DelegationLeaseManager{
-		trustRoot:   trustRoot,
-		issuer:      issuer,
-		leases:      make(map[string]*list.Element),
-		lru:         list.New(),
-		maxLeases:   defaultMaxLeases,
-		ttl:         ttl,
-		renewBefore: renewBefore,
+		resolver:         resolver,
+		issuer:           issuer,
+		conflicted:       make(map[string]struct{}),
+		authorityRecheck: defaultAuthorityRecheck,
+		leases:           make(map[string]*list.Element),
+		lru:              list.New(),
+		maxLeases:        defaultMaxLeases,
+		ttl:              ttl,
+		renewBefore:      renewBefore,
 	}
 }
 
-// SetAuthorityResolver enables the trusted univocity authority path. When set,
-// the manager resolves a log's root key (and chain binding) by logId from
-// univocity (which can resolve cold logs from the grant chain) rather than the
-// legacy trust-root-by-logId lookup.
+// SetERC1271Verifier sets the verifier for KS256 smart-account delegations.
 func (m *DelegationLeaseManager) SetERC1271Verifier(v delegationcert.ERC1271Verifier) {
 	m.erc1271 = v
-}
-
-func (m *DelegationLeaseManager) SetAuthorityResolver(a AuthorityResolver) {
-	m.resolver = a
 }
 
 // EnsureValidForLog returns a delegation lease for a specific log that is not
 // expired and has at least renewBefore remaining lifetime. If no such lease
 // exists, it requests a new one from the delegation issuer and verifies it
-// against the trust root before caching.
+// against the root key univocity reports before caching. A log univocity
+// has not anchored fails with ErrAuthorityPending; one it reported
+// conflicted fails with ErrLogConflicted, now and on every later call. A
+// cached lease taken on an answer that was not final is reused only after
+// univocity confirms the log again, at most every authorityRecheck.
 func (m *DelegationLeaseManager) EnsureValidForLog(
 	ctx context.Context,
 	httpClient *HTTPClient,
@@ -93,12 +106,16 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if m.issuer == nil || (m.trustRoot == nil && m.resolver == nil) {
+	if m.issuer == nil || m.resolver == nil {
 		return nil, fmt.Errorf("delegation seams not configured")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if _, ok := m.conflicted[logIdHex]; ok {
+		return nil, fmt.Errorf("%w: log %s", ErrLogConflicted, logIdHex)
+	}
 
 	now := time.Now().UTC()
 
@@ -113,6 +130,14 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		remaining := time.Until(lease.ExpiresAt)
 		if remaining >= m.renewBefore && now.Before(lease.ExpiresAt) &&
 			leaseCoversMMRRange(lease, mmrStart, mmrEnd) {
+			if err := m.recheckAuthority(ctx, logIdHex, lease, now); err != nil {
+				if errors.Is(err, ErrLogConflicted) {
+					m.dropLease(logIdHex)
+					m.markConflicted(logger, logIdHex, err)
+				}
+				return nil, err
+			}
+			// A no-op when the lease left the cache during a recheck.
 			m.lru.MoveToFront(elem)
 			return lease, nil
 		}
@@ -129,9 +154,12 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		return nil, ErrNoStandingDelegateKeys
 	}
 	lease, err := requestLogDelegationLease(
-		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
+		ctx, httpClient, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
 		logIdHex, mmrStart, mmrEnd, m.delegateKeys,
 	)
+	if errors.Is(err, ErrLogConflicted) {
+		m.markConflicted(logger, logIdHex, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -215,3 +243,44 @@ func leaseCoversMMRRange(lease *DelegationLease, mmrStart, mmrEnd uint64) bool {
 
 // NOTE: We intentionally avoid package-level global state. Construct a
 // DelegationLeaseManager at service startup and pass it through call-sites.
+
+// recheckAuthority asks univocity again about a cached lease's log when the
+// answer the lease was taken on was not final and authorityRecheck has
+// passed. Any answer but anchored is an error, and the lease is not used.
+// It is called holding m.mu and releases it while univocity answers, so a
+// slow answer about one log does not hold up another log's cached lease
+// (devdocs ADR-0075: without univocity, sealing stops only for the logs
+// whose answer must be asked again).
+func (m *DelegationLeaseManager) recheckAuthority(
+	ctx context.Context, logIdHex string, lease *DelegationLease, now time.Time,
+) error {
+	if lease.authorityFinal || now.Sub(lease.authorityCheckedAt) < m.authorityRecheck {
+		return nil
+	}
+	m.mu.Unlock()
+	binding, err := m.resolver.ResolveAuthority(ctx, logIdHex)
+	m.mu.Lock()
+	if err != nil {
+		return fmt.Errorf("recheck authority: %w", err)
+	}
+	lease.authorityFinal = binding.Final
+	lease.authorityCheckedAt = now
+	return nil
+}
+
+// dropLease removes logIdHex's cached lease, if any. It is called holding
+// m.mu.
+func (m *DelegationLeaseManager) dropLease(logIdHex string) {
+	if elem, ok := m.leases[logIdHex]; ok {
+		m.lru.Remove(elem)
+		delete(m.leases, logIdHex)
+	}
+}
+
+// markConflicted records a log univocity reported conflicted, so it is
+// refused from now on without asking again.
+func (m *DelegationLeaseManager) markConflicted(logger *slog.Logger, logIdHex string, err error) {
+	m.conflicted[logIdHex] = struct{}{}
+	logger.Error("log authority conflicted; sealing stopped for good",
+		"log_id", logIdHex, "error", err)
+}

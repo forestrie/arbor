@@ -73,7 +73,7 @@ func TestLeaseCoversMMRRange_WiderProofDoesNotExtendCoverage(t *testing.T) {
 func TestEnsureValidForLog_RejectsCachedLeaseOutsideRange(t *testing.T) {
 	logID := "abcdef0123456789abcdef0123456789"
 	mgr := NewDelegationLeaseManager(
-		&stubTrustRootClient{},
+		&stubAuthorityResolver{},
 		&pendingIssuerStub{},
 		time.Hour,
 		time.Minute,

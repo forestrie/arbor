@@ -330,12 +330,19 @@ func (r *ResyncManager) checkAndReseal(ctx context.Context, lg activeLog) {
 		Metrics:      r.metrics,
 	}
 	if err := CheckpointLog(ctx, svc, logIDBytes, height); err != nil {
-		if errors.Is(err, ErrDelegationPending) || errors.Is(err, ErrDelegationExpired) {
-			r.logger.Info("resync: reseal deferred on delegation; will retry next cycle",
-				"logId", lg.LogIDHex32, "height", height, "headMMRSize", headMMRSize, "sealedSize", sealedSize, "error", err)
-			return
+		switch disposition, reason := ClassifySealError(err); disposition {
+		case SealDeferred:
+			r.logger.Info("resync: reseal deferred; will retry next cycle",
+				"logId", lg.LogIDHex32, "height", height, "headMMRSize", headMMRSize, "sealedSize", sealedSize,
+				"reason", reason, "error", err)
+		case SealDropped:
+			// The lease manager refuses the log from now on without asking
+			// univocity, so later cycles cost no more than this one.
+			r.logger.Info("resync: log not sealed; not retried",
+				"logId", lg.LogIDHex32, "height", height, "reason", reason, "error", err)
+		default:
+			r.logger.Warn("resync: reseal failed", "logId", lg.LogIDHex32, "height", height, "error", err)
 		}
-		r.logger.Warn("resync: reseal failed", "logId", lg.LogIDHex32, "height", height, "error", err)
 		return
 	}
 	r.logger.Info("resync: re-drove seal for lagging log",

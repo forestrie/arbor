@@ -444,7 +444,8 @@ func (f *avForest) grantContent(id logid.UUID) [32]byte {
 // publishes it.
 func (f *avForest) publish(id logid.UUID, l *avLog, what string) {
 	f.t.Helper()
-	calldata, _, err := publishproof.AssemblePublish(f.t.Context(), avGetter(f.objects.objects), f.R, id,
+	calldata, _, err := publishproof.AssemblePublish(f.t.Context(), avGetter(f.objects.objects),
+		publishproof.NewGrantLeafIndex(), f.R, id,
 		l.reader(), 0, f.authority.reader(), f.logState(id), f.logState(f.R))
 	must(f.t, err)
 	f.chain.publishCheckpoint(calldata, what)

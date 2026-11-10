@@ -77,7 +77,7 @@ func assembleCapturedBootstrap(t *testing.T, client *ethclient.Client, wireFlags
 	authority.commitAndSeal()
 
 	zeroState := LogState{Accumulator: [][32]byte{}, Size: 0}
-	calldata, _, err := AssemblePublish(ctx, grants, rootUUID, rootUUID,
+	calldata, _, err := AssemblePublish(ctx, grants, NewGrantLeafIndex(), rootUUID, rootUUID,
 		authority.reader(), 0, authority.reader(), zeroState, zeroState)
 	require.NoError(t, err)
 
