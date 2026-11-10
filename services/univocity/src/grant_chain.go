@@ -161,14 +161,11 @@ func (a API) ownerRootKey(
 		}
 		return alg, key, nil
 	}
-	if a.Store == nil {
-		return 0, nil, ErrStoreNotConfigured
-	}
-	body, err := a.Store.GetGrant(ctx, forest.R, owner)
+	c, err := a.claimedGrant(ctx, forest.R, owner)
 	if err != nil {
 		return 0, nil, fmt.Errorf("owner grant unavailable: %w", err)
 	}
-	ts, err := decodeTransparentStatement(body)
+	ts, err := decodeTransparentStatement(c.statement)
 	if err != nil {
 		return 0, nil, fmt.Errorf("decode owner grant: %w", err)
 	}
@@ -213,14 +210,14 @@ func (a API) logRootKey(
 		}
 		return alg, key, "chain", nil
 	}
-	if a.Store == nil {
-		return 0, nil, "", ErrStoreNotConfigured
+	c, err := a.claimedGrant(ctx, forest.R, logID)
+	if errors.Is(err, errNoClaim) {
+		return 0, nil, "", notResolved("log %s has no claim in forest %s", logID, forest.R)
 	}
-	body, err := a.Store.GetGrant(ctx, forest.R, logID)
 	if err != nil {
 		return 0, nil, "", fmt.Errorf("grant unavailable: %w", err)
 	}
-	ts, err := decodeTransparentStatement(body)
+	ts, err := decodeTransparentStatement(c.statement)
 	if err != nil {
 		return 0, nil, "", fmt.Errorf("decode grant: %w", err)
 	}

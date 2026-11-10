@@ -89,6 +89,17 @@ func (a API) resolveForestForLog(
 				"logId", logID.String(), "R", r.String())
 		}
 	}
+	// A reserved log is in no public index; its live reservation names its
+	// forest. It is not cached: the reservation may lapse.
+	if r, held, err := a.liveReservationRoot(ctx, logID); err != nil {
+		return ForestEntry{}, nil, fmt.Errorf("reservation lookup: %w", err)
+	} else if held {
+		forest, err := a.loadForest(ctx, r)
+		if err != nil {
+			return ForestEntry{}, nil, fmt.Errorf("load reserved forest: %w", err)
+		}
+		return a.withReader(forest)
+	}
 	// R case: a forest root resolves by its derived genesis key even with no
 	// index entry (canopy writes genesis directly when the forward is unarmed).
 	forest, err := a.loadForest(ctx, logID)
@@ -130,14 +141,17 @@ func (a API) resolveWithHint(
 		a.cachePositive(logID, forest)
 		return forest, nil
 	}
-	if _, err := a.Store.GetGrant(ctx, hint, logID); err != nil {
-		if isStoreMiss(err) {
-			return ForestEntry{}, notResolved(
-				"log %s has no stored grant in hinted forest %s", logID, hint)
-		}
+	c, err := a.claimedGrant(ctx, hint, logID)
+	if errors.Is(err, errNoClaim) {
+		return ForestEntry{}, notResolved(
+			"log %s has no claim in hinted forest %s", logID, hint)
+	}
+	if err != nil {
 		return ForestEntry{}, fmt.Errorf("hinted grant lookup: %w", err)
 	}
-	a.cachePositive(logID, forest)
+	if c.state == stateCommitted {
+		a.cachePositive(logID, forest)
+	}
 	return forest, nil
 }
 

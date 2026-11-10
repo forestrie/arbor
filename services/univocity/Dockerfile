@@ -12,10 +12,13 @@ WORKDIR /build
 
 COPY univocity/src/go.mod univocity/src/go.sum* ./univocity/src/
 
+COPY pkgs/publishproof ./pkgs/publishproof
+COPY pkgs/delegationcert ./pkgs/delegationcert
 COPY pkgs/s3storage ./pkgs/s3storage
 COPY pkgs/logid ./pkgs/logid
 
 COPY _deps/go-sigv4 ./_deps/go-sigv4
+COPY _deps/go-univocity ./_deps/go-univocity
 COPY _deps/go-merklelog/bloom ./_deps/go-merklelog/bloom
 COPY _deps/go-merklelog/massifs ./_deps/go-merklelog/massifs
 COPY _deps/go-merklelog/mmr ./_deps/go-merklelog/mmr

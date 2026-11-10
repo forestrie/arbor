@@ -11,11 +11,20 @@ import (
 
 const maxRequestBody = 512 * 1024
 
-// postGrantRequest carries a creation grant (SCITT transparent statement) and
-// optionally the forest root it belongs to (the register path's bootstrap-logid).
+// postGrantRequest carries a creation grant (SCITT transparent statement),
+// optionally the forest root it belongs to (the register path's
+// bootstrap-logid), and the caller's intent: reserve (prepare) or commit
+// (register-grant).
 type postGrantRequest struct {
 	RootLogID []byte `cbor:"rootLogId,omitempty"`
 	Statement []byte `cbor:"statement"`
+	Intent    string `cbor:"intent"`
+}
+
+// postGrantResponse reports the claim a grant post holds.
+type postGrantResponse struct {
+	State     string `cbor:"state"`
+	ExpiresAt int64  `cbor:"expiresAt,omitempty"`
 }
 
 func readBody(r *http.Request) ([]byte, error) {
@@ -162,9 +171,10 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req postGrantRequest
-	if err := cbor.Unmarshal(body, &req); err != nil || len(req.Statement) == 0 {
+	if err := cbor.Unmarshal(body, &req); err != nil || len(req.Statement) == 0 ||
+		(req.Intent != intentReserve && req.Intent != intentCommit) {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank", "invalid request",
-			"expect CBOR { statement, rootLogId? }")
+			"expect CBOR { statement, intent: reserve|commit, rootLogId? }")
 		return
 	}
 	ts, err := decodeTransparentStatement(req.Statement)
@@ -197,32 +207,52 @@ func (a API) handlePostGrant(w http.ResponseWriter, r *http.Request) {
 			"grant chain invalid", err.Error())
 		return
 	}
-	created, existing, err := a.Store.IndexCreate(r.Context(), subject, root)
-	if err != nil {
-		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "index create failed", err.Error())
-		return
-	}
-	if !created && existing != root {
-		a.writeProblem(w, r, http.StatusConflict, "about:blank",
-			"logId belongs to another forest",
-			"global logId->R uniqueness violated")
-		return
-	}
 	class, err := grantClassFromFlags(ts.Grant.Flags)
 	if err != nil {
 		a.writeProblem(w, r, http.StatusBadRequest, "about:blank",
 			"invalid grant class", err.Error())
 		return
 	}
-	if err := a.Store.PutGrant(r.Context(), root, subject, class, req.Statement); err != nil {
-		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "store grant failed", err.Error())
+	var res claimResult
+	if req.Intent == intentReserve {
+		res, err = a.reserveClaim(r.Context(), root, ts)
+	} else {
+		res, err = a.commitClaim(r.Context(), root, ts, class)
+	}
+	switch {
+	case errors.Is(err, errGrantAlreadyClaimed):
+		a.writeProblem(w, r, http.StatusConflict, "about:blank",
+			"grant-already-claimed", "a different create grant has claimed log "+subject.String())
+		return
+	case errors.Is(err, errLogInOtherForest):
+		a.writeProblem(w, r, http.StatusConflict, "about:blank",
+			"logId belongs to another forest", err.Error())
+		return
+	case err != nil:
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank", "claim failed", err.Error())
 		return
 	}
-	if created {
+	a.writeClaim(w, r, res)
+}
+
+func (a API) writeClaim(w http.ResponseWriter, r *http.Request, res claimResult) {
+	resp := postGrantResponse{State: res.state}
+	if res.state == stateReserved {
+		resp.ExpiresAt = res.expiresAt.Unix()
+	}
+	out, err := canonicalCBOR.Marshal(resp)
+	if err != nil {
+		a.writeProblem(w, r, http.StatusInternalServerError, "about:blank",
+			"encode failed", err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/cbor")
+	if res.created {
 		w.WriteHeader(http.StatusCreated)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
+	_, _ = w.Write(out)
 }
 
 // deriveForestRoot determines the forest root R for a posted grant: explicit
@@ -243,8 +273,15 @@ func (a API) deriveForestRoot(
 		return logid.Zero, false
 	}
 	root, found, err := a.Store.IndexGet(r.Context(), ts.Grant.OwnerLogID)
-	if err != nil || !found {
+	if err != nil {
 		return logid.Zero, false
+	}
+	if !found {
+		// An owner that is itself only reserved is found by its reservation.
+		root, found, err = a.liveReservationRoot(r.Context(), ts.Grant.OwnerLogID)
+		if err != nil || !found {
+			return logid.Zero, false
+		}
 	}
 	return root, true
 }

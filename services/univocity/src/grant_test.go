@@ -207,16 +207,56 @@ type fakeStore struct {
 	genesis map[string][]byte
 	grants  map[string][]byte
 	index   map[string]logid.UUID
+	// reservations maps subject -> record; versions counts its writes.
+	reservations map[string][]byte
+	versions     map[string]int
 	// listCalls pins the plan-2607-10 contract: resolution never enumerates.
 	listCalls int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		genesis: map[string][]byte{},
-		grants:  map[string][]byte{},
-		index:   map[string]logid.UUID{},
+		genesis:      map[string][]byte{},
+		grants:       map[string][]byte{},
+		index:        map[string]logid.UUID{},
+		reservations: map[string][]byte{},
+		versions:     map[string]int{},
 	}
+}
+
+func (s *fakeStore) GetReservation(_ context.Context, subject logid.UUID) ([]byte, string, error) {
+	b, ok := s.reservations[subject.String()]
+	if !ok {
+		return nil, "", errStoreMiss
+	}
+	return b, strconv.Itoa(s.versions[subject.String()]), nil
+}
+
+func (s *fakeStore) PutReservation(_ context.Context, subject logid.UUID, body []byte, version string) error {
+	k := subject.String()
+	_, exists := s.reservations[k]
+	if (version == "" && exists) || (version != "" && (!exists || version != strconv.Itoa(s.versions[k]))) {
+		return ErrReservationChanged
+	}
+	s.reservations[k] = body
+	s.versions[k]++
+	return nil
+}
+
+func (s *fakeStore) DeleteReservation(_ context.Context, subject logid.UUID) error {
+	delete(s.reservations, subject.String())
+	return nil
+}
+
+func (s *fakeStore) ListReservations(_ context.Context) ([]logid.UUID, error) {
+	var out []logid.UUID
+	for k := range s.reservations {
+		id, err := logid.ParseUUIDString(k)
+		if err == nil {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeStore) grantStoreKey(r, subject logid.UUID, class GrantClass) string {
@@ -249,9 +289,12 @@ func (s *fakeStore) GetGrant(_ context.Context, r, subject logid.UUID) ([]byte, 
 	return nil, errStoreMiss
 }
 
-func (s *fakeStore) PutGrant(_ context.Context, r, subject logid.UUID, class GrantClass, body []byte) error {
+func (s *fakeStore) PutGrantIfAbsent(_ context.Context, r, subject logid.UUID, class GrantClass, body []byte) (bool, error) {
+	if _, err := s.GetGrant(context.Background(), r, subject); err == nil {
+		return false, nil
+	}
 	s.grants[s.grantStoreKey(r, subject, class)] = body
-	return nil
+	return true, nil
 }
 
 func (s *fakeStore) IndexGet(_ context.Context, subject logid.UUID) (logid.UUID, bool, error) {
@@ -615,7 +658,7 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 
 	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	stmt := buildGrantStatement(t, boot, childGrant)
-	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt})
+	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt, Intent: intentCommit})
 
 	post := func(body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/grants", bytes.NewReader(body))
@@ -643,7 +686,7 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	store.genesis[R2.String()] = buildGenesisDoc(t, R2, boot, 84532, addr)
 	childGrant2 := Grant{LogID: A, OwnerLogID: R2, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	stmt2 := buildGrantStatement(t, boot, childGrant2)
-	reqBody2, _ := cbor.Marshal(postGrantRequest{RootLogID: R2[:], Statement: stmt2})
+	reqBody2, _ := cbor.Marshal(postGrantRequest{RootLogID: R2[:], Statement: stmt2, Intent: intentCommit})
 	if rec := post(reqBody2); rec.Code != http.StatusConflict {
 		t.Fatalf("cross-forest reuse want 409 got %d: %s", rec.Code, rec.Body.String())
 	}

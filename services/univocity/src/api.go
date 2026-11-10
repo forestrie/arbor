@@ -3,6 +3,7 @@ package univocity
 import (
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 // API provides the HTTP API for the univocity trust-root service.
@@ -26,6 +27,31 @@ type API struct {
 	AdminToken string
 	// Bootstrap caches per-(chainId,contract) on-chain bootstrap keys.
 	Bootstrap *bootstrapCache
+
+	// ReservationTTL is how long a claim made by prepare lasts unless its
+	// grant is committed (UNIVOCITY_RESERVATION_TTL); zero means
+	// DefaultReservationTTL.
+	ReservationTTL time.Duration
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
+}
+
+// DefaultReservationTTL is the lapse time of a reservation (devdocs
+// ADR-0075 decision 2).
+const DefaultReservationTTL = 7 * 24 * time.Hour
+
+func (a API) reservationTTL() time.Duration {
+	if a.ReservationTTL > 0 {
+		return a.ReservationTTL
+	}
+	return DefaultReservationTTL
+}
+
+func (a API) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }
 
 // RegisterRoutes wires scoped and logId-only endpoints onto the mux.

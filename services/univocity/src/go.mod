@@ -1,25 +1,27 @@
 module github.com/forestrie/arbor/services/univocity
 
-go 1.24.0
-
-toolchain go1.24.4
+go 1.24.4
 
 require (
 	github.com/ethereum/go-ethereum v1.17.1
 	github.com/forestrie/arbor/services/pkgs/logid v0.0.0-00010101000000-000000000000
+	github.com/forestrie/arbor/services/pkgs/publishproof v0.0.0-00010101000000-000000000000
 	github.com/forestrie/arbor/services/pkgs/s3storage v0.0.0-00010101000000-000000000000
 	github.com/forestrie/go-merklelog/massifs v0.0.3
 	github.com/fxamacker/cbor/v2 v2.9.0
 )
 
 replace (
+	github.com/forestrie/arbor/services/pkgs/delegationcert => ../../pkgs/delegationcert
 	github.com/forestrie/arbor/services/pkgs/logid => ../../pkgs/logid
+	github.com/forestrie/arbor/services/pkgs/publishproof => ../../pkgs/publishproof
 	github.com/forestrie/arbor/services/pkgs/s3storage => ../../pkgs/s3storage
 	github.com/forestrie/go-merklelog/bloom => ../../_deps/go-merklelog/bloom
 	github.com/forestrie/go-merklelog/massifs => ../../_deps/go-merklelog/massifs
 	github.com/forestrie/go-merklelog/mmr => ../../_deps/go-merklelog/mmr
 	github.com/forestrie/go-merklelog/urkle => ../../_deps/go-merklelog/urkle
 	github.com/forestrie/go-sigv4 => ../../_deps/go-sigv4
+	github.com/forestrie/go-univocity => ../../_deps/go-univocity
 )
 
 require (
@@ -30,25 +32,36 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/consensys/gnark-crypto v0.18.1 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect
+	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckarep/golang-set/v2 v2.6.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.6 // indirect
+	github.com/forestrie/arbor/services/pkgs/delegationcert v0.0.0-00010101000000-000000000000 // indirect
+	github.com/forestrie/go-merklelog/bloom v0.0.0-00010101000000-000000000000 // indirect
+	github.com/forestrie/go-merklelog/mmr v0.0.2 // indirect
+	github.com/forestrie/go-merklelog/urkle v0.0.0-00010101000000-000000000000 // indirect
 	github.com/forestrie/go-sigv4 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/forestrie/go-univocity v0.0.0-00010101000000-000000000000 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
+	github.com/ldclabs/cose/go v0.0.0-20221214142927-d22c1cfc2154 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/supranational/blst v0.3.16 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
+	github.com/veraison/go-cose v1.1.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.39.0 // indirect
 	go.opentelemetry.io/otel/metric v1.39.0 // indirect
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/sys v0.41.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

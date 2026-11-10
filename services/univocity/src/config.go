@@ -40,6 +40,9 @@ type Config struct {
 	APIToken string
 	// AdminToken authenticates destructive admin endpoints.
 	AdminToken string
+	// ReservationTTL is how long a claim made by prepare lasts unless its
+	// grant is committed.
+	ReservationTTL time.Duration
 }
 
 var levelAliases = map[string]slog.Level{
@@ -101,6 +104,11 @@ func LoadConfig() (Config, error) {
 		)
 	}
 
+	reservationTTL := getDuration("UNIVOCITY_RESERVATION_TTL", DefaultReservationTTL)
+	if reservationTTL <= 0 {
+		return Config{}, errors.New("UNIVOCITY_RESERVATION_TTL must be a positive duration")
+	}
+
 	negTTL := getDurationSeconds("LOG_FOREST_NEG_TTL", 60)
 	cacheSize := getIntPositive("LOG_FOREST_CACHE_SIZE", 10000)
 
@@ -119,6 +127,7 @@ func LoadConfig() (Config, error) {
 		DeprecatedScanIntervalSet: strings.TrimSpace(os.Getenv("GENESIS_SCAN_MIN_INTERVAL")) != "",
 		APIToken:                  strings.TrimSpace(os.Getenv("UNIVOCITY_API_TOKEN")),
 		AdminToken:                strings.TrimSpace(os.Getenv("UNIVOCITY_ADMIN_TOKEN")),
+		ReservationTTL:            reservationTTL,
 	}, nil
 }
 
@@ -163,6 +172,7 @@ func (c Config) LogConfig(logger *slog.Logger) {
 		"LOG_FOREST_CACHE_SIZE", c.LogForestCacheSize,
 		"UNIVOCITY_API_TOKEN", nonSecret(c.APIToken),
 		"UNIVOCITY_ADMIN_TOKEN", nonSecret(c.AdminToken),
+		"UNIVOCITY_RESERVATION_TTL", c.ReservationTTL,
 	)
 }
 

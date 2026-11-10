@@ -3,6 +3,7 @@ package univocity
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseRPCURLs(t *testing.T) {
@@ -50,4 +51,33 @@ func TestParseRPCURLs(t *testing.T) {
 			t.Fatalf("unexpected map: %v", m)
 		}
 	})
+}
+
+func setRequiredEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("UNIVOCITY_RPC_URLS", `{"84532":"http://localhost:8545"}`)
+	t.Setenv("GENESIS_R2_URL", "https://r2.example")
+	t.Setenv("AWS_ACCESS_KEY_ID", "akid")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+}
+
+func TestLoadConfig_ReservationTTL(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ReservationTTL != DefaultReservationTTL {
+		t.Fatalf("default TTL %v, want %v", cfg.ReservationTTL, DefaultReservationTTL)
+	}
+
+	t.Setenv("UNIVOCITY_RESERVATION_TTL", "36h")
+	if cfg, err = LoadConfig(); err != nil || cfg.ReservationTTL != 36*time.Hour {
+		t.Fatalf("TTL %v err %v, want 36h", cfg.ReservationTTL, err)
+	}
+
+	t.Setenv("UNIVOCITY_RESERVATION_TTL", "0s")
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("a zero TTL must be refused")
+	}
 }

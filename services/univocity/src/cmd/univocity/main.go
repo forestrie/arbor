@@ -14,6 +14,10 @@ import (
 	"github.com/forestrie/arbor/services/univocity"
 )
 
+// reservationSweepInterval paces the removal of lapsed reservations. Reads
+// treat a lapsed reservation as absent, so this only bounds storage.
+const reservationSweepInterval = 10 * time.Minute
+
 var (
 	version   string
 	commit    string
@@ -95,15 +99,17 @@ func main() {
 	setupHealthChecks(mux)
 
 	api := univocity.API{
-		Logger:     logger,
-		Pool:       pool,
-		Forests:    univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
-		Store:      univocity.NewS3Store(s3Client),
-		APIToken:   cfg.APIToken,
-		AdminToken: cfg.AdminToken,
-		Bootstrap:  univocity.NewBootstrapCache(),
+		Logger:         logger,
+		Pool:           pool,
+		Forests:        univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
+		Store:          univocity.NewS3Store(s3Client),
+		APIToken:       cfg.APIToken,
+		AdminToken:     cfg.AdminToken,
+		Bootstrap:      univocity.NewBootstrapCache(),
+		ReservationTTL: cfg.ReservationTTL,
 	}
 	api.RegisterRoutes(mux)
+	go api.RunReservationSweeper(ctx, reservationSweepInterval)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
