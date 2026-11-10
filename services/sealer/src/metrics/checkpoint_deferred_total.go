@@ -7,9 +7,10 @@ import (
 // newCheckpointDeferredTotal creates the sealer_checkpoint_deferred_total counter.
 // Incremented whenever a log's checkpoint is deferred (message intentionally not
 // acked, awaiting queue redelivery) because its delegation is not yet usable.
-// Labels: reason (pending|expired) — "pending" = no covering delegation
-// certificate is available yet (BYOK/advance not pre-submitted); "expired" = the
-// cached lease has expired or is expiring.
+// Labels: reason (pending|expired|authority_pending) — "pending" = no covering
+// delegation certificate is available yet (BYOK/advance not pre-submitted);
+// "expired" = the cached lease has expired or is expiring; "authority_pending"
+// = univocity has not yet anchored the log, so its root key is not used.
 //
 // This is the primary operator signal that seals are stuck on delegation: it
 // (and the paired WARN log) surfaces the condition that is otherwise invisible
