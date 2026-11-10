@@ -19,8 +19,10 @@ import (
 //
 // This is the only question the publisher asks univocity. The forest's
 // chain binding still comes from public R2 genesis (ADR-0047), and a log
-// univocity reports pending is published as usual: its first checkpoint is
-// what anchors it.
+// in any other state is published as usual: the contract checks every
+// publish against the owner's on-chain accumulator, so submitting one
+// early is harmless, and a log's own first checkpoint is what lets
+// univocity compare its registration with its claim.
 type LogAuthority interface {
 	Conflicted(ctx context.Context, logID logid.UUID) (bool, error)
 }

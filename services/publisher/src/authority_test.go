@@ -124,8 +124,8 @@ func TestAssembleConflictedLogIsFinal(t *testing.T) {
 }
 
 // A log univocity does not report conflicted is published as usual, whatever
-// its state: a pending log's first checkpoint is what anchors it. Univocity
-// is asked again for each publish until its answer is final.
+// its state: the contract checks the publish. Univocity is asked again for
+// each publish until its answer is final.
 func TestAssembleAsksUnivocityUntilFinal(t *testing.T) {
 	univ := newFakeUnivocity(t, "sequenced", false)
 	p, grants := authorityPublisher(univ)
