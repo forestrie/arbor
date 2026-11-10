@@ -63,7 +63,8 @@ type Authority struct {
 	// Final is true once the answer cannot change: the forest root once its
 	// contract records it as root; any other log once its first checkpoint
 	// has been compared with its claim and its owner's answer is final too,
-	// since an owner anchored by its leaf can still turn out conflicted.
+	// since an owner anchored by its leaf can still turn out conflicted; and
+	// a committed claim blocked by a conflicted ancestor, which never clears.
 	Final bool
 }
 
@@ -237,7 +238,10 @@ func (a API) childAuthority(
 	}
 	if x.blockedByConflict {
 		// The claim cannot verify through an ancestor the chain recorded
-		// differently, and confers nothing while that ancestor blocks it.
+		// differently, and confers nothing while that ancestor blocks it. A
+		// conflict is final, so a committed claim stays blocked for good; a
+		// reservation can lapse, and its log be claimed elsewhere.
+		x.Final = c.state != stateReserved
 		return x, nil
 	}
 	// Not on chain: the claim must verify to the bootstrap key.

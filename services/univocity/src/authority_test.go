@@ -84,6 +84,42 @@ func TestAuthority_RootOfAContractRootedElsewhereIsConflicted(t *testing.T) {
 	}
 }
 
+// A committed child of a root whose contract records another root can
+// never anchor: no checkpoint of that root can publish there. The conflict
+// is final, so the child's answer is too, with the root as blockedBy;
+// callers stop waiting on it.
+func TestAuthority_CommittedChildOfAConflictedRootIsFinal(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(47)
+	wantStatus(t, f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentCommit),
+		http.StatusCreated, "commit A")
+	f.chain.rootLogId = testLogID(99)
+	f.api.Authorities.evict(f.R) // as the watcher does at the other root's registration
+
+	resp, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusOK, "child authority")
+	if !resp.Final || !bytes.Equal(resp.BlockedBy, f.R[:]) {
+		t.Fatalf("child of a conflicted root reported %+v; want final, blockedBy R", resp)
+	}
+}
+
+// A reservation can lapse and its log be claimed elsewhere, so a reserved
+// child of a conflicted root is not final.
+func TestAuthority_ReservedChildOfAConflictedRootIsNotFinal(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(48)
+	wantStatus(t, f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentReserve),
+		http.StatusCreated, "reserve A")
+	f.chain.rootLogId = testLogID(99)
+	f.api.Authorities.evict(f.R)
+
+	resp, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusOK, "child authority")
+	if resp.Final || !bytes.Equal(resp.BlockedBy, f.R[:]) {
+		t.Fatalf("reserved child of a conflicted root reported %+v; want not final, blockedBy R", resp)
+	}
+}
+
 // publishRoot marks the forest root as published on chain at size. Its first
 // checkpoint makes it the contract's root, and the LogRegistered watcher
 // then drops its answer from before (TestRegistrationWatcher_RootTurnsFinal).
