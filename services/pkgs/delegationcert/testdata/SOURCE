@@ -1,0 +1,14 @@
+KS256 low-s conformance vector.
+
+ks256-low-s.json was copied unmodified from forestrie/protocol PR #25
+(https://github.com/forestrie/protocol/pull/25), branch
+robin/for-603-ks256-low-s-vector, vectors/fixtures/ks256-low-s.json,
+fetched 2026-11-10 because PR #25 is not yet merged to main. The same
+bytes are in univocity/src/testdata/. ks256_low_s_vector_test.go pins
+them:
+
+sha256:
+  3a325aaa1bb296316f3f4ef8e2d8a8ae4c1728c00fc283f3cdd2438a2c9d88dc  ks256-low-s.json
+
+Once protocol#25 merges to main, confirm the bytes on main match this
+hash; if they differ, re-copy and update the pin in both tests.

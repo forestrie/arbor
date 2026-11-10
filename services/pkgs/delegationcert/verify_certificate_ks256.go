@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -72,6 +73,17 @@ func VerifyCertificateSignatureKS256(
 
 	if len(signature) != 65 {
 		return fmt.Errorf("KS256 EOA signature must be 65 bytes, got %d", len(signature))
+	}
+	// Recovery alone accepts both s and n-s, so a high-s signature is the
+	// malleated twin of a valid one and is refused before recovery, as
+	// canopy and univocity's verifyKS256Raw also refuse it. The ERC-1271
+	// path above is untouched: a contract judges its own signature format.
+	// See forestrie/protocol spec/checkpoints-and-receipts.md and
+	// vectors/fixtures/ks256-low-s.json.
+	r := new(big.Int).SetBytes(signature[:32])
+	s := new(big.Int).SetBytes(signature[32:64])
+	if !crypto.ValidateSignatureValues(signature[64], r, s, true) {
+		return fmt.Errorf("KS256 EOA signature values invalid: s must be low-s, v 0 or 1")
 	}
 	pub, err := crypto.SigToPub(hash, signature)
 	if err != nil {
