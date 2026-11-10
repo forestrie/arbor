@@ -13,9 +13,11 @@ import (
 )
 
 // AuthorityBinding is the authority univocity resolves for a log: the
-// authoritative root key plus the chain binding. The sealer verifies the
-// (untrusted) delegation certificate locally against SigningKey; the actual
-// authorization decision is that local verification, not this lookup.
+// authoritative root key, and whether the answer is final. The chain binding
+// comes from public R2 genesis, never from univocity (devdocs ADR-0047). The
+// sealer verifies the (untrusted) delegation certificate locally against
+// SigningKey; the actual authorization decision is that local verification,
+// not this lookup.
 type AuthorityBinding struct {
 	SigningKey LogSigningKey
 	// Final is univocity's word that the answer cannot change.
@@ -78,8 +80,8 @@ type HTTPAuthorityResolver struct {
 	HTTPClient *HTTPClient
 }
 
-// ResolveAuthority fetches the root key and chain binding for an anchored
-// log; see AuthorityResolver.
+// ResolveAuthority fetches the root key for an anchored log; see
+// AuthorityResolver.
 func (c *HTTPAuthorityResolver) ResolveAuthority(
 	ctx context.Context,
 	logIdHex string,

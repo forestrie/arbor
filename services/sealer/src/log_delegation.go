@@ -79,9 +79,8 @@ func requestLogDelegationLease(
 
 	// Resolve the root key by logId, before asking the issuer for anything:
 	// univocity is the only source, and answers only for an anchored log
-	// (ErrAuthorityPending, ErrLogConflicted otherwise). It also returns the
-	// chain binding. The certificate is verified against the key locally
-	// below.
+	// (ErrAuthorityPending, ErrLogConflicted otherwise). The certificate is
+	// verified against the key locally below.
 	binding, err := resolver.ResolveAuthority(ctx, logIdHex)
 	if err != nil {
 		// 404 = the log has no locator at univocity; re-attempting
