@@ -101,6 +101,7 @@ type ks256Forest struct {
 	chain    *chainHarness
 	objects  *memObjectClient
 	grants   mapGetter
+	leaves   *GrantLeafIndex
 	delegate *fixtureSealer
 
 	rootKey   *ecdsa.PrivateKey
@@ -127,6 +128,7 @@ func newKS256Forest(t *testing.T, rootUUID string) *ks256Forest {
 		chain:    deployUnivocityRelease(t, client, laneUnivocityRelease, algKS256, rootAddr.Bytes()),
 		objects:  objects,
 		grants:   mapGetter(objects.objects),
+		leaves:   NewGrantLeafIndex(),
 		delegate: newFixtureSealer(t),
 		rootKey:  rootKey,
 		rootUUID: testLogID(t, rootUUID),
@@ -185,7 +187,7 @@ func (f *ks256Forest) grantContent(id logid.UUID) [32]byte {
 // of l and of R's log, and publishes it.
 func (f *ks256Forest) publish(id logid.UUID, l *fixtureLog, what string) SealedState {
 	f.t.Helper()
-	calldata, sealed, err := AssemblePublish(f.t.Context(), f.grants, f.rootUUID, id,
+	calldata, sealed, err := AssemblePublish(f.t.Context(), f.grants, f.leaves, f.rootUUID, id,
 		l.reader(), 0, f.authority.reader(), f.logState(id), f.logState(f.rootUUID))
 	require.NoError(f.t, err, what)
 	f.chain.publishCheckpoint(calldata, what)

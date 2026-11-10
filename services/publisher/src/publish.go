@@ -97,7 +97,11 @@ func (r PublishResult) ShouldAck() bool {
 // R2 genesis (ADR-0047) and submitting with the gas-only EOA. It is safe for
 // concurrent use.
 type Publisher struct {
-	grants  publishproof.ObjectGetter
+	grants publishproof.ObjectGetter
+	// leaves remembers where each create grant was found in its owner log,
+	// and how far a miss has scanned, so a log's publishes scan its owner
+	// log once.
+	leaves  *publishproof.GrantLeafIndex
 	readers MassifReaderFactory
 	writer  *ChainWriter
 	logger  *slog.Logger
@@ -118,6 +122,7 @@ func NewPublisher(cfg Config, httpClient *HTTPClient, logger *slog.Logger) (*Pub
 	}
 	return &Publisher{
 		grants:  publishproof.NewPublicBucketGetter(cfg.GrantStoreURL, httpClient.GetClient()),
+		leaves:  publishproof.NewGrantLeafIndex(),
 		readers: NewReaders(cfg, httpClient, logger),
 		writer:  writer,
 		logger:  logger,
@@ -209,7 +214,7 @@ func (p *Publisher) Assemble(ctx context.Context, key string) (calldata []byte, 
 
 	// 6. Assemble the publishCheckpoint calldata from public data.
 	calldata, sealed, err := publishproof.AssemblePublish(
-		ctx, p.grants, fc.R, ck.LogID,
+		ctx, p.grants, p.leaves, fc.R, ck.LogID,
 		targetReader, ck.MassifIndex, ownerReader,
 		targetState, ownerState,
 	)
