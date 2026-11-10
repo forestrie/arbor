@@ -129,7 +129,6 @@ func AssemblePublish(
 			"checkpoint %d: chain base %d != on-chain size %d", massifIndex, base, targetOnchain.Size)
 	}
 
-	inclusion := InclusionProof{Index: 0, Path: [][32]byte{}}
 	bootstrap := logID == r && targetOnchain.Size == 0 && ownerOnchain.Size == 0
 	if !bootstrap && ownerOnchain.Size == 0 {
 		return nil, SealedState{}, fmt.Errorf(
@@ -148,36 +147,43 @@ func AssemblePublish(
 			"%w: grant leaf for %s not yet sequenced in owner %s",
 			ErrOwnerNotAnchored, logID, sg.OwnerLogID)
 	}
+
+	// The grant's inclusion is proved against the owner's on-chain
+	// accumulator, except for the root's first checkpoint: the root owns
+	// itself, and its self-grant at leaf 0 is proved against the
+	// accumulator this checkpoint seals. That seal may already cover later
+	// entries, such as children's create grants sequenced once the root's
+	// contract was deployed.
+	proveAt, accumulator := ownerOnchain.Size, ownerOnchain.Accumulator
 	switch {
 	case bootstrap:
-		// The root's first checkpoint proves its own grant at index 0.
 		if gl.MMRIndex != 0 {
 			return nil, SealedState{}, fmt.Errorf(
 				"root grant leaf at mmr index %d, want 0", gl.MMRIndex)
 		}
+		proveAt, accumulator = sealed.MMRSize, sealed.Accumulator
 	case gl.MMRIndex >= ownerOnchain.Size:
 		return nil, SealedState{}, fmt.Errorf(
 			"%w: grant leaf for %s at mmr index %d not within owner on-chain size %d",
 			ErrOwnerNotAnchored, logID, gl.MMRIndex, ownerOnchain.Size)
-	default:
-		// The grant leaf's inclusion path can cross massif boundaries, so read
-		// nodes through a getter that routes each node to its owning massif.
-		ownerHead, err := owner.HeadIndex(ctx, massifstorage.ObjectMassifData)
-		if err != nil {
-			return nil, SealedState{}, fmt.Errorf("owner log head massif: %w", err)
-		}
-		ownerMC, err := massifs.GetMassifContext(ctx, owner, ownerHead)
-		if err != nil {
-			return nil, SealedState{}, fmt.Errorf("read owner massif %d: %w", ownerHead, err)
-		}
-		nodes := newOwnerNodeGetter(ctx, owner, ownerMC.Start.MassifHeight)
-		inclusion, err = BuildInclusionProof(nodes, ownerOnchain.Size, gl.MMRIndex)
-		if err != nil {
-			return nil, SealedState{}, fmt.Errorf("grant inclusion proof: %w", err)
-		}
-		if err := verifyGrantInclusion(gl.Leaf, inclusion, ownerOnchain.Accumulator); err != nil {
-			return nil, SealedState{}, fmt.Errorf("grant inclusion self-check: %w", err)
-		}
+	}
+	// The grant leaf's inclusion path can cross massif boundaries, so read
+	// nodes through a getter that routes each node to its owning massif.
+	ownerHead, err := owner.HeadIndex(ctx, massifstorage.ObjectMassifData)
+	if err != nil {
+		return nil, SealedState{}, fmt.Errorf("owner log head massif: %w", err)
+	}
+	ownerMC, err := massifs.GetMassifContext(ctx, owner, ownerHead)
+	if err != nil {
+		return nil, SealedState{}, fmt.Errorf("read owner massif %d: %w", ownerHead, err)
+	}
+	nodes := newOwnerNodeGetter(ctx, owner, ownerMC.Start.MassifHeight)
+	inclusion, err := BuildInclusionProof(nodes, proveAt, gl.MMRIndex)
+	if err != nil {
+		return nil, SealedState{}, fmt.Errorf("grant inclusion proof: %w", err)
+	}
+	if err := verifyGrantInclusion(gl.Leaf, inclusion, accumulator); err != nil {
+		return nil, SealedState{}, fmt.Errorf("grant inclusion self-check: %w", err)
 	}
 
 	calldata, err := EncodePublishCheckpoint(receipt, inclusion, gl.IDTimestampBe, sg.Grant)

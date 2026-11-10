@@ -43,6 +43,33 @@ func TestKS256RootFirstCheckpointPublishes(t *testing.T) {
 		"the root's recorded rootKey must be the bootstrap address")
 }
 
+// The root is anchored once its contract is deployed (devdocs ADR-0075
+// decision 7), so a child's create grant can be sequenced in the root's log
+// before the root's first checkpoint is published. That checkpoint then
+// covers more than its self-grant, and must prove the self-grant at leaf 0
+// against the larger accumulator. The child publishes after it.
+func TestKS256RootFirstCheckpointCoversGrantsSequencedBeforeIt(t *testing.T) {
+	f := newKS256Forest(t, "d0d1d2d3-d4d5-46d7-a8d9-dadbdcdddedf")
+
+	childKey, err := crypto.GenerateKey()
+	require.NoError(t, err)
+	childAddr := crypto.PubkeyToAddress(childKey.PublicKey)
+	childUUID := testLogID(t, "e0e1e2e3-e4e5-46e7-a8e9-eaebecedeeef")
+	idts := f.nextIdtimestamp()
+	storedGrantFor(t, f.objects, f.rootUUID, childUUID, "auth-log",
+		gfCreate|gfExtend|gfAuthLog, idTimestamp(idts), childAddr.Bytes())
+	f.authority.addEntry(idts, f.grantContent(childUUID))
+	f.authority.commitAndSeal()
+
+	sealed := f.publishFirst(f.rootUUID, f.authority, "root's first checkpoint over two leaves")
+	require.Equal(t, uint64(3), sealed.MMRSize, "the root's first seal covers its self-grant and the child's grant")
+
+	child := f.openLog(childUUID, childKey)
+	child.addEntry(f.nextIdtimestamp(), bytes32FromLow(t, "c0"))
+	child.commitAndSeal()
+	f.publishFirst(childUUID, child, "first checkpoint of a child granted before the root anchored")
+}
+
 func TestKS256EOAChildFirstCheckpointPublishesWithGrantDataAsRootKey(t *testing.T) {
 	f := newKS256Forest(t, "90919293-9495-4697-a899-9a9b9c9d9e9f")
 	f.publish(f.rootUUID, f.authority, "root bootstrap")
@@ -196,10 +223,12 @@ func (f *ks256Forest) publish(id logid.UUID, l *fixtureLog, what string) SealedS
 
 // publishFirst publishes l's first checkpoint: the contract must hold no
 // state for the log before, and exactly the sealed state after.
-func (f *ks256Forest) publishFirst(id logid.UUID, l *fixtureLog, what string) {
+func (f *ks256Forest) publishFirst(id logid.UUID, l *fixtureLog, what string) SealedState {
 	f.t.Helper()
 	require.Zero(f.t, f.logState(id).Size, "%s: the log must have no on-chain state yet", what)
-	f.requireAnchored(id, f.publish(id, l, what))
+	sealed := f.publish(id, l, what)
+	f.requireAnchored(id, sealed)
+	return sealed
 }
 
 // requireAnchored asserts the contract holds exactly the sealed state for id.
