@@ -89,7 +89,13 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.entries[x.LogID]; !exists {
+	old, exists := c.entries[x.LogID]
+	if exists && old.x.Final && !x.Final {
+		// A read that saw the chain a moment before the final answer must
+		// not replace it: a final answer never changes.
+		return
+	}
+	if !exists {
 		c.order = append(c.order, x.LogID)
 	}
 	c.entries[x.LogID] = authorityEntry{x: x, until: until}

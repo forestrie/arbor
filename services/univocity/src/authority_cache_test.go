@@ -26,3 +26,20 @@ func TestAuthorityCache_EvictsTheOldestAnswer(t *testing.T) {
 		t.Fatal("B, the oldest answer, was kept")
 	}
 }
+
+// A final answer never changes, so an answer computed alongside it that is
+// not yet final (a read that saw the chain a moment earlier) must not
+// replace it.
+func TestAuthorityCache_KeepsAFinalAnswer(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	c := NewAuthorityCache(10, 5*time.Minute)
+	R := testLogID(1)
+
+	c.put(Authority{LogID: R, RootLogID: R, State: stateAnchored, Final: true}, now)
+	c.put(Authority{LogID: R, RootLogID: R, State: stateAnchored}, now)
+
+	x, ok := c.get(R, now.Add(time.Hour))
+	if !ok || !x.Final {
+		t.Fatalf("final answer was replaced: %+v, cached %v", x, ok)
+	}
+}
