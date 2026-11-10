@@ -173,3 +173,24 @@ func TestAnvilConflict_WatcherDetectsRegistration(t *testing.T) {
 		t.Fatalf("read after watcher: conflicts detected %d, want %d (answer is final)", got, alarms+1)
 	}
 }
+
+// A contract takes one root, the first root checkpoint published to it
+// (platform rule P14). A second forest bound to a contract already rooted
+// by another reads conflicted, read from the real contract's rootLogId(),
+// while the contract's own root stays anchored and final.
+func TestAnvilConflict_SecondRootOnARootedContract(t *testing.T) {
+	u := newUnivocityOnAnvil(t)
+	R2 := testLogID(2)
+	u.store.genesis[R2.String()] = buildGenesisDocKS256(t, R2, u.f.rootKey,
+		u.f.chain.chainID.Uint64(), u.f.chain.contract)
+	u.store.index[R2.String()] = R2
+
+	if resp := u.authority(R2); resp.State != stateConflicted || !resp.Final {
+		t.Fatalf("second root on a rooted contract: state %q final=%v, want conflicted, final",
+			resp.State, resp.Final)
+	}
+	if resp := u.authority(u.f.R); resp.State != stateAnchored || !resp.Final {
+		t.Fatalf("the contract's root: state %q final=%v, want anchored, final",
+			resp.State, resp.Final)
+	}
+}
