@@ -127,7 +127,9 @@ func (a API) authorityIn(
 }
 
 // rootAuthority: the root's key is the contract's bootstrap key, so the root
-// is anchored, finally, once the contract can be read, and pending until then.
+// is anchored, finally, once the contract can be read, and pending while no
+// contract is deployed at the genesis address. A failed read of a deployed
+// contract is an outage, reported as an error.
 func (a API) rootAuthority(
 	ctx context.Context,
 	forest ForestEntry,
@@ -137,6 +139,13 @@ func (a API) rootAuthority(
 	x.OwnerLogID = forest.R
 	alg, key, err := a.bootstrapConfig(ctx, forest, reader)
 	if errors.Is(err, ErrBootstrapUnavailable) {
+		deployed, cerr := reader.HasCode(ctx, forest.Contract)
+		if cerr != nil {
+			return Authority{}, fmt.Errorf("%w; contract code: %v", err, cerr)
+		}
+		if deployed {
+			return Authority{}, err
+		}
 		x.State = stateCommitted
 		return x, nil
 	}

@@ -257,12 +257,20 @@ func (a API) requireOwnerAnchored(
 		a.writeAuthorityError(w, r, err)
 		return false
 	}
-	if !owner.usable() {
+	switch {
+	case owner.usable():
+		return true
+	case owner.State == stateConflicted || owner.blockedByConflict:
+		a.writeProblem(w, r, http.StatusConflict, "about:blank", "authority-conflict",
+			"owner "+g.OwnerLogID.String()+" is conflicted or below a conflicted log; it will never anchor")
+	case !owner.BlockedBy.IsZero():
+		a.writeProblem(w, r, http.StatusConflict, "about:blank", "owner-not-anchored",
+			"owner "+g.OwnerLogID.String()+" waits on "+owner.BlockedBy.String()+" to anchor; commit once it is anchored")
+	default:
 		a.writeProblem(w, r, http.StatusConflict, "about:blank", "owner-not-anchored",
 			"owner "+g.OwnerLogID.String()+" is "+owner.State+"; commit once it is anchored")
-		return false
 	}
-	return true
+	return false
 }
 
 func (a API) writeClaim(w http.ResponseWriter, r *http.Request, res claimResult) {

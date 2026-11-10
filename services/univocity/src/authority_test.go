@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -389,4 +390,34 @@ func TestAuthority_ProofReadsTheOwnerLogAsPublished(t *testing.T) {
 	resp, rec := f.authority(A.String())
 	wantStatus(t, rec, http.StatusOK, "authority")
 	wantState(t, resp, stateAnchored, "covered by a checkpoint published after the scan")
+}
+
+// Only a contract that is not deployed makes the root pending. A failed
+// read of a deployed contract is an outage, not an answer.
+func TestAuthority_ChainOutageIsAnErrorNotPending(t *testing.T) {
+	f := newClaimFixture(t)
+	f.api.Bootstrap = NewBootstrapCache()
+	f.chain.code = map[common.Address]bool{common.HexToAddress("0xabc"): true}
+	f.chain.bootstrapErr = errors.New("rpc unavailable")
+	f.remount()
+
+	_, rec := f.authority(f.R.String())
+	if rec.Code < 500 {
+		t.Fatalf("root authority during an outage: %d %s, want 5xx", rec.Code, rec.Body.String())
+	}
+}
+
+// A conflicted owner never anchors: the backstop says so, rather than
+// asking the caller to wait.
+func TestPostGrant_CommitUnderConflictedOwnerIsRefusedAsConflict(t *testing.T) {
+	f := newClaimFixture(t)
+	A, G := testLogID(2), testLogID(3)
+	aKey := f.anchoredChild(A)
+	f.registerOnChain(A, testLogID(9), xyConcat(aKey))
+
+	rec := f.post(f.grant(G, A, aKey, mustKey(t)), intentCommit)
+	wantStatus(t, rec, http.StatusConflict, "commit under a conflicted owner")
+	if !bytes.Contains(rec.Body.Bytes(), []byte("authority-conflict")) {
+		t.Fatalf("want authority-conflict, got %s", rec.Body.String())
+	}
 }

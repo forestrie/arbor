@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
 )
@@ -14,18 +13,6 @@ const maxGrantChainDepth = 32
 // ErrBootstrapUnavailable indicates the on-chain bootstrap anchor could not be
 // read (chain not configured or contract call failed).
 var ErrBootstrapUnavailable = errors.New("on-chain bootstrap anchor unavailable")
-
-// isContractReadUnavailable reports RPC/ABI failures typical when no contract
-// is deployed at the genesis-bound address (empty eth_call return data).
-func isContractReadUnavailable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrBootstrapUnavailable) {
-		return true
-	}
-	return strings.Contains(err.Error(), "attempting to unmarshal an empty string")
-}
 
 // bootstrapConfig returns the contract's bootstrap (alg,key) for a forest:
 // the forest root's key, which comes only from the contract (devdocs

@@ -23,6 +23,8 @@ type mockChain struct {
 	calls int
 	// bootstrapErr, when set, fails BootstrapConfig (an RPC outage).
 	bootstrapErr error
+	// code holds the addresses with contract code; any other is an EOA.
+	code map[common.Address]bool
 	// beforeLogState, when set, runs once at the next LogState read.
 	beforeLogState func()
 	// block is the chain head; registrations are LogRegistered events.
@@ -130,8 +132,10 @@ func (m *mockChain) LogRootKey(_ context.Context, _ logid.UUID) ([32]byte, [32]b
 	return m.logRootKeyX, m.logRootKeyY, nil
 }
 
-func (m *mockChain) HasCode(_ context.Context, _ common.Address) (bool, error) {
-	return false, nil
+func (m *mockChain) HasCode(_ context.Context, addr common.Address) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.code[addr], nil
 }
 
 func (m *mockChain) IsValidSignature(_ context.Context, _ common.Address, hash, sig []byte) error {
