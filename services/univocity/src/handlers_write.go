@@ -2,6 +2,7 @@ package univocity
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -70,6 +71,11 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 				"genesis key mismatch", err.Error())
 			return
 		}
+		if errors.Is(err, errContractRootedElsewhere) {
+			a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
+				"contract rooted at another log", err.Error())
+			return
+		}
 		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
 			"anchor verification failed", err.Error())
 		return
@@ -134,10 +140,17 @@ func (a API) handleGetGenesis(w http.ResponseWriter, r *http.Request) {
 // contract's bootstrap key.
 var errGenesisKeyMismatch = errors.New("genesis key differs from the contract's bootstrapConfig()")
 
+// errContractRootedElsewhere reports a genesis naming a contract whose
+// rootLogId() is another log. A contract takes one root (platform rule P14),
+// so this forest's checkpoints could never publish there.
+var errContractRootedElsewhere = errors.New("the contract's rootLogId() is another log")
+
 // verifyGenesisAnchor requires genesis.key == the contract's bootstrapConfig()
 // for the forest's chain/contract: the root's key comes only from the
 // contract (devdocs ADR-0075 decision 7), so a genesis naming another key is
-// refused, and one whose contract cannot be read cannot be checked.
+// refused, and one whose contract cannot be read cannot be checked. It also
+// requires the contract to record no root, or this forest's: a contract
+// takes one root (platform rule P14).
 func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 	if a.Pool == nil {
 		return errors.New("rpc pool not configured")
@@ -152,6 +165,13 @@ func (a API) verifyGenesisAnchor(r *http.Request, doc GenesisDoc) error {
 	}
 	if !bootstrapKeysEqual(doc.Alg, doc.GenesisKeyBytes(), bootAlg, bootKey) {
 		return errGenesisKeyMismatch
+	}
+	root, err := reader.RootLogId(r.Context())
+	if err != nil {
+		return fmt.Errorf("rootLogId: %w", err)
+	}
+	if !root.IsZero() && root != doc.Forest.R {
+		return fmt.Errorf("%w: %s", errContractRootedElsewhere, root)
 	}
 	return nil
 }
