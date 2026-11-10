@@ -13,3 +13,9 @@ func authLogFlags() []byte {
 	f[7] = 0x01
 	return f
 }
+
+func dataLogFlags() []byte {
+	f := make([]byte, 8)
+	f[7] = 0x02
+	return f
+}

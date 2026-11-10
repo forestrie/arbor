@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/forestrie/arbor/services/pkgs/logid"
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/fxamacker/cbor/v2"
 )
@@ -114,6 +115,10 @@ func signSign1KS256(t *testing.T, priv *ecdsa.PrivateKey, protected, payloadDige
 	return out
 }
 
+// headerIdtimestampZero is the unprotected -65537 label canopy fills with a
+// zero placeholder. Univocity neither reads nor writes it.
+const headerIdtimestampZero = -65537
+
 func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []byte {
 	t.Helper()
 	logWire := g.LogID.ToPaddedWire32()
@@ -134,8 +139,8 @@ func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []b
 	digest := sha256.Sum256(embedded)
 	sig := signSign1(t, ownerPriv, protected, digest[:])
 	unprot := map[interface{}]interface{}{
-		headerForestrieGrant: embedded,
-		headerIdtimestamp:    make([]byte, 8),
+		headerForestrieGrant:  embedded,
+		headerIdtimestampZero: make([]byte, 8),
 	}
 	cose := []interface{}{protected, unprot, digest[:], sig}
 	out, err := cbor.Marshal(cose)
@@ -165,8 +170,8 @@ func buildGrantStatementKS256(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant
 	digest := sha256.Sum256(embedded)
 	sig := signSign1KS256(t, ownerPriv, protected, digest[:])
 	unprot := map[interface{}]interface{}{
-		headerForestrieGrant: embedded,
-		headerIdtimestamp:    make([]byte, 8),
+		headerForestrieGrant:  embedded,
+		headerIdtimestampZero: make([]byte, 8),
 	}
 	cose := []interface{}{protected, unprot, digest[:], sig}
 	out, err := cbor.Marshal(cose)
@@ -203,16 +208,56 @@ type fakeStore struct {
 	genesis map[string][]byte
 	grants  map[string][]byte
 	index   map[string]logid.UUID
+	// reservations maps subject -> record; versions counts its writes.
+	reservations map[string][]byte
+	versions     map[string]int
 	// listCalls pins the plan-2607-10 contract: resolution never enumerates.
 	listCalls int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		genesis: map[string][]byte{},
-		grants:  map[string][]byte{},
-		index:   map[string]logid.UUID{},
+		genesis:      map[string][]byte{},
+		grants:       map[string][]byte{},
+		index:        map[string]logid.UUID{},
+		reservations: map[string][]byte{},
+		versions:     map[string]int{},
 	}
+}
+
+func (s *fakeStore) GetReservation(_ context.Context, subject logid.UUID) ([]byte, string, error) {
+	b, ok := s.reservations[subject.String()]
+	if !ok {
+		return nil, "", errStoreMiss
+	}
+	return b, strconv.Itoa(s.versions[subject.String()]), nil
+}
+
+func (s *fakeStore) PutReservation(_ context.Context, subject logid.UUID, body []byte, version string) error {
+	k := subject.String()
+	_, exists := s.reservations[k]
+	if (version == "" && exists) || (version != "" && (!exists || version != strconv.Itoa(s.versions[k]))) {
+		return ErrReservationChanged
+	}
+	s.reservations[k] = body
+	s.versions[k]++
+	return nil
+}
+
+func (s *fakeStore) DeleteReservation(_ context.Context, subject logid.UUID) error {
+	delete(s.reservations, subject.String())
+	return nil
+}
+
+func (s *fakeStore) ListReservations(_ context.Context) ([]logid.UUID, error) {
+	var out []logid.UUID
+	for k := range s.reservations {
+		id, err := logid.ParseUUIDString(k)
+		if err == nil {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeStore) grantStoreKey(r, subject logid.UUID, class GrantClass) string {
@@ -245,9 +290,15 @@ func (s *fakeStore) GetGrant(_ context.Context, r, subject logid.UUID) ([]byte, 
 	return nil, errStoreMiss
 }
 
-func (s *fakeStore) PutGrant(_ context.Context, r, subject logid.UUID, class GrantClass, body []byte) error {
-	s.grants[s.grantStoreKey(r, subject, class)] = body
-	return nil
+// PutGrantIfAbsent is conditional on its own class's key only, as the S3
+// store's If-None-Match put is.
+func (s *fakeStore) PutGrantIfAbsent(_ context.Context, r, subject logid.UUID, class GrantClass, body []byte) (bool, error) {
+	key := s.grantStoreKey(r, subject, class)
+	if _, exists := s.grants[key]; exists {
+		return false, nil
+	}
+	s.grants[key] = body
+	return true, nil
 }
 
 func (s *fakeStore) IndexGet(_ context.Context, subject logid.UUID) (logid.UUID, bool, error) {
@@ -431,14 +482,16 @@ func buildGenesisDocKS256(
 	return b
 }
 
-func TestVerifyGrantChain_KS256ByokGenesisAuthoritative(t *testing.T) {
+// A genesis document cannot substitute for the contract's bootstrap key: a
+// root grant naming the genesis key is refused, and one naming the contract
+// key is accepted, even when stored genesis says otherwise.
+func TestVerifyGrantChain_RootKeyComesFromContract(t *testing.T) {
 	logger, _ := NewLogger(0)
 	deployer := mustKS256Key(t)
 	user := mustKS256Key(t)
 
 	R := testLogID(12)
 	addr := common.HexToAddress("0xabc")
-	userAddr := ks256AddressFromKey(t, user)
 
 	chain := newChainColdAnchoredKS256(deployer)
 	store := newFakeStore()
@@ -452,115 +505,24 @@ func TestVerifyGrantChain_KS256ByokGenesisAuthoritative(t *testing.T) {
 	}
 	forest := ForestEntry{R: R, ChainID: 84532, Contract: addr}
 
-	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: userAddr}
-	rootTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, user, rootGrant))
-	if err != nil {
-		t.Fatalf("decode BYOK KS256 root: %v", err)
-	}
-	if err := api.verifyGrantChain(context.Background(), forest, chain, rootTS); err != nil {
-		t.Fatalf("BYOK KS256 root chain invalid: %v", err)
-	}
-
-	deployerAddr := ks256AddressFromKey(t, deployer)
-	wrongRoot := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: deployerAddr}
-	wrongTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, deployer, wrongRoot))
-	if err != nil {
-		t.Fatalf("decode deployer root: %v", err)
-	}
-	if err := api.verifyGrantChain(context.Background(), forest, chain, wrongTS); err == nil {
-		t.Fatal("expected deployer-signed root grant to be rejected for BYOK genesis")
-	}
-}
-
-func TestBootstrapConfig_ReconcilesAfterGenesisStored(t *testing.T) {
-	logger, _ := NewLogger(0)
-	deployer := mustKS256Key(t)
-	user := mustKS256Key(t)
-
-	R := testLogID(14)
-	addr := common.HexToAddress("0xabc")
 	userAddr := ks256AddressFromKey(t, user)
-
-	chain := newChainColdAnchoredKS256(deployer)
-	store := newFakeStore()
-
-	api := API{
-		Logger:    logger,
-		Pool:      &mockPool{chain: chain},
-		Store:     store,
-		Bootstrap: NewBootstrapCache(),
-	}
-	forest := ForestEntry{R: R, ChainID: 84532, Contract: addr}
-
-	// verifyGenesisAnchor may resolve bootstrap before genesis is persisted.
-	alg0, key0, err := api.bootstrapConfig(context.Background(), forest, chain)
+	genesisRoot := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: userAddr}
+	genesisTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, user, genesisRoot))
 	if err != nil {
-		t.Fatalf("bootstrap before genesis stored: %v", err)
+		t.Fatalf("decode genesis-key root: %v", err)
 	}
+	if err := api.verifyGrantChain(context.Background(), forest, chain, genesisTS); err == nil {
+		t.Fatal("expected a root grant naming the genesis key to be rejected")
+	}
+
 	deployerAddr := ks256AddressFromKey(t, deployer)
-	if alg0 != coseAlgKS256 || !bytes.Equal(key0, deployerAddr) {
-		t.Fatalf("pre-store bootstrap: got alg=%d key=%x want deployer %x", alg0, key0, deployerAddr)
-	}
-
-	store.genesis[R.String()] = buildGenesisDocKS256(t, R, user, 84532, addr)
-
-	alg1, key1, err := api.bootstrapConfig(context.Background(), forest, chain)
+	contractRoot := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: deployerAddr}
+	contractTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, deployer, contractRoot))
 	if err != nil {
-		t.Fatalf("bootstrap after BYOK genesis stored: %v", err)
+		t.Fatalf("decode contract-key root: %v", err)
 	}
-	if alg1 != coseAlgKS256 || !bytes.Equal(key1, userAddr) {
-		t.Fatalf("post-store bootstrap: got alg=%d key=%x want BYOK user %x", alg1, key1, userAddr)
-	}
-}
-
-func TestBootstrapConfig_CachePerForestNotSharedContract(t *testing.T) {
-	logger, _ := NewLogger(0)
-	deployer := mustKS256Key(t)
-	user := mustKS256Key(t)
-
-	R1 := testLogID(12)
-	R2 := testLogID(13)
-	addr := common.HexToAddress("0xabc")
-	userAddr := ks256AddressFromKey(t, user)
-
-	chain := newChainColdAnchoredKS256(deployer)
-	store := newFakeStore()
-	store.genesis[R1.String()] = buildGenesisDocKS256(t, R1, deployer, 84532, addr)
-	store.genesis[R2.String()] = buildGenesisDocKS256(t, R2, user, 84532, addr)
-
-	api := API{
-		Logger:    logger,
-		Pool:      &mockPool{chain: chain},
-		Store:     store,
-		Bootstrap: NewBootstrapCache(),
-	}
-	forestContract := ForestEntry{R: R1, ChainID: 84532, Contract: addr}
-
-	alg1, key1, err := api.bootstrapConfig(context.Background(), forestContract, chain)
-	if err != nil {
-		t.Fatalf("bootstrap R1: %v", err)
-	}
-	deployerAddr := ks256AddressFromKey(t, deployer)
-	if alg1 != coseAlgKS256 || !bytes.Equal(key1, deployerAddr) {
-		t.Fatalf("R1 bootstrap: got alg=%d key=%x want deployer %x", alg1, key1, deployerAddr)
-	}
-
-	forestByok := ForestEntry{R: R2, ChainID: 84532, Contract: addr}
-	alg2, key2, err := api.bootstrapConfig(context.Background(), forestByok, chain)
-	if err != nil {
-		t.Fatalf("bootstrap R2: %v", err)
-	}
-	if alg2 != coseAlgKS256 || !bytes.Equal(key2, userAddr) {
-		t.Fatalf("R2 bootstrap: got alg=%d key=%x want BYOK user %x", alg2, key2, userAddr)
-	}
-
-	rootGrant := Grant{LogID: R2, OwnerLogID: R2, Flags: authLogFlags(), GrantData: userAddr}
-	rootTS, err := decodeTransparentStatement(buildGrantStatementKS256(t, user, rootGrant))
-	if err != nil {
-		t.Fatalf("decode BYOK root: %v", err)
-	}
-	if err := api.verifyGrantChain(context.Background(), forestByok, chain, rootTS); err != nil {
-		t.Fatalf("BYOK root grant after contract-anchored cache warm: %v", err)
+	if err := api.verifyGrantChain(context.Background(), forest, chain, contractTS); err != nil {
+		t.Fatalf("contract-key root grant rejected: %v", err)
 	}
 }
 
@@ -580,7 +542,8 @@ func TestResolveAuthority_ColdChild(t *testing.T) {
 	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	store.grants[store.grantStoreKey(R, A, GrantClassAuthLog)] = buildGrantStatement(t, boot, childGrant)
 
-	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache()}
+	api := API{Logger: logger, Pool: &mockPool{chain: chain}, Store: store, Bootstrap: NewBootstrapCache(),
+		Massifs: newMemLogs(t).readers(), Leaves: publishproof.NewGrantLeafIndex()}
 
 	res, err := api.resolveAuthority(context.Background(), A, logid.UUID{})
 	if err != nil {
@@ -622,6 +585,18 @@ func (mockChainEmptyResponse) LogRootKey(context.Context, logid.UUID) ([32]byte,
 	return [32]byte{}, [32]byte{}, errors.New("empty contract response")
 }
 
+func (mockChainEmptyResponse) LatestBlock(context.Context) (uint64, error) {
+	return 0, errors.New("empty contract response")
+}
+
+func (mockChainEmptyResponse) LogRegistrations(context.Context, uint64, uint64) ([]LogRegistration, error) {
+	return nil, errors.New("empty contract response")
+}
+
+func (mockChainEmptyResponse) LogState(context.Context, logid.UUID) (publishproof.LogState, error) {
+	return publishproof.LogState{}, errors.New("empty contract response")
+}
+
 func (mockChainEmptyResponse) HasCode(context.Context, common.Address) (bool, error) {
 	return false, nil
 }
@@ -634,57 +609,18 @@ func (mockChainEmptyResponse) IsValidSignature(ctx context.Context, addr common.
 	return errERC1271Failed
 }
 
-func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
+// No request path writes position metadata onto a stored grant: readers
+// find a grant's leaf by scanning its owner's leaf table instead.
+func TestPatchGrantIdtimestampRouteRemoved(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)
-	child := mustKey(t)
-
-	R := testLogID(1)
-	A := testLogID(2)
-	addr := common.HexToAddress("0xabc")
-
-	store := newFakeStore()
-	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
-	store.index[A.String()] = R
-	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
-	store.grants[store.grantStoreKey(R, A, GrantClassAuthLog)] = buildGrantStatement(t, boot, childGrant)
-
-	api := API{
-		Logger:                 logger,
-		Pool:                   &mockPool{chain: mockChainEmptyResponse{}},
-		Store:                  store,
-		Bootstrap:              NewBootstrapCache(),
-		AllowUnanchoredGenesis: true,
-	}
-
-	res, err := api.resolveAuthority(context.Background(), A, logid.UUID{})
-	if err != nil {
-		t.Fatalf("resolve authority failed: %v", err)
-	}
-	if res.LogID != A || res.RootLogID != R || res.Source != "grant" {
-		t.Fatalf("unexpected result %+v", res)
-	}
-	if !bytes.Equal(res.Key, xyConcat(child)) {
-		t.Fatal("returned key does not match child grantData")
-	}
-}
-
-// After sequencing, canopy patches the stored grant's unprotected -65537 with
-// the massif idtimestamp so the publisher leaf commitment matches leaf 0.
-func TestHandlePatchGrantIdtimestamp_HTTP(t *testing.T) {
-	logger, _ := NewLogger(0)
-	boot := mustKey(t)
-
 	R := testLogID(21)
-	addr := common.HexToAddress("0xabc")
-
-	chain := newChainColdAnchored(boot)
 	store := newFakeStore()
-	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
+	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, common.HexToAddress("0xabc"))
 
 	api := API{
 		Logger:    logger,
-		Pool:      &mockPool{chain: chain},
+		Pool:      &mockPool{chain: newChainColdAnchored(boot)},
 		Store:     store,
 		APIToken:  "secret",
 		Bootstrap: NewBootstrapCache(),
@@ -692,70 +628,25 @@ func TestHandlePatchGrantIdtimestamp_HTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
+	// A stored grant the removed handler would have patched.
 	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(boot)}
 	stmt := buildGrantStatement(t, boot, rootGrant)
-	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt})
+	store.grants[store.grantStoreKey(R, R, GrantClassAuthLog)] = stmt
 
-	postReq := httptest.NewRequest(http.MethodPost, "/api/grants", bytes.NewReader(reqBody))
-	postReq.Header.Set("Authorization", "Bearer secret")
-	postRec := httptest.NewRecorder()
-	mux.ServeHTTP(postRec, postReq)
-	if postRec.Code != http.StatusCreated {
-		t.Fatalf("post grant want 201 got %d: %s", postRec.Code, postRec.Body.String())
-	}
-
-	idts := []byte{0x9f, 0x49, 0x34, 0xab, 0xca, 0x03, 0x05, 0x00}
-	patchBody, _ := cbor.Marshal(patchGrantIdtimestampRequest{Idtimestamp: idts})
-	patchReq := httptest.NewRequest(
+	body, _ := cbor.Marshal(map[string][]byte{"idtimestamp": {1, 2, 3, 4, 5, 6, 7, 8}})
+	req := httptest.NewRequest(
 		http.MethodPatch,
 		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
-		bytes.NewReader(patchBody),
+		bytes.NewReader(body),
 	)
-	patchReq.Header.Set("Authorization", "Bearer secret")
-	patchRec := httptest.NewRecorder()
-	mux.ServeHTTP(patchRec, patchReq)
-	if patchRec.Code != http.StatusNoContent {
-		t.Fatalf("patch idtimestamp want 204 got %d: %s", patchRec.Code, patchRec.Body.String())
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PATCH idtimestamp want 404 or 405, got %d", rec.Code)
 	}
-
-	stored, err := store.GetGrant(context.Background(), R, R)
-	if err != nil {
-		t.Fatalf("get stored grant: %v", err)
-	}
-	ts, err := decodeTransparentStatement(stored)
-	if err != nil {
-		t.Fatalf("decode stored: %v", err)
-	}
-	if !bytes.Equal(ts.Idtimestamp, idts) {
-		t.Fatalf("stored idtimestamp = %x, want %x", ts.Idtimestamp, idts)
-	}
-
-	// Idempotent re-patch with the same value succeeds.
-	patchRec2 := httptest.NewRecorder()
-	patchReq2 := httptest.NewRequest(
-		http.MethodPatch,
-		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
-		bytes.NewReader(patchBody),
-	)
-	patchReq2.Header.Set("Authorization", "Bearer secret")
-	mux.ServeHTTP(patchRec2, patchReq2)
-	if patchRec2.Code != http.StatusNoContent {
-		t.Fatalf("idempotent patch want 204 got %d", patchRec2.Code)
-	}
-
-	// Conflict when a different non-zero idtimestamp is already stored.
-	other := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	otherBody, _ := cbor.Marshal(patchGrantIdtimestampRequest{Idtimestamp: other})
-	conflictReq := httptest.NewRequest(
-		http.MethodPatch,
-		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
-		bytes.NewReader(otherBody),
-	)
-	conflictReq.Header.Set("Authorization", "Bearer secret")
-	conflictRec := httptest.NewRecorder()
-	mux.ServeHTTP(conflictRec, conflictReq)
-	if conflictRec.Code != http.StatusConflict {
-		t.Fatalf("conflicting patch want 409 got %d: %s", conflictRec.Code, conflictRec.Body.String())
+	if got := store.grants[store.grantStoreKey(R, R, GrantClassAuthLog)]; !bytes.Equal(got, stmt) {
+		t.Fatal("stored grant changed")
 	}
 }
 
@@ -778,13 +669,15 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 		Store:     store,
 		APIToken:  "secret",
 		Bootstrap: NewBootstrapCache(),
+		Massifs:   newMemLogs(t).readers(),
+		Leaves:    publishproof.NewGrantLeafIndex(),
 	}
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
 	childGrant := Grant{LogID: A, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	stmt := buildGrantStatement(t, boot, childGrant)
-	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt})
+	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt, Intent: intentCommit})
 
 	post := func(body []byte) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/grants", bytes.NewReader(body))
@@ -812,7 +705,7 @@ func TestHandlePostGrantAndAuthorize_HTTP(t *testing.T) {
 	store.genesis[R2.String()] = buildGenesisDoc(t, R2, boot, 84532, addr)
 	childGrant2 := Grant{LogID: A, OwnerLogID: R2, Flags: authLogFlags(), GrantData: xyConcat(child)}
 	stmt2 := buildGrantStatement(t, boot, childGrant2)
-	reqBody2, _ := cbor.Marshal(postGrantRequest{RootLogID: R2[:], Statement: stmt2})
+	reqBody2, _ := cbor.Marshal(postGrantRequest{RootLogID: R2[:], Statement: stmt2, Intent: intentCommit})
 	if rec := post(reqBody2); rec.Code != http.StatusConflict {
 		t.Fatalf("cross-forest reuse want 409 got %d: %s", rec.Code, rec.Body.String())
 	}

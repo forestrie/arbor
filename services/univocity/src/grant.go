@@ -14,7 +14,6 @@ import (
 // (canopy grant/transparent-statement.ts).
 const (
 	headerReceipt        = 396
-	headerIdtimestamp    = -65537
 	headerForestrieGrant = -65538
 )
 
@@ -38,8 +37,6 @@ const (
 	grantKeyObsoleteSigner = 7
 	grantKeyObsoleteKind   = 8
 )
-
-const idtimestampBytes = 8
 
 var (
 	// ErrGrantSignatureInvalid is returned when a grant envelope (or delegation
@@ -66,10 +63,9 @@ type Grant struct {
 // TransparentStatement is a decoded SCITT transparent statement that carries a
 // creation grant under the Custodian digest profile.
 type TransparentStatement struct {
-	Grant       Grant
-	Idtimestamp []byte
-	Raw         []byte
-	cose        coseSign1
+	Grant Grant
+	Raw   []byte
+	cose  coseSign1
 }
 
 type coseSign1 struct {
@@ -110,15 +106,10 @@ func decodeTransparentStatement(raw []byte) (TransparentStatement, error) {
 	if err != nil {
 		return TransparentStatement{}, err
 	}
-	idts := make([]byte, idtimestampBytes)
-	if v, ok := unprotected.byteSlice(headerIdtimestamp); ok && len(v) >= idtimestampBytes {
-		copy(idts, v[len(v)-idtimestampBytes:])
-	}
 	return TransparentStatement{
-		Grant:       grant,
-		Idtimestamp: idts,
-		Raw:         raw,
-		cose:        cose,
+		Grant: grant,
+		Raw:   raw,
+		cose:  cose,
 	}, nil
 }
 
@@ -197,60 +188,6 @@ func decodeCoseSign1(raw []byte) (coseSign1, genesisIntMap, error) {
 		unprotected = genesisIntMap{}
 	}
 	return coseSign1{protected: protected, payload: payload, signature: signature}, unprotected, nil
-}
-
-// SetTransparentStatementIdtimestamp rewrites unprotected -65537 on a stored
-// COSE Sign1 without touching the protected header, payload, or signature
-// (unprotected labels are not covered by the Sign1). Used after sequencing so
-// the publisher leaf commitment matches the massif idtimestamp.
-func SetTransparentStatementIdtimestamp(raw, idtimestamp []byte) ([]byte, error) {
-	if len(idtimestamp) != idtimestampBytes {
-		return nil, fmt.Errorf("idtimestamp must be %d bytes", idtimestampBytes)
-	}
-	if len(raw) == 0 {
-		return nil, errors.New("empty transparent statement")
-	}
-	var top interface{}
-	if err := cbor.Unmarshal(raw, &top); err != nil {
-		return nil, fmt.Errorf("decode COSE Sign1: %w", err)
-	}
-	var tagNum uint64
-	hasTag := false
-	if tag, ok := top.(cbor.Tag); ok {
-		hasTag = true
-		tagNum = tag.Number
-		top = tag.Content
-	}
-	arr, ok := top.([]interface{})
-	if !ok || len(arr) != 4 {
-		return nil, errNotCoseSign1
-	}
-	unprotected := decodeCBORIntKeyMap(arr[1])
-	if unprotected == nil {
-		unprotected = genesisIntMap{}
-	}
-	idts := make([]byte, idtimestampBytes)
-	copy(idts, idtimestamp)
-	unprotected[headerIdtimestamp] = idts
-
-	// Rebuild the unprotected map as an int-keyed map for stable CBOR.
-	outUnprot := make(map[int]interface{}, len(unprotected))
-	for k, v := range unprotected {
-		outUnprot[k] = v
-	}
-	outArr := []interface{}{arr[0], outUnprot, arr[2], arr[3]}
-	var content interface{} = outArr
-	if hasTag {
-		content = cbor.Tag{Number: tagNum, Content: outArr}
-	}
-	// Canonical (§4.2) so the rewritten unprotected map has a stable,
-	// deterministic order — the default cbor.Marshal serialises Go maps in
-	// random order, which is what the "stable CBOR" comment above intended.
-	out, err := canonicalCBOR.Marshal(content)
-	if err != nil {
-		return nil, fmt.Errorf("encode COSE Sign1: %w", err)
-	}
-	return out, nil
 }
 
 func asByteSlice(v interface{}) ([]byte, bool) {

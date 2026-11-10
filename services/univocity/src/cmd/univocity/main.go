@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -10,9 +11,23 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
+	"github.com/forestrie/arbor/services/pkgs/s3storage/merklelog"
 	"github.com/forestrie/arbor/services/pkgs/s3storage/s3"
 	"github.com/forestrie/arbor/services/univocity"
 )
+
+// anchoredRecheck bounds how long an anchored answer that is not yet final
+// is served before the log's first checkpoint is looked for again.
+const anchoredRecheck = 5 * time.Minute
+
+// registrationPollInterval paces the LogRegistered watcher, which compares
+// a claimed log with the chain at its first checkpoint.
+const registrationPollInterval = 15 * time.Second
+
+// reservationSweepInterval paces the removal of lapsed reservations. Reads
+// treat a lapsed reservation as absent, so this only bounds storage.
+const reservationSweepInterval = 10 * time.Minute
 
 var (
 	version   string
@@ -81,6 +96,21 @@ func main() {
 		os.Exit(1)
 	}
 
+	logFactory, err := merklelog.NewS3FactoryWithCredentials(
+		cfg.R2URL,
+		cfg.GenesisR2Token,
+		cfg.AWSAccessKeyID,
+		cfg.AWSSecretAccessKey,
+		cfg.AWSRegion,
+		cfg.MassifHeight,
+		stdHTTPDoer{client: httpClient},
+		logger,
+	)
+	if err != nil {
+		slog.Error("failed to create MMR log R2 client", "error", err)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
@@ -95,16 +125,22 @@ func main() {
 	setupHealthChecks(mux)
 
 	api := univocity.API{
-		Logger:                 logger,
-		Pool:                   pool,
-		Forests:                univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
-		Store:                  univocity.NewS3Store(s3Client),
-		APIToken:               cfg.APIToken,
-		AdminToken:             cfg.AdminToken,
-		AllowUnanchoredGenesis: cfg.AllowUnanchoredGenesis,
-		Bootstrap:              univocity.NewBootstrapCache(),
+		Logger:         logger,
+		Pool:           pool,
+		Forests:        univocity.NewForestCache(cfg.LogForestCacheSize, cfg.LogForestNegTTL),
+		Store:          univocity.NewS3Store(s3Client),
+		APIToken:       cfg.APIToken,
+		AdminToken:     cfg.AdminToken,
+		Bootstrap:      univocity.NewBootstrapCache(),
+		ReservationTTL: cfg.ReservationTTL,
+		Authorities:    univocity.NewAuthorityCache(cfg.LogForestCacheSize, anchoredRecheck),
+		Massifs:        univocity.NewMassifReaders(logFactory, cfg.MassifHeight),
+		Leaves:         publishproof.NewGrantLeafIndex(),
+		Registrations:  univocity.NewRegistrationWatcher(),
 	}
 	api.RegisterRoutes(mux)
+	go api.RunReservationSweeper(ctx, reservationSweepInterval)
+	go api.RunRegistrationWatcher(ctx, registrationPollInterval)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,
@@ -149,6 +185,10 @@ func setupHealthChecks(mux *http.ServeMux) {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("# univocity metrics stub\n"))
+		_, _ = fmt.Fprintf(w,
+			"# HELP univocity_authority_conflicts_total First registrations on chain that differ from their claim.\n"+
+				"# TYPE univocity_authority_conflicts_total counter\n"+
+				"univocity_authority_conflicts_total %d\n",
+			univocity.ConflictsDetected())
 	})
 }

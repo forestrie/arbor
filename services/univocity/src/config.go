@@ -21,8 +21,13 @@ type Config struct {
 
 	RPCURLs map[uint64]string
 
-	GenesisR2URL       string
-	GenesisR2Token     string
+	GenesisR2URL   string
+	GenesisR2Token string
+	// R2URL is the MMR log bucket (S3 API), where univocity scans owner logs
+	// for create grants. The same R2 credentials read it.
+	R2URL string
+	// MassifHeight is the logs' massif height (as ranger's MASSIF_HEIGHT).
+	MassifHeight       uint8
 	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 	AWSRegion          string
@@ -40,9 +45,9 @@ type Config struct {
 	APIToken string
 	// AdminToken authenticates destructive admin endpoints.
 	AdminToken string
-	// AllowUnanchoredGenesis permits storing genesis/grants without an on-chain
-	// bootstrap anchor (local/dev/e2e only). Never enable in production.
-	AllowUnanchoredGenesis bool
+	// ReservationTTL is how long a claim made by prepare lasts unless its
+	// grant is committed.
+	ReservationTTL time.Duration
 }
 
 var levelAliases = map[string]slog.Level{
@@ -88,6 +93,15 @@ func LoadConfig() (Config, error) {
 		return Config{}, errors.New("GENESIS_R2_URL is required")
 	}
 
+	r2URL := strings.TrimSpace(os.Getenv("R2_URL"))
+	if r2URL == "" {
+		return Config{}, errors.New("R2_URL is required (MMR log bucket, for the create-grant leaf scan)")
+	}
+	massifHeight := getIntPositive("MASSIF_HEIGHT", 14)
+	if massifHeight > 64 {
+		return Config{}, fmt.Errorf("MASSIF_HEIGHT %d out of range 1..64", massifHeight)
+	}
+
 	r2Token := strings.TrimSpace(os.Getenv("R2_TOKEN"))
 	awsAccessKey := strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
 	awsSecret := strings.TrimSpace(os.Getenv("AWS_SECRET_ACCESS_KEY"))
@@ -104,6 +118,11 @@ func LoadConfig() (Config, error) {
 		)
 	}
 
+	reservationTTL := getDuration("UNIVOCITY_RESERVATION_TTL", DefaultReservationTTL)
+	if reservationTTL <= 0 {
+		return Config{}, errors.New("UNIVOCITY_RESERVATION_TTL must be a positive duration")
+	}
+
 	negTTL := getDurationSeconds("LOG_FOREST_NEG_TTL", 60)
 	cacheSize := getIntPositive("LOG_FOREST_CACHE_SIZE", 10000)
 
@@ -114,6 +133,8 @@ func LoadConfig() (Config, error) {
 		RPCURLs:                   rpcURLs,
 		GenesisR2URL:              genesisURL,
 		GenesisR2Token:            r2Token,
+		R2URL:                     r2URL,
+		MassifHeight:              uint8(massifHeight),
 		AWSAccessKeyID:            awsAccessKey,
 		AWSSecretAccessKey:        awsSecret,
 		AWSRegion:                 getEnvOrDefault("AWS_REGION", "auto"),
@@ -122,20 +143,8 @@ func LoadConfig() (Config, error) {
 		DeprecatedScanIntervalSet: strings.TrimSpace(os.Getenv("GENESIS_SCAN_MIN_INTERVAL")) != "",
 		APIToken:                  strings.TrimSpace(os.Getenv("UNIVOCITY_API_TOKEN")),
 		AdminToken:                strings.TrimSpace(os.Getenv("UNIVOCITY_ADMIN_TOKEN")),
-		AllowUnanchoredGenesis:    getBool("UNIVOCITY_ALLOW_UNANCHORED_GENESIS", false),
+		ReservationTTL:            reservationTTL,
 	}, nil
-}
-
-func getBool(key string, defaultVal bool) bool {
-	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	case "0", "false", "no", "off":
-		return false
-	default:
-		return defaultVal
-	}
 }
 
 func parseRPCURLs(raw string) (map[uint64]string, error) {
@@ -175,11 +184,13 @@ func (c Config) LogConfig(logger *slog.Logger) {
 		"SHUTDOWN_TIMEOUT", c.ShutdownTimeout,
 		"RPC_CHAIN_IDS", chainIDs,
 		"GENESIS_R2_URL", nonSecret(c.GenesisR2URL),
+		"R2_URL", nonSecret(c.R2URL),
+		"MASSIF_HEIGHT", c.MassifHeight,
 		"LOG_FOREST_NEG_TTL", c.LogForestNegTTL,
 		"LOG_FOREST_CACHE_SIZE", c.LogForestCacheSize,
 		"UNIVOCITY_API_TOKEN", nonSecret(c.APIToken),
 		"UNIVOCITY_ADMIN_TOKEN", nonSecret(c.AdminToken),
-		"UNIVOCITY_ALLOW_UNANCHORED_GENESIS", c.AllowUnanchoredGenesis,
+		"UNIVOCITY_RESERVATION_TTL", c.ReservationTTL,
 	)
 }
 

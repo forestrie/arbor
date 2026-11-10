@@ -3,6 +3,9 @@ package univocity
 import (
 	"log/slog"
 	"net/http"
+	"time"
+
+	"github.com/forestrie/arbor/services/pkgs/publishproof"
 )
 
 // API provides the HTTP API for the univocity trust-root service.
@@ -24,13 +27,43 @@ type API struct {
 	// AdminToken authenticates destructive admin endpoints (delete). When empty
 	// the admin endpoints are disabled.
 	AdminToken string
-	// AllowUnanchoredGenesis permits storing genesis/grants when the on-chain
-	// bootstrap anchor cannot be reached (local/dev/e2e against a stack with no
-	// deployed contract). Never enable in production.
-	AllowUnanchoredGenesis bool
-
 	// Bootstrap caches per-(chainId,contract) on-chain bootstrap keys.
 	Bootstrap *bootstrapCache
+
+	// ReservationTTL is how long a claim made by prepare lasts unless its
+	// grant is committed (UNIVOCITY_RESERVATION_TTL); zero means
+	// DefaultReservationTTL.
+	ReservationTTL time.Duration
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
+
+	// Authorities caches final and anchored authority answers.
+	Authorities *AuthorityCache
+	// Massifs reads owner logs' massifs for the create-grant leaf scan.
+	Massifs MassifReaders
+	// Leaves remembers leaf-scan progress per owner log and grant.
+	Leaves *publishproof.GrantLeafIndex
+	// Registrations tracks the forest contracts whose LogRegistered events
+	// univocity watches.
+	Registrations *RegistrationWatcher
+}
+
+// DefaultReservationTTL is the lapse time of a reservation (devdocs
+// ADR-0075 decision 2).
+const DefaultReservationTTL = 7 * 24 * time.Hour
+
+func (a API) reservationTTL() time.Duration {
+	if a.ReservationTTL > 0 {
+		return a.ReservationTTL
+	}
+	return DefaultReservationTTL
+}
+
+func (a API) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
 }
 
 // RegisterRoutes wires scoped and logId-only endpoints onto the mux.
@@ -48,21 +81,16 @@ func (a API) RegisterRoutes(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /api/logs/{logId}/root", a.handleLogIDRoot)
 	mux.HandleFunc("GET /api/logs/{logId}/public-root", a.handleLogIDPublicRoot)
-	// Authority resolution for a (possibly cold) log: the authoritative root key
-	// (chain logRootKey when initialized, else the chain-valid stored grantData)
-	// plus chain binding. Non-mutating GET; the sealer verifies the delegation
-	// certificate locally against the returned key.
+	// Authority for a claimed log: its state (reserved, committed,
+	// sequenced, anchored or conflicted), root key, first unanchored
+	// ancestor and whether the answer is final. Non-mutating GET; operators
+	// only (canopy-api, the sealer, the publisher).
 	mux.HandleFunc("GET /api/logs/{logId}/authority", a.handleLogIDAuthority)
 
 	// Owned store: genesis + grants (token-auth).
 	mux.HandleFunc("POST /api/forest/{logId}/genesis", a.handlePostGenesis)
 	mux.HandleFunc("GET /api/forest/{logId}/genesis", a.handleGetGenesis)
 	mux.HandleFunc("POST /api/grants", a.handlePostGrant)
-	// After sequencing: set unprotected -65537 to the massif idtimestamp.
-	mux.HandleFunc(
-		"PATCH /api/forest/{logId}/grants/{subject}/idtimestamp",
-		a.handlePatchGrantIdtimestamp,
-	)
 
 	// Admin (admin-token): explicit, no automatic GC.
 	mux.HandleFunc("DELETE /api/forest/{logId}/grants/{subject}", a.handleDeleteGrant)
