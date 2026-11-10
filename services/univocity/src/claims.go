@@ -9,6 +9,7 @@ import (
 
 	"github.com/forestrie/arbor/services/pkgs/logid"
 	"github.com/forestrie/arbor/services/pkgs/publishproof"
+	massifstorage "github.com/forestrie/go-merklelog/massifs/storage"
 	"github.com/fxamacker/cbor/v2"
 )
 
@@ -219,15 +220,25 @@ func (a API) commitClaim(
 	if existing != root {
 		return claimResult{}, errLogInOtherForest
 	}
-	created, err := a.Store.PutGrantIfAbsent(ctx, root, subject, class, ts.Raw)
+	// The conditional put guards only its own class's key, so look for a
+	// grant of either class first: a log has one create grant.
+	stored, err := a.Store.GetGrant(ctx, root, subject)
+	created := false
+	switch {
+	case err == nil:
+	case errors.Is(err, massifstorage.ErrDoesNotExist):
+		created, err = a.Store.PutGrantIfAbsent(ctx, root, subject, class, ts.Raw)
+		if err != nil {
+			return claimResult{}, err
+		}
+		if !created {
+			stored, err = a.Store.GetGrant(ctx, root, subject)
+		}
+	}
 	if err != nil {
-		return claimResult{}, err
+		return claimResult{}, fmt.Errorf("read claimed grant: %w", err)
 	}
 	if !created {
-		stored, err := a.Store.GetGrant(ctx, root, subject)
-		if err != nil {
-			return claimResult{}, fmt.Errorf("read claimed grant: %w", err)
-		}
 		if err := requireSameGrant(stored, ts.Raw); err != nil {
 			return claimResult{}, err
 		}

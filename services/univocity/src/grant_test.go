@@ -290,11 +290,14 @@ func (s *fakeStore) GetGrant(_ context.Context, r, subject logid.UUID) ([]byte, 
 	return nil, errStoreMiss
 }
 
+// PutGrantIfAbsent is conditional on its own class's key only, as the S3
+// store's If-None-Match put is.
 func (s *fakeStore) PutGrantIfAbsent(_ context.Context, r, subject logid.UUID, class GrantClass, body []byte) (bool, error) {
-	if _, err := s.GetGrant(context.Background(), r, subject); err == nil {
+	key := s.grantStoreKey(r, subject, class)
+	if _, exists := s.grants[key]; exists {
 		return false, nil
 	}
-	s.grants[s.grantStoreKey(r, subject, class)] = body
+	s.grants[key] = body
 	return true, nil
 }
 

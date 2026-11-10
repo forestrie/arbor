@@ -231,3 +231,20 @@ func TestReservation_CommittedClaimNeverLapses(t *testing.T) {
 		t.Fatal("the committed grant stays stored")
 	}
 }
+
+// The grant class is part of the grant, not a second claim: a committed
+// data-log grant cannot be followed by an auth-log grant for the same log.
+func TestPostGrant_OtherClassCannotReplaceCommittedGrant(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	dataLog := Grant{LogID: A, OwnerLogID: f.R, Flags: dataLogFlags(), GrantData: xyConcat(mustKey(t))}
+	wantStatus(t, f.post(buildGrantStatement(t, f.boot, dataLog), intentCommit), http.StatusCreated, "commit data-log grant")
+
+	rec := f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentCommit)
+	wantStatus(t, rec, http.StatusConflict, "commit auth-log grant for the same log")
+	if !bytes.Contains(rec.Body.Bytes(), []byte("grant-already-claimed")) {
+		t.Fatalf("want grant-already-claimed, got %s", rec.Body.String())
+	}
+	rec = f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentReserve)
+	wantStatus(t, rec, http.StatusConflict, "reserve auth-log grant for the same log")
+}
