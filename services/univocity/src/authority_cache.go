@@ -69,6 +69,13 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		c.conflicts[x.LogID] = x
+		// Answers that are not final may rest on this log's earlier answer;
+		// drop them so its descendants report the conflict at once.
+		for id, e := range c.entries {
+			if !e.x.Final {
+				delete(c.entries, id)
+			}
+		}
 		return
 	}
 	var until time.Time

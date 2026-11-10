@@ -329,3 +329,42 @@ func TestAuthority_ConflictAlarmsOnce(t *testing.T) {
 		t.Fatalf("conflict alarmed %d times, want once", got)
 	}
 }
+
+// A child's answer is final only once every answer it rests on is final:
+// an owner anchored by its create grant's leaf can still turn conflicted at
+// its own first checkpoint, and the child must then report it.
+func TestAuthority_ChildIsNotFinalWhileItsOwnerCanStillConflict(t *testing.T) {
+	f := newClaimFixture(t)
+	A, C := testLogID(2), testLogID(3)
+	aKey := f.anchoredChild(A)
+	cKey := mustKey(t)
+	wantStatus(t, f.post(f.grant(C, A, aKey, cKey), intentCommit), http.StatusCreated, "commit C under A")
+	f.registerOnChain(C, A, xyConcat(cKey))
+
+	f.api.Registrations = NewRegistrationWatcher()
+	f.remount()
+	forest, _, err := f.api.resolveForestForLog(t.Context(), A, logid.UUID{})
+	if err != nil {
+		t.Fatalf("resolve forest: %v", err)
+	}
+	f.api.Registrations.watch(forest)
+	f.api.pollRegistrations(t.Context())
+
+	resp, _ := f.authority(A.String())
+	wantState(t, resp, stateAnchored, "A by its leaf")
+	resp, _ = f.authority(C.String())
+	wantState(t, resp, stateAnchored, "C on chain as claimed")
+	if resp.Final {
+		t.Fatal("C is final while its owner A can still conflict")
+	}
+
+	// A's first checkpoint registers it under another owner.
+	f.registerOnChain(A, testLogID(9), xyConcat(aKey))
+	f.chain.emitRegistration(A, testLogID(9))
+	f.api.pollRegistrations(t.Context())
+
+	resp, _ = f.authority(C.String())
+	if string(resp.BlockedBy) != string(A[:]) {
+		t.Fatalf("C blockedBy %x after A conflicted, want A", resp.BlockedBy)
+	}
+}

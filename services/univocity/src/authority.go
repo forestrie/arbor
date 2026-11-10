@@ -59,8 +59,9 @@ type Authority struct {
 	// amount of waiting resolves.
 	blockedByConflict bool
 	// Final is true once the answer cannot change: the forest root once its
-	// contract is deployed, any other log once its first checkpoint has been
-	// compared with its claim.
+	// contract is deployed; any other log once its first checkpoint has been
+	// compared with its claim and its owner's answer is final too, since an
+	// owner anchored by its leaf can still turn out conflicted.
 	Final bool
 }
 
@@ -181,11 +182,13 @@ func (a API) childAuthority(
 			return x, err
 		}
 	}
-	x.BlockedBy, x.blockedByConflict, err = a.blockedBy(ctx, forest, reader, x.OwnerLogID, depth)
+	var ownerSettled bool
+	x.BlockedBy, x.blockedByConflict, ownerSettled, err = a.blockedBy(ctx, forest, reader, x.OwnerLogID, depth)
 	if err != nil {
 		return Authority{}, err
 	}
 	if initialized {
+		x.Final = x.Final && ownerSettled
 		return x, nil
 	}
 
@@ -304,23 +307,26 @@ func (a API) leafState(
 }
 
 // blockedBy names the ancestor nearest the root that is not anchored, or is
-// conflicted, starting from owner, and whether that ancestor is conflicted.
+// conflicted, starting from owner; whether that ancestor is conflicted; and
+// whether the owner's answer is settled, so cannot change what it implies
+// for its children.
 func (a API) blockedBy(
 	ctx context.Context,
 	forest ForestEntry,
 	reader ChainReader,
 	owner logid.UUID,
 	depth int,
-) (logid.UUID, bool, error) {
+) (blocker logid.UUID, conflict, settled bool, err error) {
 	o, err := a.authorityIn(ctx, forest, reader, owner, depth+1)
 	if err != nil {
-		return logid.Zero, false, fmt.Errorf("owner %s authority: %w", owner, err)
+		return logid.Zero, false, false, fmt.Errorf("owner %s authority: %w", owner, err)
 	}
+	settled = o.Final || o.blockedByConflict
 	if !o.BlockedBy.IsZero() {
-		return o.BlockedBy, o.blockedByConflict, nil
+		return o.BlockedBy, o.blockedByConflict, settled, nil
 	}
 	if o.State != stateAnchored {
-		return owner, o.State == stateConflicted, nil
+		return owner, o.State == stateConflicted, settled, nil
 	}
-	return logid.Zero, false, nil
+	return logid.Zero, false, settled, nil
 }
