@@ -64,7 +64,12 @@ func TestKS256EOAChildFirstCheckpointPublishesWithGrantDataAsRootKey(t *testing.
 		"the child's recorded rootKey must be its grant's grantData")
 }
 
-func TestSafeChildFirstCheckpointPublishesThroughERC1271(t *testing.T) {
+// TestERC1271ChildFirstCheckpointPublishes covers a child rooted in a smart
+// account, the way a Safe-rooted child is. The account here is a minimal
+// ERC-1271 mock, not a Safe: what a Safe's owners sign (the Safe's own
+// message hash over the digest the contract passes it) is the signer's
+// concern, and the publisher relays the signature bytes untouched.
+func TestERC1271ChildFirstCheckpointPublishes(t *testing.T) {
 	f := newKS256Forest(t, "b0b1b2b3-b4b5-46b7-a8b9-babbbcbdbebf")
 	f.publish(f.rootUUID, f.authority, "root bootstrap")
 
@@ -80,11 +85,11 @@ func TestSafeChildFirstCheckpointPublishesThroughERC1271(t *testing.T) {
 	safe := f.openLog(safeUUID, ownerKey)
 	safe.addEntry(f.nextIdtimestamp(), bytes32FromLow(t, "c0"))
 	safe.commitAndSeal()
-	sealed := f.publish(safeUUID, safe, "first checkpoint of a Safe child")
+	sealed := f.publish(safeUUID, safe, "first checkpoint of an ERC-1271 child")
 
 	f.requireAnchored(safeUUID, sealed)
 	require.Equal(t, wallet.Bytes(), f.rootKeyOf(safeUUID),
-		"the Safe child's recorded rootKey must be the account's address")
+		"the ERC-1271 child's recorded rootKey must be the account's address")
 }
 
 // laneUnivocityRelease is the univocity release Lane A deploys for each run
@@ -228,10 +233,9 @@ type logConfigOut struct {
 	InitializedAt *big.Int
 }
 
-// deployERC1271Wallet deploys a smart account that answers ERC-1271 for
-// signatures its owner makes over the hash it is asked about: the shape of a
-// Safe as the contract sees it. testdata/SOURCE.erc1271_signer_mock records
-// where the bytecode comes from.
+// deployERC1271Wallet deploys a smart account that answers ERC-1271 for a
+// 65-byte signature its owner makes over the hash it is asked about.
+// testdata/SOURCE.erc1271_signer_mock records where the bytecode comes from.
 func (h *chainHarness) deployERC1271Wallet(owner common.Address) common.Address {
 	h.t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "erc1271-signer-mock.json"))

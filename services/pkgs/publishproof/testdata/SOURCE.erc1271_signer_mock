@@ -1,4 +1,4 @@
-ERC-1271 smart-account fixture for the Safe child publish test
+ERC-1271 smart-account fixture for the ERC-1271 child publish test
 (ks256_first_checkpoint_test.go).
 
 erc1271-signer-mock.json holds the creation bytecode and ABI of
@@ -6,7 +6,8 @@ ERC1271SignerMock, copied unmodified from forestrie/univocity
 test/checkpoints/UnivocityEIP1271.t.sol at commit
 879a411614627eb8a56eef34319e278276a6a8ee (lines 15-63). It answers
 ERC-1271 for a 65-byte signature its owner makes over the hash it is
-asked about, which is how the contract sees a one-owner Safe.
+asked about. It stands in for a smart-account root such as a Safe,
+but it is not one.
 
 Compiled with forge 1.5.1 and solc 0.8.30, matching univocity's
 foundry.toml (evm cancun, optimizer on, 200 runs). To regenerate, put
