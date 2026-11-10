@@ -87,6 +87,11 @@ func TestSafeChildFirstCheckpointPublishesThroughERC1271(t *testing.T) {
 		"the Safe child's recorded rootKey must be the account's address")
 }
 
+// laneUnivocityRelease is the univocity release Lane A deploys for each run
+// (the lane's hydrated release manifest, univocity.ks256.releaseTag), so
+// these tests exercise the contract the lane runs.
+const laneUnivocityRelease = "v0.3.0"
+
 // ks256Forest is a forest on anvil whose root R is a KS256 address. Every
 // log in it is owned by R and sealed by one standing P-256 delegate.
 type ks256Forest struct {
@@ -118,7 +123,7 @@ func newKS256Forest(t *testing.T, rootUUID string) *ks256Forest {
 	f := &ks256Forest{
 		t:        t,
 		client:   client,
-		chain:    deployUnivocity(t, client, rootAddr),
+		chain:    deployUnivocityRelease(t, client, laneUnivocityRelease, algKS256, rootAddr.Bytes()),
 		objects:  objects,
 		grants:   mapGetter(objects.objects),
 		delegate: newFixtureSealer(t),

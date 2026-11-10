@@ -288,8 +288,15 @@ func deployUnivocity(t *testing.T, client *ethclient.Client, signer common.Addre
 }
 
 func deployUnivocityKey(t *testing.T, client *ethclient.Client, bootstrapAlg int64, bootstrapKey []byte) *chainHarness {
+	return deployUnivocityRelease(t, client, "v0.2.0", bootstrapAlg, bootstrapKey)
+}
+
+// deployUnivocityRelease deploys ImutableUnivocity from the release's deploy
+// manifest, testdata/deploy-manifest-<release>.json, copied unmodified from
+// the forestrie/univocity GitHub release of that tag.
+func deployUnivocityRelease(t *testing.T, client *ethclient.Client, release string, bootstrapAlg int64, bootstrapKey []byte) *chainHarness {
 	ctx := t.Context()
-	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-v0.2.0.json"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "deploy-manifest-"+release+".json"))
 	require.NoError(t, err)
 	var manifest deployManifest
 	require.NoError(t, json.Unmarshal(raw, &manifest))
