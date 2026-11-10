@@ -12,11 +12,17 @@ import (
 // maxRegistrationSpan bounds the block range of one LogRegistered query.
 const maxRegistrationSpan = 2000
 
+// registrationLookback is how far before the head a contract's first poll
+// starts, so registrations between univocity loading the forest and that
+// poll are not skipped. Seeing an event twice is harmless.
+const registrationLookback = 256
+
 // RegistrationWatcher follows each forest contract's LogRegistered events
 // so a claimed log is compared with its first checkpoint as soon as it is
-// registered (devdocs ADR-0075 decision 8). Contracts are watched from the
-// head at the time univocity first loads their forest; a log registered
-// before that is compared when its authority is next computed.
+// registered (devdocs ADR-0075 decision 8). Contracts are watched from
+// shortly before the head at univocity's first poll after loading their
+// forest; a log registered earlier is compared when its authority is next
+// computed.
 type RegistrationWatcher struct {
 	mu        sync.Mutex
 	contracts map[watchedKey]*watchedContract
@@ -99,8 +105,7 @@ func (a API) pollContract(ctx context.Context, c *watchedContract) error {
 		return err
 	}
 	if !c.started {
-		c.cursor, c.started = head, true
-		return nil
+		c.cursor, c.started = head-min(head, registrationLookback), true
 	}
 	for c.cursor < head {
 		to := min(head, c.cursor+maxRegistrationSpan)

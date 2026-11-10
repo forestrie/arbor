@@ -159,7 +159,7 @@ func TestAnvilConflict_WatcherDetectsRegistration(t *testing.T) {
 
 	u.api.Registrations = NewRegistrationWatcher()
 	u.api.Registrations.watch(u.forest)
-	u.api.pollRegistrations(t.Context()) // starts the cursor at the head
+	u.api.pollRegistrations(t.Context()) // first poll: catches up to the head
 	u.remount()
 
 	alarms := ConflictsDetected()

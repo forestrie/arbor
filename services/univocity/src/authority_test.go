@@ -263,7 +263,7 @@ func TestRegistrationWatcher_DetectsConflictAtRegistration(t *testing.T) {
 		t.Fatalf("resolve forest: %v", err)
 	}
 	w.watch(forest)
-	f.api.pollRegistrations(t.Context()) // starts the cursor at the head
+	f.api.pollRegistrations(t.Context()) // first poll: catches up to the head
 
 	alarms := ConflictsDetected()
 	other := testLogID(9)
@@ -419,5 +419,28 @@ func TestPostGrant_CommitUnderConflictedOwnerIsRefusedAsConflict(t *testing.T) {
 	wantStatus(t, rec, http.StatusConflict, "commit under a conflicted owner")
 	if !bytes.Contains(rec.Body.Bytes(), []byte("authority-conflict")) {
 		t.Fatalf("want authority-conflict, got %s", rec.Body.String())
+	}
+}
+
+// A registration between univocity loading the forest and the watcher's
+// first poll is not skipped.
+func TestRegistrationWatcher_SeesRegistrationsBeforeItsFirstPoll(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	f.anchoredChild(A)
+	f.api.Registrations = NewRegistrationWatcher()
+	f.remount()
+	forest, _, err := f.api.resolveForestForLog(t.Context(), A, logid.UUID{})
+	if err != nil {
+		t.Fatalf("resolve forest: %v", err)
+	}
+	f.api.Registrations.watch(forest)
+
+	alarms := ConflictsDetected()
+	f.registerOnChain(A, testLogID(9), xyConcat(mustKey(t)))
+	f.chain.emitRegistration(A, testLogID(9))
+	f.api.pollRegistrations(t.Context())
+	if ConflictsDetected() != alarms+1 {
+		t.Fatal("the first poll skipped a registration made after the forest was loaded")
 	}
 }
