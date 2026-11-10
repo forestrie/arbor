@@ -422,43 +422,11 @@ func (q *QueueConsumer) ProcessAndAcknowledge(ctx context.Context, qbatch *Queue
 				if q.metrics != nil {
 					q.metrics.ObserveCheckpointDuration(time.Since(checkpointStart).Seconds())
 				}
-				disposition, reason := sealer.ClassifySealError(err)
-				switch disposition {
-				case sealer.SealDeferred:
-					// Expected retry paths: do not ack messages for this log so the queue will redeliver.
-					// Log at WARN (not INFO) and count it: at the deployed "notice"
-					// level an INFO deferral is invisible, so a log stuck awaiting a
-					// delegation, or its authority's anchoring, looks like the sealer
-					// is idle. This is the primary operator signal that a first
-					// checkpoint is blocked (e.g. an advance cert not pre-submitted in
-					// time, or an owner that has not published).
-					if q.metrics != nil {
-						q.metrics.IncCheckpointDeferred(reason)
-					}
-					q.logger.Warn("log checkpointing deferred, will retry",
-						"logID", keyFromLogIDBytes(w.logIDBytes),
-						"massifHeight", w.massifHeight,
-						"reason", reason,
-						"error", err,
-					)
-					return
-				case sealer.SealDropped:
-					// The log will never be sealed again (its authority is
-					// conflicted): ack its messages so they are not redelivered.
-					q.logger.Warn("log checkpointing dropped; not retried",
-						"logID", keyFromLogIDBytes(w.logIDBytes),
-						"massifHeight", w.massifHeight,
-						"reason", reason,
-						"error", err,
-					)
-					q.ackAll(ctx, w.messages)
-					return
+				if q.settleFailedSeal(ctx, w, err) {
+					mu.Lock()
+					failures++
+					mu.Unlock()
 				}
-				mu.Lock()
-				failures++
-				mu.Unlock()
-				q.logger.Warn("log checkpointing failed", "logID", keyFromLogIDBytes(w.logIDBytes), "massifHeight", w.massifHeight, "error", err)
-				// Don't ack messages for this log; they will be retried after visibility timeout.
 				return
 			}
 
@@ -585,6 +553,46 @@ func (q *QueueConsumer) AcknowledgeMessage(ctx context.Context, message QueueMes
 	}
 
 	return nil
+}
+
+// settleFailedSeal acts on a log whose seal failed, by the failure's cause,
+// and reports whether it counts as a failure. A pending authority or
+// delegation leaves the log's messages for redelivery; a conflicted log is
+// never sealed again, so its messages are acked; anything else is a
+// failure, and its messages redeliver after the visibility timeout.
+func (q *QueueConsumer) settleFailedSeal(ctx context.Context, w *logWork, err error) bool {
+	disposition, reason := sealer.ClassifySealError(err)
+	switch disposition {
+	case sealer.SealDeferred:
+		// Log at WARN (not INFO) and count it: at the deployed "notice"
+		// level an INFO deferral is invisible, so a log stuck awaiting a
+		// delegation, or its authority's anchoring, looks like the sealer
+		// is idle. This is the primary operator signal that a first
+		// checkpoint is blocked (e.g. an advance cert not pre-submitted in
+		// time, or an owner that has not published).
+		if q.metrics != nil {
+			q.metrics.IncCheckpointDeferred(reason)
+		}
+		q.logger.Warn("log checkpointing deferred, will retry",
+			"logID", keyFromLogIDBytes(w.logIDBytes),
+			"massifHeight", w.massifHeight,
+			"reason", reason,
+			"error", err,
+		)
+		return false
+	case sealer.SealDropped:
+		q.logger.Warn("log checkpointing dropped; not retried",
+			"logID", keyFromLogIDBytes(w.logIDBytes),
+			"massifHeight", w.massifHeight,
+			"reason", reason,
+			"error", err,
+		)
+		q.ackAll(ctx, w.messages)
+		return false
+	}
+	q.logger.Warn("log checkpointing failed",
+		"logID", keyFromLogIDBytes(w.logIDBytes), "massifHeight", w.massifHeight, "error", err)
+	return true
 }
 
 func (q *QueueConsumer) ackAll(ctx context.Context, messages []QueueMessage) {
