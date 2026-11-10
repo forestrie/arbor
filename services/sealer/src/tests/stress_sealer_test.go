@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -498,42 +497,6 @@ func newFakeCustodian(t *testing.T) *httptest.Server {
 				IssuedAt:    int64(issuedAt),
 				ExpiresAt:   int64(expiresAt),
 				Certificate: certBytes,
-			}
-			respBytes, _ := cbor.Marshal(resp)
-			w.Header().Set("Content-Type", "application/cbor")
-			_, _ = w.Write(respBytes)
-			return
-		}
-
-		// Match POST /api/keys/<logIdHex>/sign - sign digest using CBOR
-		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/sign") {
-			body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
-			if err != nil {
-				http.Error(w, "read", http.StatusBadRequest)
-				return
-			}
-
-			var req sealer.CustodianSignRequest
-			if err := cbor.Unmarshal(body, &req); err != nil {
-				http.Error(w, "cbor unmarshal", http.StatusBadRequest)
-				return
-			}
-
-			// Sign the digest with the custody key
-			var rVal, sVal *big.Int
-			rVal, sVal, err = ecdsa.Sign(rand.Reader, state.privateKey, req.PayloadHash)
-			if err != nil {
-				http.Error(w, "sign", http.StatusInternalServerError)
-				return
-			}
-
-			// Return r||s concatenated signature (fixed 64 bytes for P-256)
-			sig := make([]byte, 64)
-			rVal.FillBytes(sig[0:32])
-			sVal.FillBytes(sig[32:64])
-
-			resp := sealer.CustodianSignResponse{
-				Signature: sig,
 			}
 			respBytes, _ := cbor.Marshal(resp)
 			w.Header().Set("Content-Type", "application/cbor")

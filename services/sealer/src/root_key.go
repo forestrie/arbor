@@ -106,3 +106,20 @@ func EncodeECDSAPublicKeyPEMFromXY(alg string, x, y []byte) (string, error) {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})), nil
 }
+
+// ParseECDSAPublicKeyFromPEM parses a PEM-encoded SPKI public key.
+func ParseECDSAPublicKeyFromPEM(pemStr string) (*ecdsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block in public key")
+	}
+	k, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse PKIX public key: %w", err)
+	}
+	pub, ok := k.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("public key is not ECDSA")
+	}
+	return pub, nil
+}
