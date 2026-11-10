@@ -27,11 +27,13 @@ import (
 // Production never signs a checkpoint with the KS256 root itself. The sealer
 // signs every checkpoint with a standing P-256 delegate (ES256), and each
 // checkpoint carries the on-chain delegation proof in which the log's own
-// root authorises that delegate (protocol ADR-0050). The contract checks the
-// proof against the forest's bootstrap key for the root log, and against the
-// create grant's grantData for a child's first checkpoint, which it then
-// records as the child's rootKey. Every publish here goes through
-// AssemblePublish, the publisher's path from public objects to calldata.
+// root authorises that delegate (protocol ADR-0050,
+// https://github.com/forestrie/protocol/blob/main/decisions/adr-0050-delegation-in-advance.md).
+// The contract checks the proof against the forest's bootstrap key for the
+// root log, and against the create grant's grantData for a child's first
+// checkpoint, which it then records as the child's rootKey. Every publish
+// here goes through AssemblePublish, the publisher's path from public
+// objects to calldata.
 
 func TestKS256RootFirstCheckpointPublishes(t *testing.T) {
 	f := newKS256Forest(t, "80818283-8485-4687-a889-8a8b8c8d8e8f")
