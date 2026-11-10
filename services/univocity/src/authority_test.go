@@ -368,3 +368,25 @@ func TestAuthority_ChildIsNotFinalWhileItsOwnerCanStillConflict(t *testing.T) {
 		t.Fatalf("C blockedBy %x after A conflicted, want A", resp.BlockedBy)
 	}
 }
+
+// The owner may grow and publish between the leaf scan and the proof; the
+// proof must read the owner's log as published, not the scan's view of it.
+func TestAuthority_ProofReadsTheOwnerLogAsPublished(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	stmt := f.grant(A, f.R, f.boot, mustKey(t))
+	wantStatus(t, f.post(stmt, intentCommit), http.StatusCreated, "commit")
+	f.logs.appendLeaf(f.R, contentHashOf(t, stmt))
+
+	f.chain.beforeLogState = func() {
+		var size uint64
+		// Stay within the first massif (height 3: four leaves).
+		for i := range 2 {
+			size = f.logs.appendLeaf(f.R, [32]byte{byte(i + 1)})
+		}
+		f.publishRoot(size)
+	}
+	resp, rec := f.authority(A.String())
+	wantStatus(t, rec, http.StatusOK, "authority")
+	wantState(t, resp, stateAnchored, "covered by a checkpoint published after the scan")
+}

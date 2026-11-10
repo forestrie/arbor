@@ -293,6 +293,13 @@ func (a API) leafState(
 	if err != nil {
 		return "", fmt.Errorf("owner logState: %w", err)
 	}
+	// A fresh reader, opened after the on-chain state is read, holds at
+	// least the published size: the scan's reader caches the head massif
+	// as it was, and the owner may have grown and published since.
+	ownerLog, err = a.Massifs.Massif(ctx, owner)
+	if err != nil {
+		return "", fmt.Errorf("owner log reader: %w", err)
+	}
 	covered, err := publishproof.VerifyGrantLeafAnchored(ctx, ownerLog, a.Massifs.MassifHeight(), state, gl)
 	if err != nil {
 		a.Logger.Error("owner log disagrees with its on-chain accumulator",

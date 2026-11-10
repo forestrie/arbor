@@ -23,6 +23,8 @@ type mockChain struct {
 	calls int
 	// bootstrapErr, when set, fails BootstrapConfig (an RPC outage).
 	bootstrapErr error
+	// beforeLogState, when set, runs once at the next LogState read.
+	beforeLogState func()
 	// block is the chain head; registrations are LogRegistered events.
 	block         uint64
 	registrations []LogRegistration
@@ -113,6 +115,13 @@ func (m *mockChain) LogConfig(_ context.Context, id logid.UUID) (LogConfig, erro
 }
 
 func (m *mockChain) LogState(_ context.Context, id logid.UUID) (publishproof.LogState, error) {
+	m.mu.Lock()
+	hook := m.beforeLogState
+	m.beforeLogState = nil
+	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	l, _ := m.log(id)
 	return l.state, nil
 }
