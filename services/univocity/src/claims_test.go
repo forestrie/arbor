@@ -286,3 +286,24 @@ func TestClaimedGrant_SeesAClaimWhileTheLogIsCommitted(t *testing.T) {
 		t.Fatalf("claim read during commit: %v", err)
 	}
 }
+
+// A forest root is never a child: its log id cannot be claimed under another
+// forest, even before its self-index entry exists (canopy can write a
+// genesis directly).
+func TestPostGrant_ForestRootCannotBeClaimedAsAChild(t *testing.T) {
+	f := newClaimFixture(t)
+	R2 := testLogID(7)
+	f.store.genesis[R2.String()] = buildGenesisDoc(t, R2, mustKey(t), 84532, common.HexToAddress("0xdef"))
+
+	for _, intent := range []string{intentReserve, intentCommit} {
+		rec := f.post(f.grant(R2, f.R, f.boot, mustKey(t)), intent)
+		wantStatus(t, rec, http.StatusConflict, intent+" a forest root as a child")
+	}
+	if _, found, _ := f.store.IndexGet(t.Context(), R2); found {
+		t.Fatal("a refused claim binds nothing")
+	}
+
+	// The forest root's own grant is still claimed in its own forest.
+	own := buildGrantStatement(t, f.boot, Grant{LogID: f.R, OwnerLogID: f.R, Flags: authLogFlags(), GrantData: xyConcat(f.boot)})
+	wantStatus(t, f.post(own, intentCommit), http.StatusCreated, "commit the root's own grant")
+}

@@ -121,6 +121,9 @@ func (a API) reserveClaim(
 	subject := ts.Grant.LogID
 	defer lockSubject(subject)()
 
+	if err := a.refuseForestRoot(ctx, root, subject); err != nil {
+		return claimResult{}, err
+	}
 	indexed, found, err := a.Store.IndexGet(ctx, subject)
 	if err != nil {
 		return claimResult{}, fmt.Errorf("index lookup: %w", err)
@@ -202,6 +205,9 @@ func (a API) commitClaim(
 	subject := ts.Grant.LogID
 	defer lockSubject(subject)()
 
+	if err := a.refuseForestRoot(ctx, root, subject); err != nil {
+		return claimResult{}, err
+	}
 	res, held, err := a.readReservation(ctx, subject)
 	if err != nil {
 		return claimResult{}, err
@@ -252,6 +258,24 @@ func (a API) commitClaim(
 		}
 	}
 	return claimResult{created: created && !converting, state: stateCommitted}, nil
+}
+
+// refuseForestRoot refuses to claim another forest's root as a child in
+// root: its genesis makes it the root of its own forest, whether or not its
+// self-index entry has been written yet. A root's own grant is allowed.
+func (a API) refuseForestRoot(ctx context.Context, root, subject logid.UUID) error {
+	if subject == root {
+		return nil
+	}
+	_, err := a.Store.GetGenesis(ctx, subject)
+	switch {
+	case err == nil:
+		return errLogInOtherForest
+	case isStoreMiss(err):
+		return nil
+	default:
+		return fmt.Errorf("genesis lookup: %w", err)
+	}
 }
 
 // requireSameGrant accepts a re-post of the claimed grant: the same grant
