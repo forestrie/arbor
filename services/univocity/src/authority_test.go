@@ -42,19 +42,55 @@ func TestAuthority_RootWithoutContractIsPending(t *testing.T) {
 	}
 }
 
-func TestAuthority_RootWithContractIsAnchoredAndFinal(t *testing.T) {
+func TestAuthority_RootOnChainIsAnchoredAndFinal(t *testing.T) {
 	f := newClaimFixture(t)
+	f.chain.rootLogId = f.R
+
 	resp, rec := f.authority(f.R.String())
 	wantStatus(t, rec, http.StatusOK, "root authority")
 	if resp.State != stateAnchored || !resp.Final || resp.Alg != coseAlgES256 ||
 		string(resp.Key) != string(xyConcat(f.boot)) {
-		t.Fatalf("deployed root reported %+v; want anchored, final, bootstrap key", resp)
+		t.Fatalf("root on chain reported %+v; want anchored, final, bootstrap key", resp)
 	}
 }
 
-// rootLog marks the forest root as published on chain at size.
+// Before the root's first checkpoint the contract records no root, so the
+// root is anchored (its key is the contract's, and the sealer needs it to
+// seal that first checkpoint) but not final: another forest bound to the
+// same contract could still publish first.
+func TestAuthority_RootBeforeItsFirstCheckpointIsAnchoredNotFinal(t *testing.T) {
+	f := newClaimFixture(t)
+
+	resp, rec := f.authority(f.R.String())
+	wantStatus(t, rec, http.StatusOK, "root authority")
+	if resp.State != stateAnchored || resp.Final ||
+		string(resp.Key) != string(xyConcat(f.boot)) {
+		t.Fatalf("root before its first checkpoint reported %+v; want anchored, not final, bootstrap key", resp)
+	}
+}
+
+// A contract takes one root: the first root checkpoint published to it
+// (platform rule P14). A forest whose genesis names a contract that another
+// log already roots can never publish there, so its root is conflicted, and
+// final.
+func TestAuthority_RootOfAContractRootedElsewhereIsConflicted(t *testing.T) {
+	f := newClaimFixture(t)
+	f.chain.rootLogId = testLogID(99)
+
+	resp, rec := f.authority(f.R.String())
+	wantStatus(t, rec, http.StatusOK, "root authority")
+	if resp.State != stateConflicted || !resp.Final {
+		t.Fatalf("root of a contract rooted elsewhere reported %+v; want conflicted, final", resp)
+	}
+}
+
+// publishRoot marks the forest root as published on chain at size. Its first
+// checkpoint makes it the contract's root, and the LogRegistered watcher
+// then drops its answer from before (TestRegistrationWatcher_RootTurnsFinal).
 func (f *claimFixture) publishRoot(size uint64) {
 	f.t.Helper()
+	f.chain.rootLogId = f.R
+	f.api.Authorities.evict(f.R)
 	f.chain.setLog(f.R, mockLog{
 		config: LogConfig{Kind: LogKindAuthority, AuthLogId: f.R, RootKey: xyConcat(f.boot)},
 		state:  f.logs.published(f.R, size),
@@ -243,6 +279,29 @@ func TestAuthority_FirstRegistrationDifferingFromClaimIsConflicted(t *testing.T)
 			resp, _ = f.authority(A.String())
 			wantState(t, resp, stateConflicted, "later")
 		})
+	}
+}
+
+// A root read before its first checkpoint is anchored but not final, and is
+// cached until re-check. Its own LogRegistered event makes it final at once.
+func TestRegistrationWatcher_RootTurnsFinal(t *testing.T) {
+	f := newClaimFixture(t)
+	w := NewRegistrationWatcher()
+	f.api.Registrations = w
+	f.remount()
+	resp, _ := f.authority(f.R.String())
+	if resp.State != stateAnchored || resp.Final {
+		t.Fatalf("root before its first checkpoint %+v; want anchored, not final", resp)
+	}
+	f.api.pollRegistrations(t.Context()) // first poll: catches up to the head
+
+	f.chain.rootLogId = f.R
+	f.chain.emitRegistration(f.R, f.R)
+	f.api.pollRegistrations(t.Context())
+
+	resp, _ = f.authority(f.R.String())
+	if resp.State != stateAnchored || !resp.Final {
+		t.Fatalf("root after its first checkpoint %+v; want anchored, final", resp)
 	}
 }
 
