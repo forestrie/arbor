@@ -76,14 +76,44 @@ func TestVerifyGrantEnvelopeKS256_LowSVector(t *testing.T) {
 				t.Fatalf("want accept, got %v", err)
 			}
 			if c.Expect.Result != "accept" {
-				// The write handler and the reservation sweep both key on
-				// ErrGrantSignatureInvalid; the inner error says why.
+				// The reservation sweep keys on ErrGrantSignatureInvalid;
+				// the inner error says why.
 				if !errors.Is(err, ErrGrantSignatureInvalid) ||
 					!errors.Is(err, errKS256SignatureValues) {
 					t.Fatalf("want the low-s refusal, got %v", err)
 				}
 			}
 		})
+	}
+}
+
+// v must be the recovery id 0 or 1. Without cgo, SigToPub hands v+27 to
+// decred's RecoverCompact, which also takes the compressed-key codes 31-34,
+// so v 4-7 would recover the same signer: a second malleation the values
+// check refuses. 27 is refused because arbor takes the recovery id only.
+func TestVerifyGrantEnvelopeKS256_RefusesNonCanonicalV(t *testing.T) {
+	v := loadKS256LowSVector(t)
+	var low ks256LowSCase
+	for _, c := range v.Cases {
+		if c.Name == "accept/low-s" {
+			low = c
+		}
+	}
+	if low.Name == "" {
+		t.Fatal("vector has no accept/low-s case")
+	}
+	// Adding an even offset to the vector's v (0 or 1) keeps the key it
+	// selects, so v+4 is the compressed-code twin that recovers the signer.
+	for _, offset := range []byte{2, 4, 6, 27} {
+		cose, owner := decodeKS256LowSCase(t, low)
+		sig := append([]byte(nil), cose.signature...)
+		sig[64] += offset
+		cose.signature = sig
+		err := verifyGrantEnvelope(context.Background(), cose, coseAlgKS256, owner, nil)
+		if !errors.Is(err, ErrGrantSignatureInvalid) ||
+			!errors.Is(err, errKS256SignatureValues) {
+			t.Fatalf("v=%d: want the values refusal, got %v", sig[64], err)
+		}
 	}
 }
 

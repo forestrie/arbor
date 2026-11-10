@@ -64,6 +64,32 @@ func TestVerifyCertificateSignatureKS256_LowSVector(t *testing.T) {
 	}
 }
 
+// v must be the recovery id 0 or 1. Without cgo, SigToPub hands v+27 to
+// decred's RecoverCompact, which also takes the compressed-key codes 31-34,
+// so v 4-7 would recover the same signer: a second malleation the values
+// check refuses. 27 is refused because arbor takes the recovery id only.
+func TestVerifyCertificateSignatureKS256_RefusesNonCanonicalV(t *testing.T) {
+	v := loadKS256LowSVector(t)
+	var low ks256LowSCase
+	for _, c := range v.Cases {
+		if c.Name == "accept/low-s" {
+			low = c
+		}
+	}
+	require.Equal(t, "accept/low-s", low.Name)
+	// Adding an even offset to the vector's v (0 or 1) keeps the key it
+	// selects, so v+4 is the compressed-code twin that recovers the signer.
+	for _, offset := range []byte{2, 4, 6, 27} {
+		cert := mustHex(t, low.CoseSign1Hex)
+		// The untagged COSE_Sign1 ends with the 65-byte signature, so its
+		// last byte is v.
+		cert[len(cert)-1] += offset
+		err := VerifyCertificateSignatureKS256(
+			cert, mustHex(t, low.SignerAddressHex), nil)
+		require.ErrorIs(t, err, errKS256SignatureValues, "v=%d", cert[len(cert)-1])
+	}
+}
+
 type recordingERC1271 struct{ hash, sig []byte }
 
 func (r *recordingERC1271) HasCode(context.Context, []byte) (bool, error) { return true, nil }
