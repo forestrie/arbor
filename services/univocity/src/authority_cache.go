@@ -71,11 +71,7 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 		c.conflicts[x.LogID] = x
 		// Answers that are not final may rest on this log's earlier answer;
 		// drop them so its descendants report the conflict at once.
-		for id, e := range c.entries {
-			if !e.x.Final {
-				delete(c.entries, id)
-			}
-		}
+		c.dropLocked(func(_ logid.UUID, e authorityEntry) bool { return !e.x.Final })
 		return
 	}
 	var until time.Time
@@ -109,9 +105,21 @@ func (c *AuthorityCache) evict(id logid.UUID) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if e, ok := c.entries[id]; ok && !e.x.Final {
-		delete(c.entries, id)
+	c.dropLocked(func(k logid.UUID, e authorityEntry) bool { return k == id && !e.x.Final })
+}
+
+// dropLocked removes the answers drop selects, from the entries and from
+// the eviction order alike, so that order holds each cached log once.
+func (c *AuthorityCache) dropLocked(drop func(logid.UUID, authorityEntry) bool) {
+	kept := c.order[:0]
+	for _, id := range c.order {
+		if e, ok := c.entries[id]; ok && drop(id, e) {
+			delete(c.entries, id)
+			continue
+		}
+		kept = append(kept, id)
 	}
+	c.order = kept
 }
 
 // leafAnchored reports whether a published checkpoint of the owner has been
