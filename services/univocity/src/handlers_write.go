@@ -80,6 +80,20 @@ func (a API) handlePostGenesis(w http.ResponseWriter, r *http.Request) {
 			"anchor verification failed", err.Error())
 		return
 	}
+	// The subject lock serialises genesis with reserveClaim and commitClaim
+	// in this process: a reservation that lands first is seen here, and a
+	// genesis that lands first is seen by their refuseForestRoot.
+	defer lockSubject(doc.Forest.R)()
+	if held, found, err := a.liveReservationRoot(r.Context(), doc.Forest.R); err != nil {
+		a.writeProblem(w, r, http.StatusBadGateway, "about:blank",
+			"reservation lookup failed", err.Error())
+		return
+	} else if found && held != doc.Forest.R {
+		a.writeProblem(w, r, http.StatusUnprocessableEntity, "about:blank",
+			"logId reserved by another forest",
+			"a live reservation holds this log id as a child of "+held.String())
+		return
+	}
 	// Claim-first (plan-2607-10 D4): the R->R self-index is the atomic
 	// global-uniqueness claim and must precede the genesis object, mirroring
 	// handlePostGrant — a logId already bound as another forest's subject

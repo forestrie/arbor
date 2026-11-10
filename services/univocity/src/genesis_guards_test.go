@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
@@ -70,4 +71,32 @@ func TestPostGenesis_ContractRootedAtThisForestAccepted(t *testing.T) {
 	f.chain.rootLogId = R2
 
 	wantStatus(t, f.postGenesis(R2), http.StatusCreated, "genesis on its own contract")
+}
+
+// A log another forest holds by a live reservation cannot become a forest
+// root: genesis is refused, and stores nothing.
+func TestPostGenesis_SubjectReservedByAnotherForestRefused(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(42)
+	wantStatus(t, f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentReserve),
+		http.StatusCreated, "reserve A in R")
+
+	wantStatus(t, f.postGenesis(A), http.StatusUnprocessableEntity, "genesis for a reserved log")
+	if _, ok := f.store.genesis[A.String()]; ok {
+		t.Fatal("a refused genesis must store no genesis")
+	}
+	if _, ok := f.store.index[A.String()]; ok {
+		t.Fatal("a refused genesis must claim no index entry")
+	}
+}
+
+// A lapsed reservation holds nothing: the log can become a forest root.
+func TestPostGenesis_LapsedReservationDoesNotBlock(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(43)
+	wantStatus(t, f.post(f.grant(A, f.R, f.boot, mustKey(t)), intentReserve),
+		http.StatusCreated, "reserve A in R")
+	f.now = f.now.Add(f.api.ReservationTTL + time.Second)
+
+	wantStatus(t, f.postGenesis(A), http.StatusCreated, "genesis after the reservation lapsed")
 }
