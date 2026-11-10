@@ -50,6 +50,20 @@ type fakeUnivocity struct {
 	mu     sync.Mutex
 	answer authorityAnswer
 	calls  int
+	// held, when set, receives each request, which then waits for gate.
+	held chan struct{}
+	gate chan struct{}
+}
+
+// hold makes the fake hold each request until release is called. held
+// receives once per request as it arrives.
+func (f *fakeUnivocity) hold() (held <-chan struct{}, release func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.held, f.gate = make(chan struct{}, 16), make(chan struct{})
+	gate := f.gate
+	var once sync.Once
+	return f.held, func() { once.Do(func() { close(gate) }) }
 }
 
 func (f *fakeUnivocity) set(a authorityAnswer) {
@@ -83,8 +97,12 @@ func newAuthorityServer(t *testing.T, pub *ecdsa.PublicKey, errStatus int) *fake
 		}
 		f.mu.Lock()
 		f.calls++
-		a := f.answer
+		a, held, gate := f.answer, f.held, f.gate
 		f.mu.Unlock()
+		if gate != nil {
+			held <- struct{}{}
+			<-gate
+		}
 		if a.status != 0 {
 			w.WriteHeader(a.status)
 			return

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -57,6 +58,15 @@ func TestRequestLogDelegationLease_BYOKRejectsCertificateForAnotherLog(t *testin
 
 // newBYOKIssuerServer stands up a fake delegation issuer that signs the
 // returned certificate with rootPriv (non-Custodian, runner-owned).
+// certLogIDFor is the log a fake issuer's certificate names: certLogID,
+// or the requested log when certLogID is empty.
+func certLogIDFor(certLogID string, req delegationcert.DelegationIssueRequest) string {
+	if certLogID != "" {
+		return certLogID
+	}
+	return hex.EncodeToString(req.LogID)
+}
+
 func newBYOKIssuerServer(
 	t *testing.T,
 	rootPriv *ecdsa.PrivateKey,
@@ -99,7 +109,7 @@ func newBYOKIssuerServer(
 			curve,
 			kid,
 			delegationcert.DelegationInput{
-				LogID:        certLogID,
+				LogID:        certLogIDFor(certLogID, req),
 				MmrStart:     req.MMRStart,
 				MmrEnd:       req.MMREnd,
 				DelegatedKey: delegatedKey,

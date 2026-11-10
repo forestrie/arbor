@@ -132,12 +132,12 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 			leaseCoversMMRRange(lease, mmrStart, mmrEnd) {
 			if err := m.recheckAuthority(ctx, logIdHex, lease, now); err != nil {
 				if errors.Is(err, ErrLogConflicted) {
-					m.lru.Remove(elem)
-					delete(m.leases, logIdHex)
+					m.dropLease(logIdHex)
 					m.markConflicted(logger, logIdHex, err)
 				}
 				return nil, err
 			}
+			// A no-op when the lease left the cache during a recheck.
 			m.lru.MoveToFront(elem)
 			return lease, nil
 		}
@@ -247,19 +247,34 @@ func leaseCoversMMRRange(lease *DelegationLease, mmrStart, mmrEnd uint64) bool {
 // recheckAuthority asks univocity again about a cached lease's log when the
 // answer the lease was taken on was not final and authorityRecheck has
 // passed. Any answer but anchored is an error, and the lease is not used.
+// It is called holding m.mu and releases it while univocity answers, so a
+// slow answer about one log does not hold up another log's cached lease
+// (devdocs ADR-0075: without univocity, sealing stops only for the logs
+// whose answer must be asked again).
 func (m *DelegationLeaseManager) recheckAuthority(
 	ctx context.Context, logIdHex string, lease *DelegationLease, now time.Time,
 ) error {
 	if lease.authorityFinal || now.Sub(lease.authorityCheckedAt) < m.authorityRecheck {
 		return nil
 	}
+	m.mu.Unlock()
 	binding, err := m.resolver.ResolveAuthority(ctx, logIdHex)
+	m.mu.Lock()
 	if err != nil {
 		return fmt.Errorf("recheck authority: %w", err)
 	}
 	lease.authorityFinal = binding.Final
 	lease.authorityCheckedAt = now
 	return nil
+}
+
+// dropLease removes logIdHex's cached lease, if any. It is called holding
+// m.mu.
+func (m *DelegationLeaseManager) dropLease(logIdHex string) {
+	if elem, ok := m.leases[logIdHex]; ok {
+		m.lru.Remove(elem)
+		delete(m.leases, logIdHex)
+	}
 }
 
 // markConflicted records a log univocity reported conflicted, so it is

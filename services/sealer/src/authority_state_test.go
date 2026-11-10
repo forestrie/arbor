@@ -61,7 +61,7 @@ type authorityLeaseFixture struct {
 	recorded *recordingTransport
 }
 
-func newAuthorityLeaseFixture(t *testing.T, logIDs ...string) *authorityLeaseFixture {
+func newAuthorityLeaseFixture(t *testing.T) *authorityLeaseFixture {
 	t.Helper()
 	rootPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -69,9 +69,8 @@ func newAuthorityLeaseFixture(t *testing.T, logIDs ...string) *authorityLeaseFix
 	}
 	univ := newAuthorityServer(t, &rootPriv.PublicKey, 0)
 	t.Cleanup(univ.Close)
-	// The issuer signs certificates for the first log; tests that lease
-	// other logs only reach univocity.
-	issuerSrv := newBYOKIssuerServer(t, rootPriv, logIDs[0], nil)
+	// The issuer signs a certificate for whichever log is requested.
+	issuerSrv := newBYOKIssuerServer(t, rootPriv, "", nil)
 	t.Cleanup(issuerSrv.Close)
 
 	hc, rec := recordingHTTPClient()
@@ -114,7 +113,7 @@ func hostOf(t *testing.T, raw string) string {
 func TestDelegationLease_RootKeyComesOnlyFromUnivocity(t *testing.T) {
 	logID := "4123456789abcdef0123456789abcdef"
 	other := "5123456789abcdef0123456789abcdef"
-	f := newAuthorityLeaseFixture(t, logID)
+	f := newAuthorityLeaseFixture(t)
 
 	if _, err := f.lease(logID); err != nil {
 		t.Fatalf("lease: %v", err)
@@ -141,7 +140,7 @@ func TestDelegationLease_RootKeyComesOnlyFromUnivocity(t *testing.T) {
 // with every ancestor anchored too.
 func TestDelegationLease_PendingLogRetriedUntilAnchored(t *testing.T) {
 	logID := "6123456789abcdef0123456789abcdef"
-	f := newAuthorityLeaseFixture(t, logID)
+	f := newAuthorityLeaseFixture(t)
 	owner := make([]byte, 16)
 	owner[15] = 1
 
@@ -174,7 +173,7 @@ func TestDelegationLease_PendingLogRetriedUntilAnchored(t *testing.T) {
 // sealer does not ask about it again.
 func TestDelegationLease_ConflictedLogIsFinal(t *testing.T) {
 	logID := "7123456789abcdef0123456789abcdef"
-	f := newAuthorityLeaseFixture(t, logID)
+	f := newAuthorityLeaseFixture(t)
 
 	f.univ.set(authorityAnswer{state: "conflicted", final: true})
 	_, err := f.lease(logID)
@@ -226,7 +225,7 @@ func TestClassifySealError(t *testing.T) {
 // final the lease is used without asking.
 func TestDelegationLease_NonFinalAuthorityIsRecheckedBriefly(t *testing.T) {
 	logID := "8123456789abcdef0123456789abcdef"
-	f := newAuthorityLeaseFixture(t, logID)
+	f := newAuthorityLeaseFixture(t)
 	f.univ.set(authorityAnswer{state: "anchored"})
 	authority := []string{f.authorityRequest(logID)}
 
@@ -268,7 +267,7 @@ func TestDelegationLease_NonFinalAuthorityIsRecheckedBriefly(t *testing.T) {
 // without asking univocity again.
 func TestDelegationLease_FinalAuthorityIsNotRechecked(t *testing.T) {
 	logID := "9123456789abcdef0123456789abcdef"
-	f := newAuthorityLeaseFixture(t, logID)
+	f := newAuthorityLeaseFixture(t)
 	f.mgr.authorityRecheck = 0
 
 	f.univ.set(authorityAnswer{state: "anchored"})
@@ -287,5 +286,55 @@ func TestDelegationLease_FinalAuthorityIsNotRechecked(t *testing.T) {
 	}
 	if got := f.recorded.take(); len(got) != 0 {
 		t.Fatalf("a final answer was rechecked: %q", got)
+	}
+}
+
+// Asking univocity about one log does not hold up another log's cached
+// lease: with univocity slow or down, sealing stops only for the logs
+// whose answer needs asking again (devdocs ADR-0075).
+func TestDelegationLease_RecheckDoesNotHoldUpOtherLogs(t *testing.T) {
+	rechecked := "a123456789abcdef0123456789abcdef"
+	settled := "b123456789abcdef0123456789abcdef"
+	f := newAuthorityLeaseFixture(t)
+	f.mgr.authorityRecheck = 0
+
+	f.univ.set(authorityAnswer{state: "anchored"})
+	if _, err := f.lease(rechecked); err != nil {
+		t.Fatalf("lease %s: %v", rechecked, err)
+	}
+	f.univ.set(authorityAnswer{state: "anchored", final: true})
+	if _, err := f.lease(settled); err != nil {
+		t.Fatalf("lease %s: %v", settled, err)
+	}
+
+	held, release := f.univ.hold()
+	t.Cleanup(release)
+	recheck := make(chan error, 1)
+	go func() {
+		_, err := f.lease(rechecked)
+		recheck <- err
+	}()
+	<-held
+
+	reuse := make(chan error, 1)
+	go func() {
+		_, err := f.lease(settled)
+		reuse <- err
+	}()
+	select {
+	case err := <-reuse:
+		if err != nil {
+			t.Fatalf("reuse %s: %v", settled, err)
+		}
+	case <-time.After(5 * time.Second):
+		release()
+		<-recheck
+		<-reuse
+		t.Fatalf("reusing %s waited on univocity's answer about %s", settled, rechecked)
+	}
+
+	release()
+	if err := <-recheck; err != nil {
+		t.Fatalf("recheck %s: %v", rechecked, err)
 	}
 }
