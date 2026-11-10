@@ -114,6 +114,10 @@ func signSign1KS256(t *testing.T, priv *ecdsa.PrivateKey, protected, payloadDige
 	return out
 }
 
+// headerIdtimestampZero is the unprotected -65537 label canopy fills with a
+// zero placeholder. Univocity neither reads nor writes it.
+const headerIdtimestampZero = -65537
+
 func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []byte {
 	t.Helper()
 	logWire := g.LogID.ToPaddedWire32()
@@ -134,8 +138,8 @@ func buildGrantStatement(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant) []b
 	digest := sha256.Sum256(embedded)
 	sig := signSign1(t, ownerPriv, protected, digest[:])
 	unprot := map[interface{}]interface{}{
-		headerForestrieGrant: embedded,
-		headerIdtimestamp:    make([]byte, 8),
+		headerForestrieGrant:  embedded,
+		headerIdtimestampZero: make([]byte, 8),
 	}
 	cose := []interface{}{protected, unprot, digest[:], sig}
 	out, err := cbor.Marshal(cose)
@@ -165,8 +169,8 @@ func buildGrantStatementKS256(t *testing.T, ownerPriv *ecdsa.PrivateKey, g Grant
 	digest := sha256.Sum256(embedded)
 	sig := signSign1KS256(t, ownerPriv, protected, digest[:])
 	unprot := map[interface{}]interface{}{
-		headerForestrieGrant: embedded,
-		headerIdtimestamp:    make([]byte, 8),
+		headerForestrieGrant:  embedded,
+		headerIdtimestampZero: make([]byte, 8),
 	}
 	cose := []interface{}{protected, unprot, digest[:], sig}
 	out, err := cbor.Marshal(cose)
@@ -669,22 +673,18 @@ func TestResolveAuthority_UnanchoredColdChild(t *testing.T) {
 	}
 }
 
-// After sequencing, canopy patches the stored grant's unprotected -65537 with
-// the massif idtimestamp so the publisher leaf commitment matches leaf 0.
-func TestHandlePatchGrantIdtimestamp_HTTP(t *testing.T) {
+// No request path writes position metadata onto a stored grant: readers
+// find a grant's leaf by scanning its owner's leaf table instead.
+func TestPatchGrantIdtimestampRouteRemoved(t *testing.T) {
 	logger, _ := NewLogger(0)
 	boot := mustKey(t)
-
 	R := testLogID(21)
-	addr := common.HexToAddress("0xabc")
-
-	chain := newChainColdAnchored(boot)
 	store := newFakeStore()
-	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, addr)
+	store.genesis[R.String()] = buildGenesisDoc(t, R, boot, 84532, common.HexToAddress("0xabc"))
 
 	api := API{
 		Logger:    logger,
-		Pool:      &mockPool{chain: chain},
+		Pool:      &mockPool{chain: newChainColdAnchored(boot)},
 		Store:     store,
 		APIToken:  "secret",
 		Bootstrap: NewBootstrapCache(),
@@ -692,70 +692,25 @@ func TestHandlePatchGrantIdtimestamp_HTTP(t *testing.T) {
 	mux := http.NewServeMux()
 	api.RegisterRoutes(mux)
 
+	// A stored grant the removed handler would have patched.
 	rootGrant := Grant{LogID: R, OwnerLogID: R, Flags: authLogFlags(), GrantData: xyConcat(boot)}
 	stmt := buildGrantStatement(t, boot, rootGrant)
-	reqBody, _ := cbor.Marshal(postGrantRequest{RootLogID: R[:], Statement: stmt})
+	store.grants[store.grantStoreKey(R, R, GrantClassAuthLog)] = stmt
 
-	postReq := httptest.NewRequest(http.MethodPost, "/api/grants", bytes.NewReader(reqBody))
-	postReq.Header.Set("Authorization", "Bearer secret")
-	postRec := httptest.NewRecorder()
-	mux.ServeHTTP(postRec, postReq)
-	if postRec.Code != http.StatusCreated {
-		t.Fatalf("post grant want 201 got %d: %s", postRec.Code, postRec.Body.String())
-	}
-
-	idts := []byte{0x9f, 0x49, 0x34, 0xab, 0xca, 0x03, 0x05, 0x00}
-	patchBody, _ := cbor.Marshal(patchGrantIdtimestampRequest{Idtimestamp: idts})
-	patchReq := httptest.NewRequest(
+	body, _ := cbor.Marshal(map[string][]byte{"idtimestamp": {1, 2, 3, 4, 5, 6, 7, 8}})
+	req := httptest.NewRequest(
 		http.MethodPatch,
 		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
-		bytes.NewReader(patchBody),
+		bytes.NewReader(body),
 	)
-	patchReq.Header.Set("Authorization", "Bearer secret")
-	patchRec := httptest.NewRecorder()
-	mux.ServeHTTP(patchRec, patchReq)
-	if patchRec.Code != http.StatusNoContent {
-		t.Fatalf("patch idtimestamp want 204 got %d: %s", patchRec.Code, patchRec.Body.String())
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PATCH idtimestamp want 404 or 405, got %d", rec.Code)
 	}
-
-	stored, err := store.GetGrant(context.Background(), R, R)
-	if err != nil {
-		t.Fatalf("get stored grant: %v", err)
-	}
-	ts, err := decodeTransparentStatement(stored)
-	if err != nil {
-		t.Fatalf("decode stored: %v", err)
-	}
-	if !bytes.Equal(ts.Idtimestamp, idts) {
-		t.Fatalf("stored idtimestamp = %x, want %x", ts.Idtimestamp, idts)
-	}
-
-	// Idempotent re-patch with the same value succeeds.
-	patchRec2 := httptest.NewRecorder()
-	patchReq2 := httptest.NewRequest(
-		http.MethodPatch,
-		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
-		bytes.NewReader(patchBody),
-	)
-	patchReq2.Header.Set("Authorization", "Bearer secret")
-	mux.ServeHTTP(patchRec2, patchReq2)
-	if patchRec2.Code != http.StatusNoContent {
-		t.Fatalf("idempotent patch want 204 got %d", patchRec2.Code)
-	}
-
-	// Conflict when a different non-zero idtimestamp is already stored.
-	other := []byte{1, 2, 3, 4, 5, 6, 7, 8}
-	otherBody, _ := cbor.Marshal(patchGrantIdtimestampRequest{Idtimestamp: other})
-	conflictReq := httptest.NewRequest(
-		http.MethodPatch,
-		"/api/forest/"+R.String()+"/grants/"+R.String()+"/idtimestamp",
-		bytes.NewReader(otherBody),
-	)
-	conflictReq.Header.Set("Authorization", "Bearer secret")
-	conflictRec := httptest.NewRecorder()
-	mux.ServeHTTP(conflictRec, conflictReq)
-	if conflictRec.Code != http.StatusConflict {
-		t.Fatalf("conflicting patch want 409 got %d: %s", conflictRec.Code, conflictRec.Body.String())
+	if got := store.grants[store.grantStoreKey(R, R, GrantClassAuthLog)]; !bytes.Equal(got, stmt) {
+		t.Fatal("stored grant changed")
 	}
 }
 
