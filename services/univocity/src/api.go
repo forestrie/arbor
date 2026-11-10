@@ -43,6 +43,9 @@ type API struct {
 	Massifs MassifReaders
 	// Leaves remembers leaf-scan progress per owner log and grant.
 	Leaves *publishproof.GrantLeafIndex
+	// Registrations tracks the forest contracts whose LogRegistered events
+	// univocity watches.
+	Registrations *RegistrationWatcher
 }
 
 // DefaultReservationTTL is the lapse time of a reservation (devdocs

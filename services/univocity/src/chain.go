@@ -101,7 +101,8 @@ const univocityViewABI = `[
 	{"inputs":[],"name":"bootstrapConfig","outputs":[{"internalType":"int64","name":"bootstrapAlg","type":"int64"},{"internalType":"bytes","name":"bootstrapKey","type":"bytes"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logConfig","outputs":[{"components":[{"internalType":"uint8","name":"kind","type":"uint8"},{"internalType":"bytes32","name":"authLogId","type":"bytes32"},{"internalType":"bytes","name":"rootKey","type":"bytes"},{"internalType":"uint256","name":"initializedAt","type":"uint256"}],"internalType":"struct LogConfig","name":"","type":"tuple"}],"stateMutability":"view","type":"function"},
 	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"isLogInitialized","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"view","type":"function"},
-	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logRootKey","outputs":[{"internalType":"bytes32","name":"rootKeyX","type":"bytes32"},{"internalType":"bytes32","name":"rootKeyY","type":"bytes32"}],"stateMutability":"view","type":"function"}
+	{"inputs":[{"internalType":"bytes32","name":"logId","type":"bytes32"}],"name":"logRootKey","outputs":[{"internalType":"bytes32","name":"rootKeyX","type":"bytes32"},{"internalType":"bytes32","name":"rootKeyY","type":"bytes32"}],"stateMutability":"view","type":"function"},
+	{"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"logId","type":"bytes32"},{"indexed":true,"internalType":"bytes32","name":"grantLogId","type":"bytes32"},{"indexed":true,"internalType":"bytes","name":"rootKey","type":"bytes"}],"name":"LogRegistered","type":"event"}
 ]`
 
 const erc1271ABI = `[{"inputs":[{"internalType":"bytes32","name":"hash","type":"bytes32"},{"internalType":"bytes","name":"signature","type":"bytes"}],"name":"isValidSignature","outputs":[{"internalType":"bytes4","name":"","type":"bytes4"}],"stateMutability":"view","type":"function"}]`
@@ -147,7 +148,20 @@ type ChainReader interface {
 	// LogState returns the log's published size and accumulator; zero for a
 	// log never published.
 	LogState(ctx context.Context, logId logid.UUID) (publishproof.LogState, error)
+	// LatestBlock returns the chain head's block number.
+	LatestBlock(ctx context.Context) (uint64, error)
+	// LogRegistrations returns the contract's LogRegistered events in the
+	// inclusive block range.
+	LogRegistrations(ctx context.Context, from, to uint64) ([]LogRegistration, error)
 	ERC1271Verifier
+}
+
+// LogRegistration is a LogRegistered event: a log's first checkpoint, with
+// the owner (grantLogId) the contract recorded for it.
+type LogRegistration struct {
+	LogID      logid.UUID
+	GrantLogID logid.UUID
+	Block      uint64
 }
 
 type UnivocityContract struct {
@@ -276,6 +290,38 @@ func (c *UnivocityContract) LogRootKey(ctx context.Context, logId logid.UUID) (r
 
 func (c *UnivocityContract) LogState(ctx context.Context, logId logid.UUID) (publishproof.LogState, error) {
 	return publishproof.ReadLogState(ctx, c.client, c.addr, logId.ToContractBytes32())
+}
+
+func (c *UnivocityContract) LatestBlock(ctx context.Context) (uint64, error) {
+	return c.client.BlockNumber(ctx)
+}
+
+func (c *UnivocityContract) LogRegistrations(
+	ctx context.Context,
+	from, to uint64,
+) ([]LogRegistration, error) {
+	topic := c.contract.Events["LogRegistered"].ID
+	logs, err := c.client.FilterLogs(ctx, ethereum.FilterQuery{
+		FromBlock: new(big.Int).SetUint64(from),
+		ToBlock:   new(big.Int).SetUint64(to),
+		Addresses: []common.Address{c.addr},
+		Topics:    [][]common.Hash{{topic}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]LogRegistration, 0, len(logs))
+	for _, l := range logs {
+		if len(l.Topics) < 3 || l.Removed {
+			continue
+		}
+		out = append(out, LogRegistration{
+			LogID:      logid.FromContractBytes32(l.Topics[1]),
+			GrantLogID: logid.FromContractBytes32(l.Topics[2]),
+			Block:      l.BlockNumber,
+		})
+	}
+	return out, nil
 }
 
 func (c *UnivocityContract) HasCode(ctx context.Context, addr common.Address) (bool, error) {

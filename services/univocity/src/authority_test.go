@@ -243,3 +243,35 @@ func TestAuthority_FirstRegistrationDifferingFromClaimIsConflicted(t *testing.T)
 		})
 	}
 }
+
+// The LogRegistered watcher compares a claimed log with the chain as soon as
+// it is registered, without waiting for a read or the anchored re-check.
+func TestRegistrationWatcher_DetectsConflictAtRegistration(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	f.anchoredChild(A)
+	resp, _ := f.authority(A.String())
+	wantState(t, resp, stateAnchored, "before registration")
+
+	w := NewRegistrationWatcher()
+	f.api.Registrations = w
+	f.remount()
+	forest, _, err := f.api.resolveForestForLog(t.Context(), A, logid.UUID{})
+	if err != nil {
+		t.Fatalf("resolve forest: %v", err)
+	}
+	w.watch(forest)
+	f.api.pollRegistrations(t.Context()) // starts the cursor at the head
+
+	alarms := ConflictsDetected()
+	other := testLogID(9)
+	f.registerOnChain(A, other, xyConcat(mustKey(t)))
+	f.chain.emitRegistration(A, other)
+	f.api.pollRegistrations(t.Context())
+
+	if ConflictsDetected() != alarms+1 {
+		t.Fatal("the watcher must raise the alarm at registration")
+	}
+	resp, _ = f.authority(A.String())
+	wantState(t, resp, stateConflicted, "after the watcher saw the registration")
+}

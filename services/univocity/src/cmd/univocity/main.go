@@ -21,6 +21,10 @@ import (
 // is served before the log's first checkpoint is looked for again.
 const anchoredRecheck = 5 * time.Minute
 
+// registrationPollInterval paces the LogRegistered watcher, which compares
+// a claimed log with the chain at its first checkpoint.
+const registrationPollInterval = 15 * time.Second
+
 // reservationSweepInterval paces the removal of lapsed reservations. Reads
 // treat a lapsed reservation as absent, so this only bounds storage.
 const reservationSweepInterval = 10 * time.Minute
@@ -132,9 +136,11 @@ func main() {
 		Authorities:    univocity.NewAuthorityCache(cfg.LogForestCacheSize, anchoredRecheck),
 		Massifs:        univocity.NewMassifReaders(logFactory, cfg.MassifHeight),
 		Leaves:         publishproof.NewGrantLeafIndex(),
+		Registrations:  univocity.NewRegistrationWatcher(),
 	}
 	api.RegisterRoutes(mux)
 	go api.RunReservationSweeper(ctx, reservationSweepInterval)
+	go api.RunRegistrationWatcher(ctx, registrationPollInterval)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

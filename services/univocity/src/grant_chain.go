@@ -185,5 +185,6 @@ func (a API) loadForest(ctx context.Context, r logid.UUID) (ForestEntry, error) 
 	if doc.Forest.R != r {
 		return ForestEntry{}, errors.New("genesis bootstrap-logid does not match object key")
 	}
+	a.Registrations.watch(doc.Forest)
 	return doc.Forest, nil
 }

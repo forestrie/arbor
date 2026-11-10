@@ -21,6 +21,35 @@ type mockChain struct {
 	mu    sync.Mutex
 	logs  map[logid.UUID]mockLog
 	calls int
+	// block is the chain head; registrations are LogRegistered events.
+	block         uint64
+	registrations []LogRegistration
+}
+
+// emitRegistration mines a block carrying a LogRegistered event.
+func (m *mockChain) emitRegistration(id, owner logid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.block++
+	m.registrations = append(m.registrations, LogRegistration{LogID: id, GrantLogID: owner, Block: m.block})
+}
+
+func (m *mockChain) LatestBlock(context.Context) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.block, nil
+}
+
+func (m *mockChain) LogRegistrations(_ context.Context, from, to uint64) ([]LogRegistration, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []LogRegistration
+	for _, r := range m.registrations {
+		if r.Block >= from && r.Block <= to {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 // mockLog is one log's on-chain record.

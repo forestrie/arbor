@@ -582,6 +582,14 @@ func (mockChainEmptyResponse) LogRootKey(context.Context, logid.UUID) ([32]byte,
 	return [32]byte{}, [32]byte{}, errors.New("empty contract response")
 }
 
+func (mockChainEmptyResponse) LatestBlock(context.Context) (uint64, error) {
+	return 0, errors.New("empty contract response")
+}
+
+func (mockChainEmptyResponse) LogRegistrations(context.Context, uint64, uint64) ([]LogRegistration, error) {
+	return nil, errors.New("empty contract response")
+}
+
 func (mockChainEmptyResponse) LogState(context.Context, logid.UUID) (publishproof.LogState, error) {
 	return publishproof.LogState{}, errors.New("empty contract response")
 }
