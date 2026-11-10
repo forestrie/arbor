@@ -341,6 +341,31 @@ func TestRegistrationWatcher_RootTurnsFinal(t *testing.T) {
 	}
 }
 
+// Two forests bound to one contract: the root that publishes first takes
+// the contract, and the other can never publish there. When the winner's
+// registration is seen, the loser's anchored answer is dropped and it reads
+// conflicted at once, not after the anchored recheck.
+func TestRegistrationWatcher_LosingRootTurnsConflicted(t *testing.T) {
+	f := newClaimFixture(t)
+	f.api.Registrations = NewRegistrationWatcher()
+	f.remount()
+	resp, _ := f.authority(f.R.String())
+	if resp.State != stateAnchored || resp.Final {
+		t.Fatalf("root before any checkpoint %+v; want anchored, not final", resp)
+	}
+	f.api.pollRegistrations(t.Context()) // first poll: catches up to the head
+
+	winner := testLogID(99)
+	f.chain.rootLogId = winner
+	f.chain.emitRegistration(winner, winner)
+	f.api.pollRegistrations(t.Context())
+
+	resp, _ = f.authority(f.R.String())
+	if resp.State != stateConflicted || !resp.Final {
+		t.Fatalf("root after another root took its contract %+v; want conflicted, final", resp)
+	}
+}
+
 // The LogRegistered watcher compares a claimed log with the chain as soon as
 // it is registered, without waiting for a read or the anchored re-check.
 func TestRegistrationWatcher_DetectsConflictAtRegistration(t *testing.T) {
