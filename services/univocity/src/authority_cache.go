@@ -8,18 +8,21 @@ import (
 )
 
 // AuthorityCache holds authority answers that do not need recomputing. A
-// final answer is kept for good (protocol ADR-0070 decision 3). An anchored
-// answer that is not yet final is kept until recheck: anchoring is
-// permanent, so only the log's first checkpoint can still change it, and
-// the LogRegistered watcher evicts it as soon as that happens. Anything
-// else is recomputed on every read.
+// final answer is kept for good (protocol ADR-0070 decision 3), unless an
+// ancestor that is only pending blocks it: that ancestor can still anchor.
+// A conflicted answer is kept outside the size bound, so it is detected and
+// alarmed once. An anchored answer that is not yet final is kept until
+// recheck: anchoring is permanent, so only the log's first checkpoint can
+// still change it, and the LogRegistered watcher evicts it as soon as that
+// happens. Anything else is recomputed on every read.
 type AuthorityCache struct {
-	mu      sync.Mutex
-	entries map[logid.UUID]authorityEntry
-	leaves  map[logid.UUID]struct{}
-	order   []logid.UUID
-	maxSize int
-	recheck time.Duration
+	mu        sync.Mutex
+	entries   map[logid.UUID]authorityEntry
+	conflicts map[logid.UUID]Authority
+	leaves    map[logid.UUID]struct{}
+	order     []logid.UUID
+	maxSize   int
+	recheck   time.Duration
 }
 
 type authorityEntry struct {
@@ -34,10 +37,11 @@ func NewAuthorityCache(maxSize int, recheck time.Duration) *AuthorityCache {
 		maxSize = 1
 	}
 	return &AuthorityCache{
-		entries: map[logid.UUID]authorityEntry{},
-		leaves:  map[logid.UUID]struct{}{},
-		maxSize: maxSize,
-		recheck: recheck,
+		entries:   map[logid.UUID]authorityEntry{},
+		conflicts: map[logid.UUID]Authority{},
+		leaves:    map[logid.UUID]struct{}{},
+		maxSize:   maxSize,
+		recheck:   recheck,
 	}
 }
 
@@ -47,6 +51,9 @@ func (c *AuthorityCache) get(id logid.UUID, now time.Time) (Authority, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if x, ok := c.conflicts[id]; ok {
+		return x, true
+	}
 	e, ok := c.entries[id]
 	if !ok || (!e.until.IsZero() && !now.Before(e.until)) {
 		return Authority{}, false
@@ -58,8 +65,16 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 	if c == nil {
 		return
 	}
+	if x.State == stateConflicted {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.conflicts[x.LogID] = x
+		return
+	}
 	var until time.Time
 	switch {
+	case !x.BlockedBy.IsZero() && !x.blockedByConflict:
+		return
 	case x.Final:
 	case x.State == stateAnchored:
 		until = now.Add(c.recheck)
@@ -79,14 +94,17 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 	}
 }
 
-// evict drops a log's answer so the next read recomputes it.
+// evict drops a log's answer that is not final, so the next read
+// recomputes it. A final answer never changes.
 func (c *AuthorityCache) evict(id logid.UUID) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.entries, id)
+	if e, ok := c.entries[id]; ok && !e.x.Final {
+		delete(c.entries, id)
+	}
 }
 
 // leafAnchored reports whether a published checkpoint of the owner has been

@@ -3,6 +3,7 @@ package univocity
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -274,4 +275,57 @@ func TestRegistrationWatcher_DetectsConflictAtRegistration(t *testing.T) {
 	}
 	resp, _ = f.authority(A.String())
 	wantState(t, resp, stateConflicted, "after the watcher saw the registration")
+}
+
+// A final answer is cached for good only when nothing above it can still
+// change: an ancestor that is merely pending (here, a root whose chain read
+// failed) must not be frozen into a child's answer.
+func TestAuthority_FinalAnswerBlockedByPendingAncestorIsNotKeptForGood(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	key := f.anchoredChild(A)
+	f.registerOnChain(A, f.R, xyConcat(key))
+
+	// A fresh process whose first chain read of the root fails.
+	f.api.Bootstrap = NewBootstrapCache()
+	f.api.Authorities = NewAuthorityCache(100, 5*time.Minute)
+	f.chain.bootstrapErr = errors.New("rpc unavailable")
+	f.remount()
+	resp, _ := f.authority(A.String())
+	if string(resp.BlockedBy) != string(f.R[:]) {
+		t.Fatalf("blockedBy %x while the root is unreadable, want R", resp.BlockedBy)
+	}
+
+	f.chain.bootstrapErr = nil
+	resp, _ = f.authority(A.String())
+	wantState(t, resp, stateAnchored, "once the root is readable")
+	if !resp.Final || len(resp.BlockedBy) != 0 {
+		t.Fatalf("answer %+v; want final and unblocked once the root is readable", resp)
+	}
+}
+
+// Conflicted is detected once: a later LogRegistered event for the same log
+// does not raise the alarm again.
+func TestAuthority_ConflictAlarmsOnce(t *testing.T) {
+	f := newClaimFixture(t)
+	A := testLogID(2)
+	f.anchoredChild(A)
+	f.api.Registrations = NewRegistrationWatcher()
+	f.remount()
+	forest, _, err := f.api.resolveForestForLog(t.Context(), A, logid.UUID{})
+	if err != nil {
+		t.Fatalf("resolve forest: %v", err)
+	}
+	f.api.Registrations.watch(forest)
+	f.api.pollRegistrations(t.Context())
+
+	alarms := ConflictsDetected()
+	f.registerOnChain(A, testLogID(9), xyConcat(mustKey(t)))
+	resp, _ := f.authority(A.String())
+	wantState(t, resp, stateConflicted, "read after registration")
+	f.chain.emitRegistration(A, testLogID(9))
+	f.api.pollRegistrations(t.Context())
+	if got := ConflictsDetected() - alarms; got != 1 {
+		t.Fatalf("conflict alarmed %d times, want once", got)
+	}
 }

@@ -117,8 +117,8 @@ func (a API) pollContract(ctx context.Context, c *watchedContract) error {
 }
 
 // onRegistration recomputes a claimed log's authority at its first
-// checkpoint, which compares the chain's record with the claim. Logs this
-// instance has not claimed are ignored.
+// checkpoint, which compares the chain's record with the claim, unless its
+// answer is already final. Logs this instance has not claimed are ignored.
 func (a API) onRegistration(ctx context.Context, forest ForestEntry, reg LogRegistration) {
 	a.Authorities.evict(reg.LogID)
 	x, err := a.resolveAuthority(ctx, reg.LogID, forest.R)

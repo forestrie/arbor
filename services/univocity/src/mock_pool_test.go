@@ -21,6 +21,8 @@ type mockChain struct {
 	mu    sync.Mutex
 	logs  map[logid.UUID]mockLog
 	calls int
+	// bootstrapErr, when set, fails BootstrapConfig (an RPC outage).
+	bootstrapErr error
 	// block is the chain head; registrations are LogRegistered events.
 	block         uint64
 	registrations []LogRegistration
@@ -88,8 +90,11 @@ func (m *mockChain) RootLogId(context.Context) (logid.UUID, error) {
 
 func (m *mockChain) BootstrapConfig(context.Context) (int64, []byte, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.calls++
-	m.mu.Unlock()
+	if m.bootstrapErr != nil {
+		return 0, nil, m.bootstrapErr
+	}
 	return m.bootstrapAlg, m.bootstrapKey, nil
 }
 
