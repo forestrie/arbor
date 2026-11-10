@@ -3,6 +3,7 @@ package univocity
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -152,4 +153,27 @@ func TestNegativeCache_ClearedByCommit(t *testing.T) {
 
 	_, rec = f.authority(A.String())
 	wantStatus(t, rec, http.StatusOK, "authority right after register-grant")
+}
+
+// A contract whose rootLogId() cannot be read fails genesis closed: 502,
+// nothing stored, rather than guessing the contract has no root.
+func TestPostGenesis_RootLogIdReadErrorFailsClosed(t *testing.T) {
+	f := newClaimFixture(t)
+	f.chain.rootLogIdErr = errors.New("rpc unavailable")
+	R2 := testLogID(49)
+
+	wantStatus(t, f.postGenesis(R2), http.StatusBadGateway, "genesis with rootLogId unreadable")
+	if _, ok := f.store.genesis[R2.String()]; ok {
+		t.Fatal("a failed genesis must store no genesis")
+	}
+}
+
+// A forest root whose contract's rootLogId() cannot be read gets no
+// answer: 502, not anchored and not conflicted.
+func TestAuthority_RootLogIdReadErrorFailsClosed(t *testing.T) {
+	f := newClaimFixture(t)
+	f.chain.rootLogIdErr = errors.New("rpc unavailable")
+
+	_, rec := f.authority(f.R.String())
+	wantStatus(t, rec, http.StatusBadGateway, "root authority with rootLogId unreadable")
 }

@@ -73,12 +73,12 @@ func (x Authority) usable() bool {
 	return x.State == stateAnchored && x.BlockedBy.IsZero()
 }
 
-// conflictsDetected counts first registrations found to differ from their
-// claim, for /metrics.
+// conflictsDetected counts conflicts found, for /metrics: a first
+// registration that differs from its claim, or a forest root whose contract
+// records another root.
 var conflictsDetected atomic.Uint64
 
-// ConflictsDetected returns the number of conflicting first registrations
-// detected since start.
+// ConflictsDetected returns the number of conflicts detected since start.
 func ConflictsDetected() uint64 { return conflictsDetected.Load() }
 
 // resolveAuthority answers a log's authority: from the cache when the answer
