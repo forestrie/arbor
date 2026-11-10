@@ -152,10 +152,6 @@ func requestLogDelegationLease(
 		ExpiresAt:          issuerResp.ExpiresAt,
 		authorityFinal:     binding.Final,
 		authorityCheckedAt: time.Now(),
-		RootLogIDHex:       binding.RootLogIDHex,
-		ChainID:            binding.ChainID,
-		ContractAddress:    binding.ContractAddress,
-		AuthSource:         binding.Source,
 	}, nil
 }
 

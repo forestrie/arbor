@@ -2,7 +2,6 @@ package sealer
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -20,15 +19,12 @@ import (
 type AuthorityBinding struct {
 	SigningKey LogSigningKey
 	// Final is univocity's word that the answer cannot change.
-	Final           bool
-	RootLogIDHex    string
-	ChainID         string
-	ContractAddress string
-	Source          string
+	Final bool
 }
 
 // AuthorityResolver asks univocity, the only source of root keys (devdocs
-// ADR-0075 decision 5), for the root key and chain binding of a log. It is a
+// ADR-0075 decision 5), for the root key of a log. The forest's chain
+// binding comes from public R2 genesis, never from univocity (ADR-0047). It is a
 // non-mutating lookup keyed by logId; the delegation certificate is never
 // sent. It returns a key only for a log univocity reports anchored with no
 // ancestor blocking it. Otherwise it fails with ErrAuthorityPending, which is
@@ -47,17 +43,11 @@ const (
 // authorityResponse mirrors univocity's GET /api/logs/{logId}/authority
 // output (arbor services/univocity handlers.go).
 type authorityResponse struct {
-	LogID      []byte `cbor:"logId,omitempty"`
-	RootLogID  []byte `cbor:"rootLogId,omitempty"`
-	OwnerLogID []byte `cbor:"ownerLogId,omitempty"`
-	State      string `cbor:"state"`
-	Alg        int64  `cbor:"alg,omitempty"`
-	Key        []byte `cbor:"key,omitempty"`
-	ChainID    string `cbor:"chainId,omitempty"`
-	Contract   string `cbor:"contract,omitempty"`
-	Source     string `cbor:"source,omitempty"`
-	BlockedBy  []byte `cbor:"blockedBy,omitempty"`
-	Final      bool   `cbor:"final"`
+	State     string `cbor:"state"`
+	Alg       int64  `cbor:"alg,omitempty"`
+	Key       []byte `cbor:"key,omitempty"`
+	BlockedBy []byte `cbor:"blockedBy,omitempty"`
+	Final     bool   `cbor:"final"`
 }
 
 // AuthorityStatusError reports a non-200 authority response with its HTTP
@@ -154,13 +144,5 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 	if err != nil {
 		return AuthorityBinding{}, fmt.Errorf("authority key: %w", err)
 	}
-	rootUUID := logid.FromPaddedWire32(record.RootLogID)
-	return AuthorityBinding{
-		SigningKey:      signingKey,
-		Final:           record.Final,
-		RootLogIDHex:    hex.EncodeToString(rootUUID[:]),
-		ChainID:         strings.TrimSpace(record.ChainID),
-		ContractAddress: strings.TrimSpace(record.Contract),
-		Source:          strings.TrimSpace(record.Source),
-	}, nil
+	return AuthorityBinding{SigningKey: signingKey, Final: record.Final}, nil
 }
