@@ -28,6 +28,11 @@ type DelegationLease struct {
 	// does not produce it.
 	OnchainProof *delegationcert.OnchainDelegationProof
 
+	// authorityFinal and authorityCheckedAt record univocity's answer the
+	// lease rests on: whether it was final, and when it was last given.
+	authorityFinal     bool
+	authorityCheckedAt time.Time
+
 	// Authority binding univocity reported with the root key. Binds the
 	// lease to a specific chain / contract, closing the cross-deployment
 	// replay gap (plan-0003).

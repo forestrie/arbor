@@ -218,3 +218,74 @@ func TestClassifySealError(t *testing.T) {
 		}
 	}
 }
+
+// A lease taken while univocity's anchored answer is not yet final is used
+// only briefly before univocity is asked again (devdocs ADR-0075,
+// consequences), so a conflict found at the log's first checkpoint stops
+// sealing promptly rather than when the lease expires. Once the answer is
+// final the lease is used without asking.
+func TestDelegationLease_NonFinalAuthorityIsRecheckedBriefly(t *testing.T) {
+	logID := "8123456789abcdef0123456789abcdef"
+	f := newAuthorityLeaseFixture(t, logID)
+	f.univ.set(authorityAnswer{state: "anchored"})
+	authority := []string{f.authorityRequest(logID)}
+
+	if _, err := f.lease(logID); err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	f.recorded.take()
+
+	f.mgr.authorityRecheck = time.Hour
+	if _, err := f.lease(logID); err != nil {
+		t.Fatalf("reuse within the recheck interval: %v", err)
+	}
+	if got := f.recorded.take(); len(got) != 0 {
+		t.Fatalf("reuse within the recheck interval asked %q, want nothing", got)
+	}
+
+	f.mgr.authorityRecheck = 0
+	if _, err := f.lease(logID); err != nil {
+		t.Fatalf("reuse after the recheck interval: %v", err)
+	}
+	if got := f.recorded.take(); !slices.Equal(got, authority) {
+		t.Fatalf("reuse after the recheck interval asked %q, want %q", got, authority)
+	}
+
+	f.univ.set(authorityAnswer{state: "conflicted", final: true})
+	if _, err := f.lease(logID); !errors.Is(err, ErrLogConflicted) {
+		t.Fatalf("after a conflict: got %v, want ErrLogConflicted", err)
+	}
+	f.recorded.take()
+	if _, err := f.lease(logID); !errors.Is(err, ErrLogConflicted) {
+		t.Fatalf("after a conflict, again: got %v, want ErrLogConflicted", err)
+	}
+	if got := f.recorded.take(); len(got) != 0 {
+		t.Fatalf("a conflicted log asked %q, want nothing", got)
+	}
+}
+
+// Once univocity's answer is final, a held lease is used until it expires
+// without asking univocity again.
+func TestDelegationLease_FinalAuthorityIsNotRechecked(t *testing.T) {
+	logID := "9123456789abcdef0123456789abcdef"
+	f := newAuthorityLeaseFixture(t, logID)
+	f.mgr.authorityRecheck = 0
+
+	f.univ.set(authorityAnswer{state: "anchored"})
+	if _, err := f.lease(logID); err != nil {
+		t.Fatalf("lease: %v", err)
+	}
+	f.univ.set(authorityAnswer{state: "anchored", final: true})
+	if _, err := f.lease(logID); err != nil {
+		t.Fatalf("recheck: %v", err)
+	}
+	f.recorded.take()
+	for range 3 {
+		if _, err := f.lease(logID); err != nil {
+			t.Fatalf("reuse: %v", err)
+		}
+	}
+	if got := f.recorded.take(); len(got) != 0 {
+		t.Fatalf("a final answer was rechecked: %q", got)
+	}
+}

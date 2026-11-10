@@ -142,18 +142,20 @@ func requestLogDelegationLease(
 	}
 
 	return &DelegationLease{
-		CertBytes:       issuerResp.Certificate,
-		OnchainProof:    issuerResp.OnchainProof,
-		Info:            info,
-		Curve:           curve,
-		PrivateKey:      signingPriv,
-		PublicKey:       &signingPriv.PublicKey,
-		IssuedAt:        issuerResp.IssuedAt,
-		ExpiresAt:       issuerResp.ExpiresAt,
-		RootLogIDHex:    binding.RootLogIDHex,
-		ChainID:         binding.ChainID,
-		ContractAddress: binding.ContractAddress,
-		AuthSource:      binding.Source,
+		CertBytes:          issuerResp.Certificate,
+		OnchainProof:       issuerResp.OnchainProof,
+		Info:               info,
+		Curve:              curve,
+		PrivateKey:         signingPriv,
+		PublicKey:          &signingPriv.PublicKey,
+		IssuedAt:           issuerResp.IssuedAt,
+		ExpiresAt:          issuerResp.ExpiresAt,
+		authorityFinal:     binding.Final,
+		authorityCheckedAt: time.Now(),
+		RootLogIDHex:       binding.RootLogIDHex,
+		ChainID:            binding.ChainID,
+		ContractAddress:    binding.ContractAddress,
+		AuthSource:         binding.Source,
 	}, nil
 }
 

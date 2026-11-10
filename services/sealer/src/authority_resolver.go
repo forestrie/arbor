@@ -18,7 +18,9 @@ import (
 // (untrusted) delegation certificate locally against SigningKey; the actual
 // authorization decision is that local verification, not this lookup.
 type AuthorityBinding struct {
-	SigningKey      LogSigningKey
+	SigningKey LogSigningKey
+	// Final is univocity's word that the answer cannot change.
+	Final           bool
 	RootLogIDHex    string
 	ChainID         string
 	ContractAddress string
@@ -155,6 +157,7 @@ func (c *HTTPAuthorityResolver) ResolveAuthority(
 	rootUUID := logid.FromPaddedWire32(record.RootLogID)
 	return AuthorityBinding{
 		SigningKey:      signingKey,
+		Final:           record.Final,
 		RootLogIDHex:    hex.EncodeToString(rootUUID[:]),
 		ChainID:         strings.TrimSpace(record.ChainID),
 		ContractAddress: strings.TrimSpace(record.Contract),
