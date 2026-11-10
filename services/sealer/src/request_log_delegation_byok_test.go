@@ -56,8 +56,6 @@ func TestRequestLogDelegationLease_BYOKRejectsCertificateForAnotherLog(t *testin
 	}
 }
 
-// newBYOKIssuerServer stands up a fake delegation issuer that signs the
-// returned certificate with rootPriv (non-Custodian, runner-owned).
 // certLogIDFor is the log a fake issuer's certificate names: certLogID,
 // or the requested log when certLogID is empty.
 func certLogIDFor(certLogID string, req delegationcert.DelegationIssueRequest) string {
@@ -67,6 +65,9 @@ func certLogIDFor(certLogID string, req delegationcert.DelegationIssueRequest) s
 	return hex.EncodeToString(req.LogID)
 }
 
+// newBYOKIssuerServer stands up a fake delegation issuer that signs the
+// returned certificate with rootPriv (non-Custodian, runner-owned). The
+// certificate names certLogID, or the requested log when it is empty.
 func newBYOKIssuerServer(
 	t *testing.T,
 	rootPriv *ecdsa.PrivateKey,
