@@ -3,7 +3,9 @@ package delegationcert
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/crypto"
 )
@@ -14,9 +16,16 @@ type ERC1271Verifier interface {
 	IsValidSignature(ctx context.Context, addr, hash, sig []byte) error
 }
 
+// errKS256SignatureValues refuses an EOA signature whose r, s or v cannot
+// be a canonical recoverable signature: r or s outside [1, n-1], s above
+// (n-1)/2 (the high-s twin of a valid signature), or v not 0 or 1.
+var errKS256SignatureValues = errors.New(
+	"KS256 EOA signature values invalid: need 0 < r, s < n, s <= (n-1)/2 (low-s), v 0 or 1")
+
 // VerifyCertificateSignatureKS256 verifies a delegation certificate COSE Sign1
 // KS256 signature against a 20-byte Ethereum root signer using keccak256
-// Sig_structure + ecrecover or ERC-1271.
+// Sig_structure + ecrecover or ERC-1271. An EOA signature must be low-s; a
+// root with code judges its own signature through ERC-1271.
 func VerifyCertificateSignatureKS256(
 	certBytes []byte,
 	rootSigner []byte,
@@ -72,6 +81,18 @@ func VerifyCertificateSignatureKS256(
 
 	if len(signature) != 65 {
 		return fmt.Errorf("KS256 EOA signature must be 65 bytes, got %d", len(signature))
+	}
+	// Recovery alone accepts both s and n-s, so a high-s signature is the
+	// malleated twin of a valid one and is refused before recovery, as
+	// canopy and the univocity contract's verifyKS256Raw also refuse it.
+	// The ERC-1271 path above is untouched: a contract judges its own
+	// signature format.
+	// See forestrie/protocol spec/checkpoints-and-receipts.md and
+	// vectors/fixtures/ks256-low-s.json.
+	r := new(big.Int).SetBytes(signature[:32])
+	s := new(big.Int).SetBytes(signature[32:64])
+	if !crypto.ValidateSignatureValues(signature[64], r, s, true) {
+		return errKS256SignatureValues
 	}
 	pub, err := crypto.SigToPub(hash, signature)
 	if err != nil {
