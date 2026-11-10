@@ -58,7 +58,7 @@ func TestVerifyCertificateSignatureKS256_LowSVector(t *testing.T) {
 			if c.Expect.Result == "accept" {
 				require.NoError(t, err)
 			} else {
-				require.Error(t, err)
+				require.ErrorIs(t, err, errKS256SignatureValues)
 			}
 		})
 	}

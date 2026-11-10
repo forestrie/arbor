@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 
@@ -74,8 +75,13 @@ func TestVerifyGrantEnvelopeKS256_LowSVector(t *testing.T) {
 			if c.Expect.Result == "accept" && err != nil {
 				t.Fatalf("want accept, got %v", err)
 			}
-			if c.Expect.Result != "accept" && err == nil {
-				t.Fatal("want reject, got accept")
+			if c.Expect.Result != "accept" {
+				// The write handler and the reservation sweep both key on
+				// ErrGrantSignatureInvalid; the inner error says why.
+				if !errors.Is(err, ErrGrantSignatureInvalid) ||
+					!errors.Is(err, errKS256SignatureValues) {
+					t.Fatalf("want the low-s refusal, got %v", err)
+				}
 			}
 		})
 	}

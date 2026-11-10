@@ -55,8 +55,16 @@ func verifyGrantEnvelope(
 	}
 }
 
+// errKS256SignatureValues refuses an EOA signature whose r, s or v cannot
+// be a canonical recoverable signature: r or s outside [1, n-1], s above
+// (n-1)/2 (the high-s twin of a valid signature), or v not 0 or 1.
+var errKS256SignatureValues = errors.New(
+	"KS256 EOA signature values invalid: need 0 < r, s < n, s <= (n-1)/2 (low-s), v 0 or 1")
+
 // verifyCoseSign1KS256 verifies a COSE Sign1 KS256 signature against a 20-byte
-// Ethereum address using keccak256 Sig_structure + ecrecover or ERC-1271.
+// Ethereum address using keccak256 Sig_structure + ecrecover or ERC-1271. An
+// EOA signature must be low-s; a signer with code judges its own signature
+// through ERC-1271.
 func verifyCoseSign1KS256(
 	ctx context.Context,
 	cose coseSign1,
@@ -104,8 +112,7 @@ func verifyCoseSign1KS256(
 	r := new(big.Int).SetBytes(cose.signature[:32])
 	s := new(big.Int).SetBytes(cose.signature[32:64])
 	if !crypto.ValidateSignatureValues(cose.signature[64], r, s, true) {
-		return fmt.Errorf("%w: KS256 EOA signature values invalid: s must be low-s, v 0 or 1",
-			ErrGrantSignatureInvalid)
+		return fmt.Errorf("%w: %w", ErrGrantSignatureInvalid, errKS256SignatureValues)
 	}
 	pub, err := crypto.SigToPub(hash, cose.signature)
 	if err != nil {
