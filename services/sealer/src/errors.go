@@ -11,6 +11,16 @@ var (
 	// request but does not yet have wallet-signed material for it. The caller
 	// should keep the message unacked so a later queue delivery can retry.
 	ErrDelegationPending = errors.New("delegation material pending")
+	// ErrAuthorityPending indicates univocity has not anchored the log's
+	// authority, or an ancestor's, so its root key may not be used yet
+	// (protocol ADR-0070). The caller retries later and never looks for the
+	// key anywhere else.
+	ErrAuthorityPending = errors.New("log authority pending")
+	// ErrLogConflicted indicates univocity found that the chain recorded a
+	// different owner or key at the log's first checkpoint than its claim
+	// (devdocs ADR-0075 decision 8). Final: the log is not sealed again, and
+	// its queued work is dropped rather than retried.
+	ErrLogConflicted = errors.New("log authority conflicted")
 	// ErrNoStandingDelegateKeys indicates a lease was requested before the
 	// standing delegate keys were installed. The sealer consumes only once
 	// they are, so this is a wiring error, never a cue to fall back

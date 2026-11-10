@@ -16,7 +16,7 @@ import (
 // the issuer.
 func TestEnsureValidForLog_NoStandingKeysRefusesWithoutIssuing(t *testing.T) {
 	issuer := &pendingIssuerStub{}
-	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, issuer, time.Hour, time.Minute)
+	mgr := NewDelegationLeaseManager(&stubAuthorityResolver{}, issuer, time.Hour, time.Minute)
 
 	_, err := mgr.EnsureValidForLog(
 		t.Context(), NewHTTPClient(nil), nil, "secp256r1",
@@ -35,7 +35,7 @@ func TestEnsureValidForLog_NoStandingKeysRefusesWithoutIssuing(t *testing.T) {
 func TestEnsureValidForLog_RequestsCurrentStandingKeyOverTrueWindow(t *testing.T) {
 	keys, _ := phaseDKeys(t)
 	issuer := &pendingIssuerStub{}
-	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, issuer, time.Hour, time.Minute)
+	mgr := NewDelegationLeaseManager(&stubAuthorityResolver{}, issuer, time.Hour, time.Minute)
 	mgr.SetDelegateKeys(keys)
 
 	_, err := mgr.EnsureValidForLog(
@@ -76,13 +76,27 @@ func standingKeys(t *testing.T) *DelegateKeySet {
 	return keys
 }
 
-// requestLeaseForTest requests a lease for the standing keys through the
-// legacy trust-root seam (no authority resolver, no ERC-1271 verifier).
+// stubAuthorityResolver answers every log with key as an anchored log's root
+// key, or with err.
+type stubAuthorityResolver struct {
+	key LogSigningKey
+	err error
+}
+
+func (s *stubAuthorityResolver) ResolveAuthority(_ context.Context, _ string) (AuthorityBinding, error) {
+	if s.err != nil {
+		return AuthorityBinding{}, s.err
+	}
+	return AuthorityBinding{SigningKey: s.key}, nil
+}
+
+// requestLeaseForTest requests a lease for the standing keys (no ERC-1271
+// verifier).
 func requestLeaseForTest(
 	t *testing.T,
 	ctx context.Context,
 	httpClient *HTTPClient,
-	trustRoot TrustRootClient,
+	resolver AuthorityResolver,
 	issuer DelegationIssuer,
 	curve string,
 	ttl time.Duration,
@@ -91,7 +105,7 @@ func requestLeaseForTest(
 ) (*DelegationLease, error) {
 	t.Helper()
 	return requestLogDelegationLease(
-		ctx, httpClient, trustRoot, nil, issuer, nil, curve, ttl,
+		ctx, httpClient, resolver, issuer, nil, curve, ttl,
 		logIdHex, mmrStart, mmrEnd, standingKeys(t),
 	)
 }
@@ -123,7 +137,7 @@ func heldKeysFor(t *testing.T, priv *ecdsa.PrivateKey) *DelegateKeySet {
 func TestEnsureValidForLog_CachedWideLeaseServesGrownWindows(t *testing.T) {
 	logID := "abcdef0123456789abcdef0123456789"
 	issuer := &pendingIssuerStub{}
-	mgr := NewDelegationLeaseManager(&stubTrustRootClient{}, issuer, time.Hour, time.Minute)
+	mgr := NewDelegationLeaseManager(&stubAuthorityResolver{}, issuer, time.Hour, time.Minute)
 	mgr.SetDelegateKeys(standingKeys(t))
 
 	cached := verifiedLease(0, 1000)

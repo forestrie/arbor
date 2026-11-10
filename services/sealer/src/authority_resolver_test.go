@@ -8,47 +8,104 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
 )
 
-// newAuthorityServer stands up a fake univocity authority endpoint that returns
-// the supplied public key as the authoritative root key (or 503 when notFound).
-func newAuthorityServer(t *testing.T, pub *ecdsa.PublicKey, errStatus int) *httptest.Server {
+// univocityAuthorityWire mirrors univocity's GET /api/logs/{logId}/authority
+// response (services/univocity handlers.go authorityResponse). Declared
+// here so the tests pin the wire contract independently of the decoder.
+type univocityAuthorityWire struct {
+	LogID      []byte `cbor:"logId,omitempty"`
+	RootLogID  []byte `cbor:"rootLogId,omitempty"`
+	OwnerLogID []byte `cbor:"ownerLogId,omitempty"`
+	State      string `cbor:"state"`
+	Alg        int64  `cbor:"alg,omitempty"`
+	Key        []byte `cbor:"key,omitempty"`
+	ChainID    string `cbor:"chainId,omitempty"`
+	Contract   string `cbor:"contract,omitempty"`
+	Source     string `cbor:"source,omitempty"`
+	ExpiresAt  int64  `cbor:"expiresAt,omitempty"`
+	BlockedBy  []byte `cbor:"blockedBy,omitempty"`
+	Final      bool   `cbor:"final"`
+}
+
+// authorityAnswer is what the fake univocity answers: an HTTP status other
+// than 200, or the log's authority state.
+type authorityAnswer struct {
+	status    int
+	state     string
+	noKey     bool // a root whose contract is not deployed has no key
+	blockedBy []byte
+	final     bool
+}
+
+// fakeUnivocity is a fake univocity authority endpoint. It answers every log
+// with its root key and the current answer, and counts the requests.
+type fakeUnivocity struct {
+	*httptest.Server
+	mu     sync.Mutex
+	answer authorityAnswer
+	calls  int
+}
+
+func (f *fakeUnivocity) set(a authorityAnswer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answer = a
+}
+
+func (f *fakeUnivocity) requests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// newAuthorityServer stands up a fake univocity that answers pub as an
+// anchored log's final root key, or errStatus when it is non-zero.
+func newAuthorityServer(t *testing.T, pub *ecdsa.PublicKey, errStatus int) *fakeUnivocity {
 	t.Helper()
-	x := make([]byte, 32)
-	y := make([]byte, 32)
+	key := make([]byte, 64)
 	if pub != nil {
-		pub.X.FillBytes(x)
-		pub.Y.FillBytes(y)
+		pub.X.FillBytes(key[:32])
+		pub.Y.FillBytes(key[32:])
 	}
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f := &fakeUnivocity{answer: authorityAnswer{status: errStatus, state: "anchored", final: true}}
+	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet ||
 			!strings.HasPrefix(r.URL.Path, "/api/logs/") ||
 			!strings.HasSuffix(r.URL.Path, "/authority") {
 			http.NotFound(w, r)
 			return
 		}
-		if errStatus != 0 {
-			w.WriteHeader(errStatus)
+		f.mu.Lock()
+		f.calls++
+		a := f.answer
+		f.mu.Unlock()
+		if a.status != 0 {
+			w.WriteHeader(a.status)
 			return
 		}
-		key := make([]byte, 64)
-		copy(key[:32], x)
-		copy(key[32:], y)
-		body, _ := cbor.Marshal(authorityResponse{
-			RootLogID: make([]byte, 32),
-			Alg:       coseAlgES256,
-			Key:       key,
+		resp := univocityAuthorityWire{
+			RootLogID: make([]byte, 16),
+			State:     a.state,
 			ChainID:   "84532",
 			Contract:  "0x000000000000000000000000000000000000abcd",
 			Source:    "grant",
-		})
+			BlockedBy: a.blockedBy,
+			Final:     a.final,
+		}
+		if !a.noKey {
+			resp.Alg, resp.Key = coseAlgES256, key
+		}
+		body, _ := cbor.Marshal(resp)
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write(body)
 	}))
+	return f
 }
 
 func TestRequestLogDelegationLease_UnivocityAuthority(t *testing.T) {
@@ -71,7 +128,7 @@ func TestRequestLogDelegationLease_UnivocityAuthority(t *testing.T) {
 	}
 
 	lease, err := requestLogDelegationLease(
-		context.Background(), NewHTTPClient(nil), nil, resolver, issuer, nil,
+		context.Background(), NewHTTPClient(nil), resolver, issuer, nil,
 		"secp256r1", 30*time.Minute, logID, 7, 21, standingKeys(t),
 	)
 	if err != nil {
@@ -97,7 +154,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorityUnresolved(t *testing.T) {
 	defer authSrv.Close()
 
 	_, err = requestLogDelegationLease(
-		context.Background(), NewHTTPClient(nil), nil,
+		context.Background(), NewHTTPClient(nil),
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		nil,
@@ -125,7 +182,7 @@ func TestRequestLogDelegationLease_UnivocityAuthorityWrongKey(t *testing.T) {
 	defer authSrv.Close()
 
 	_, err = requestLogDelegationLease(
-		context.Background(), NewHTTPClient(nil), nil,
+		context.Background(), NewHTTPClient(nil),
 		&HTTPAuthorityResolver{BaseURL: authSrv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: issuerSrv.URL, Token: byokIssuerToken, HTTPClient: NewHTTPClient(nil)},
 		nil,
@@ -168,7 +225,7 @@ func TestRequestLogDelegationLease_AuthorityNotFoundClassified(t *testing.T) {
 	srv := newAuthorityServer(t, nil, http.StatusNotFound)
 	defer srv.Close()
 	_, err := requestLogDelegationLease(
-		context.Background(), NewHTTPClient(nil), nil,
+		context.Background(), NewHTTPClient(nil),
 		&HTTPAuthorityResolver{BaseURL: srv.URL, HTTPClient: NewHTTPClient(nil)},
 		&HTTPDelegationIssuer{BaseURL: srv.URL, Token: "x", HTTPClient: NewHTTPClient(nil)},
 		nil,

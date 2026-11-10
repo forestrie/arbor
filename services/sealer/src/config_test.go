@@ -6,69 +6,79 @@ import (
 	"testing"
 )
 
-func TestConfig_trustRootUsesCoordinator(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		cfg  Config
-		want bool
-	}{
-		{
-			name: "different hosts",
-			cfg: Config{
-				TrustRootURL: "https://coordinator.example.com",
-				CustodianURL: "http://custodian:9092",
-			},
-			want: true,
-		},
-		{
-			name: "same url",
-			cfg: Config{
-				TrustRootURL: "http://custodian:9092",
-				CustodianURL: "http://custodian:9092",
-			},
-			want: false,
-		},
-		{
-			name: "fallback alias",
-			cfg: Config{
-				TrustRootURL: "http://custodian:9092/",
-				CustodianURL: "http://custodian:9092",
-			},
-			want: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.cfg.trustRootUsesCoordinator(); got != tc.want {
-				t.Fatalf("trustRootUsesCoordinator()=%v want %v", got, tc.want)
-			}
-		})
+// validConfig is a configuration Validate accepts, with the local seed
+// source so no custodian is involved.
+func validConfig() Config {
+	return Config{
+		QueueURL:                 "https://queue.example/pull",
+		QueueToken:               "qt",
+		QueueBatchSize:           1,
+		DelegationIssuerURL:      "http://custodian:9092",
+		DelegationIssuerToken:    "issuer",
+		UnivocityAuthorityURL:    "http://univocity:9091",
+		DelegationKeyCurve:       "secp256r1",
+		DelegateKeyEpochRaw:      "1",
+		DelegateSeedLocal:        []byte("seed"),
+		CoordinatorRegisterURL:   "https://coordinator.example.com",
+		CoordinatorRegisterToken: "coord-token",
+		R2URL:                    "https://r2.example",
+		AWSAccessKeyID:           "key",
+		AWSSecretAccessKey:       "secret",
 	}
 }
 
-func TestConfigValidate_requiresTrustRootTokenForCoordinator(t *testing.T) {
-	cfg := Config{
-		QueueURL:              "https://queue.example/pull",
-		QueueToken:            "qt",
-		QueueBatchSize:        1,
-		TrustRootURL:          "https://coordinator.example.com",
-		CustodianURL:          "http://custodian:9092",
-		DelegationIssuerURL:   "http://custodian:9092",
-		DelegationIssuerToken: "issuer",
-		DelegationKeyCurve:    "secp256r1",
-		DelegateKeyEpochRaw:   "1",
-		DelegateSeedLocal:     []byte("seed"),
-		R2URL:                 "https://r2.example",
-		AWSAccessKeyID:        "key",
-		AWSSecretAccessKey:    "secret",
+// The sealer takes root keys only from univocity (devdocs ADR-0075
+// decision 5), and registers its delegate keys and pages active delegations
+// at the coordinator, so it refuses to start without either, whatever its
+// seed source.
+func TestConfigValidate_requiresUnivocityAuthorityAndCoordinator(t *testing.T) {
+	if err := validConfig().Validate(); err != nil {
+		t.Fatalf("valid config refused: %v", err)
 	}
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error when TRUST_ROOT_TOKEN missing for coordinator URL")
+	cases := map[string]struct {
+		mutate func(*Config)
+		want   string
+	}{
+		"no authority url":  {func(c *Config) { c.UnivocityAuthorityURL = "" }, "UNIVOCITY_AUTHORITY_URL"},
+		"bad authority url": {func(c *Config) { c.UnivocityAuthorityURL = "univocity:9091" }, "UNIVOCITY_AUTHORITY_URL"},
+		"no register url":   {func(c *Config) { c.CoordinatorRegisterURL = "" }, "COORDINATOR_REGISTER_URL"},
+		"bad register url":  {func(c *Config) { c.CoordinatorRegisterURL = "coordinator" }, "COORDINATOR_REGISTER_URL"},
+		"no register token": {func(c *Config) { c.CoordinatorRegisterToken = " " }, "COORDINATOR_REGISTER_TOKEN"},
 	}
-	cfg.TrustRootToken = "coord-token"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("unexpected validate error: %v", err)
+	for name, tc := range cases {
+		for _, custodianSeed := range []bool{false, true} {
+			cfg := validConfig()
+			if custodianSeed {
+				cfg.DelegateSeedLocal = nil
+				cfg.DelegateSeedCustodianURL = "http://custodian:9092"
+				cfg.DelegateSeedCustodianToken = "app"
+			}
+			tc.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("%s (custodian seed %v): expected an error", name, custodianSeed)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s (custodian seed %v): error should name %s, got: %v",
+					name, custodianSeed, tc.want, err)
+			}
+		}
+	}
+}
+
+// TRUST_ROOT_URL and TRUST_ROOT_TOKEN are gone: the coordinator settings no
+// longer default from them, so a lane that sets only those fails to start
+// rather than registering wherever they point.
+func TestLoadConfig_coordinatorRegisterHasNoTrustRootFallback(t *testing.T) {
+	t.Setenv("TRUST_ROOT_URL", "https://coordinator.example.com")
+	t.Setenv("TRUST_ROOT_TOKEN", "coord-token")
+	t.Setenv("CUSTODIAN_URL", "http://custodian:9092")
+	t.Setenv("COORDINATOR_REGISTER_URL", "")
+	t.Setenv("COORDINATOR_REGISTER_TOKEN", "")
+	cfg := LoadConfig()
+	if cfg.CoordinatorRegisterURL != "" || cfg.CoordinatorRegisterToken != "" {
+		t.Fatalf("coordinator register defaulted: url=%q token set=%v",
+			cfg.CoordinatorRegisterURL, cfg.CoordinatorRegisterToken != "")
 	}
 }
 
@@ -77,20 +87,9 @@ func TestConfigValidate_requiresTrustRootTokenForCoordinator(t *testing.T) {
 // unset, 0 and unparseable all refuse to start.
 func TestConfigValidate_requiresDelegateKeyEpoch(t *testing.T) {
 	base := func() Config {
-		return Config{
-			QueueURL:              "https://queue.example/pull",
-			QueueToken:            "qt",
-			QueueBatchSize:        1,
-			TrustRootURL:          "http://custodian:9092",
-			CustodianURL:          "http://custodian:9092",
-			DelegationIssuerURL:   "http://custodian:9092",
-			DelegationIssuerToken: "issuer",
-			DelegationKeyCurve:    "secp256r1",
-			R2URL:                 "https://r2.example",
-			AWSAccessKeyID:        "key",
-			AWSSecretAccessKey:    "secret",
-			DelegateSeedLocal:     []byte("seed"),
-		}
+		cfg := validConfig()
+		cfg.DelegateKeyEpochRaw = ""
+		return cfg
 	}
 
 	cfg := base()
@@ -147,26 +146,12 @@ func TestLoadConfig_delegateKeyEpochNotDefaulted(t *testing.T) {
 // Epoch >= 1 needs a seed source; without one the sealer could never install
 // keys, so it refuses to start rather than retry forever.
 func TestConfigValidate_requiresDelegateSeedSource(t *testing.T) {
-	cfg := Config{
-		QueueURL:              "https://queue.example/pull",
-		QueueToken:            "qt",
-		QueueBatchSize:        1,
-		TrustRootURL:          "http://custodian:9092",
-		CustodianURL:          "http://custodian:9092",
-		DelegationIssuerURL:   "http://custodian:9092",
-		DelegationIssuerToken: "issuer",
-		DelegationKeyCurve:    "secp256r1",
-		DelegateKeyEpochRaw:   "1",
-		R2URL:                 "https://r2.example",
-		AWSAccessKeyID:        "key",
-		AWSSecretAccessKey:    "secret",
-	}
+	cfg := validConfig()
+	cfg.DelegateSeedLocal = nil
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected error with no delegate seed source")
 	}
 	cfg.DelegateSeedCustodianURL = "http://custodian:9092"
-	cfg.CoordinatorRegisterURL = "https://coordinator.example.com"
-	cfg.CoordinatorRegisterToken = "coord-token"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("custodian seed source should be valid, got: %v", err)
 	}
@@ -186,61 +171,5 @@ func TestLoadConfig_seedSourceFallsBackToCustodianURL(t *testing.T) {
 	t.Setenv("DELEGATE_SEED_CUSTODIAN_URL", "http://seed:9092")
 	if got := LoadConfig().DelegateSeedCustodianURL; got != "http://seed:9092" {
 		t.Fatalf("DelegateSeedCustodianURL=%q want the explicit value", got)
-	}
-}
-
-// With the custodian seed source the sealer asserts its keys with the
-// coordinator (devdocs plan-2609-12 slice 05), so the resolved register URL
-// and token must name the coordinator: not empty, and not the custodian
-// that TRUST_ROOT_URL falls back to.
-func TestConfigValidate_custodianSeedRequiresCoordinatorRegister(t *testing.T) {
-	base := func() Config {
-		return Config{
-			QueueURL:                   "https://queue.example/pull",
-			QueueToken:                 "qt",
-			QueueBatchSize:             1,
-			TrustRootURL:               "https://coordinator.example.com",
-			TrustRootToken:             "coord-token",
-			CustodianURL:               "http://custodian:9092",
-			DelegationIssuerURL:        "http://custodian:9092",
-			DelegationIssuerToken:      "issuer",
-			DelegationKeyCurve:         "secp256r1",
-			DelegateKeyEpochRaw:        "1",
-			DelegateSeedCustodianURL:   "http://custodian:9092",
-			DelegateSeedCustodianToken: "app",
-			CoordinatorRegisterURL:     "https://coordinator.example.com",
-			CoordinatorRegisterToken:   "coord-token",
-			R2URL:                      "https://r2.example",
-			AWSAccessKeyID:             "key",
-			AWSSecretAccessKey:         "secret",
-		}
-	}
-	if err := base().Validate(); err != nil {
-		t.Fatalf("valid config refused: %v", err)
-	}
-	for name, mutate := range map[string]func(*Config){
-		"empty url":            func(c *Config) { c.CoordinatorRegisterURL = "" },
-		"url is the custodian": func(c *Config) { c.CoordinatorRegisterURL = "http://custodian:9092/" },
-		"empty token":          func(c *Config) { c.CoordinatorRegisterToken = " " },
-	} {
-		cfg := base()
-		mutate(&cfg)
-		err := cfg.Validate()
-		if err == nil {
-			t.Fatalf("%s: expected an error", name)
-		}
-		for _, want := range []string{"COORDINATOR_REGISTER_URL", "TRUST_ROOT_URL"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("%s: error should name %s, got: %v", name, want, err)
-			}
-		}
-	}
-
-	// The local seed asserts nothing, so it needs no coordinator.
-	cfg := base()
-	cfg.DelegateSeedCustodianURL, cfg.DelegateSeedLocal = "", []byte("seed")
-	cfg.CoordinatorRegisterURL, cfg.CoordinatorRegisterToken = "", ""
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("local seed must not need a coordinator: %v", err)
 	}
 }

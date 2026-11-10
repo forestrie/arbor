@@ -28,9 +28,9 @@ type DelegationLease struct {
 	// does not produce it.
 	OnchainProof *delegationcert.OnchainDelegationProof
 
-	// Authority binding from the univocity authorize decision (empty when the
-	// legacy trust-root path is used). Binds the lease to a specific chain /
-	// contract, closing the cross-deployment replay gap (plan-0003).
+	// Authority binding univocity reported with the root key. Binds the
+	// lease to a specific chain / contract, closing the cross-deployment
+	// replay gap (plan-0003).
 	RootLogIDHex    string
 	ChainID         string
 	ContractAddress string

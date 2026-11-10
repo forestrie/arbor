@@ -642,7 +642,7 @@ func TestStartDelegateKeys_ConsumerStartsOnlyWhenReady(t *testing.T) {
 		CoordinatorRegisterURL:     coordinator.URL,
 		CoordinatorRegisterToken:   "coord-token",
 	}
-	leaseMgr := NewDelegationLeaseManager(&stubTrustRootClient{}, &pendingIssuerStub{}, time.Hour, time.Minute)
+	leaseMgr := NewDelegationLeaseManager(&stubAuthorityResolver{}, &pendingIssuerStub{}, time.Hour, time.Minute)
 	readiness := NewDelegateKeyReadiness()
 	gauge := &fakeRegisteredGauge{}
 	r := newDelegateKeyRunner(cfg, NewHTTPClient(logger), logger, leaseMgr, readiness, gauge)
@@ -688,7 +688,7 @@ func TestStartDelegateKeys_LocalSeedNoAssertion(t *testing.T) {
 	cfg := Config{SealerID: "sealer-a", DelegateKeyEpoch: 3, DelegateSeedLocal: testSeed(t), CoordinatorRegisterURL: "https://unused.invalid"}
 	readiness := NewDelegateKeyReadiness()
 	gauge := &fakeRegisteredGauge{}
-	leaseMgr := NewDelegationLeaseManager(&stubTrustRootClient{}, &pendingIssuerStub{}, time.Hour, time.Minute)
+	leaseMgr := NewDelegationLeaseManager(&stubAuthorityResolver{}, &pendingIssuerStub{}, time.Hour, time.Minute)
 	r := newDelegateKeyRunner(cfg, NewHTTPClient(logger), logger, leaseMgr, readiness, gauge)
 	if r.assert != nil {
 		t.Fatal("local seed must not assert")

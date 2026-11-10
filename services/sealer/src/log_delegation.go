@@ -12,13 +12,13 @@ import (
 )
 
 // requestLogDelegationLease obtains a verified delegation lease for the
-// current standing key in heldKeys over [mmrStart, mmrEnd], via the issuer
-// and trust root (or authority resolver) seams. The returned certificate may
-// be bound to any held key (rotation overlap); the lease signs with that one.
+// current standing key in heldKeys over [mmrStart, mmrEnd]: the root key
+// from univocity (resolver), the certificate from the issuer. The returned
+// certificate may be bound to any held key (rotation overlap); the lease
+// signs with that one.
 func requestLogDelegationLease(
 	ctx context.Context,
 	httpClient *HTTPClient,
-	trustRoot TrustRootClient,
 	resolver AuthorityResolver,
 	issuer DelegationIssuer,
 	erc1271 delegationcert.ERC1271Verifier,
@@ -31,8 +31,8 @@ func requestLogDelegationLease(
 	if httpClient == nil {
 		return nil, fmt.Errorf("http client is nil")
 	}
-	if resolver == nil && trustRoot == nil {
-		return nil, fmt.Errorf("trust root client is nil")
+	if resolver == nil {
+		return nil, fmt.Errorf("authority resolver is nil")
 	}
 	if issuer == nil {
 		return nil, fmt.Errorf("delegation issuer is nil")
@@ -77,33 +77,25 @@ func requestLogDelegationLease(
 
 	algorithm := "ES256"
 
-	// Resolve the authoritative root key by logId.
-	// resolver also returns the chain binding and resolves cold logs from the
-	// grant chain; the legacy trust-root client only resolves logs already on
-	// chain. Either way the certificate is verified locally below.
-	var rootKey LogSigningKey
-	var binding AuthorityBinding
-	if resolver != nil {
-		binding, err = resolver.ResolveAuthority(ctx, logIdHex)
-		if err != nil {
-			// 404 = the log has no locator at univocity; re-attempting
-			// cannot succeed until the mapping is repaired (idempotent
-			// grant re-post or rootLogId hint) — do not treat as transient
-			// (plan-2607-10 slice 04).
-			if IsAuthorityNotFound(err) {
-				slog.Warn("log authority unknown to univocity; permanent until repaired",
-					"logId", logIdHex,
-					"remedy", "idempotent grant re-post or rootLogId hint")
-			}
-			return nil, fmt.Errorf("resolve authority: %w", err)
+	// Resolve the root key by logId, before asking the issuer for anything:
+	// univocity is the only source, and answers only for an anchored log
+	// (ErrAuthorityPending, ErrLogConflicted otherwise). It also returns the
+	// chain binding. The certificate is verified against the key locally
+	// below.
+	binding, err := resolver.ResolveAuthority(ctx, logIdHex)
+	if err != nil {
+		// 404 = the log has no locator at univocity; re-attempting
+		// cannot succeed until the mapping is repaired (idempotent
+		// grant re-post or rootLogId hint) — do not treat as transient
+		// (plan-2607-10 slice 04).
+		if IsAuthorityNotFound(err) {
+			slog.Warn("log authority unknown to univocity; permanent until repaired",
+				"logId", logIdHex,
+				"remedy", "idempotent grant re-post or rootLogId hint")
 		}
-		rootKey = binding.SigningKey
-	} else {
-		rootKey, err = trustRoot.LogSigningKey(ctx, logIdHex)
-		if err != nil {
-			return nil, fmt.Errorf("trust root: %w", err)
-		}
+		return nil, fmt.Errorf("resolve authority: %w", err)
 	}
+	rootKey := binding.SigningKey
 
 	issuerResp, err := issuer.IssueForLog(ctx, IssuerLeaseRequest{
 		LogIDBytes:          logIDBytes,

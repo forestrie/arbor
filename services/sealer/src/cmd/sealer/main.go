@@ -57,13 +57,18 @@ func main() {
 	defer stop()
 
 	httpClient := sealer.NewHTTPClient(logger)
-	trustRoot := sealer.NewSelectingTrustRootClient(cfg, httpClient)
+	// Univocity is the only source of root keys (devdocs ADR-0075 decision 5).
+	resolver := &sealer.HTTPAuthorityResolver{
+		BaseURL:    cfg.UnivocityAuthorityURL,
+		Token:      cfg.UnivocityAPIToken,
+		HTTPClient: httpClient,
+	}
 	issuer := &sealer.HTTPDelegationIssuer{
 		BaseURL:    cfg.DelegationIssuerURL,
 		Token:      cfg.DelegationIssuerToken,
 		HTTPClient: httpClient,
 	}
-	leaseMgr := sealer.NewDelegationLeaseManager(trustRoot, issuer, 0, 0)
+	leaseMgr := sealer.NewDelegationLeaseManager(resolver, issuer, 0, 0)
 	leaseMgr.SetMaxLeases(cfg.DelegationMaxLeases)
 	if cfg.ContractRPCURL != "" {
 		if v, err := sealer.NewRPCERC1271Verifier(cfg.ContractRPCURL); err != nil {
@@ -73,25 +78,12 @@ func main() {
 			leaseMgr.SetERC1271Verifier(v)
 		}
 	}
-	if cfg.UnivocityAuthorityURL != "" {
-		leaseMgr.SetAuthorityResolver(&sealer.HTTPAuthorityResolver{
-			BaseURL:    cfg.UnivocityAuthorityURL,
-			Token:      cfg.UnivocityAPIToken,
-			HTTPClient: httpClient,
-		})
-		slog.Info("sealer using univocity authority resolver",
-			"univocity_authority_url", cfg.UnivocityAuthorityURL,
-		)
-	}
 
 	slog.Info("sealer configured for per-log delegation",
-		"trust_root_url", cfg.TrustRootURL,
+		"univocity_authority_url", cfg.UnivocityAuthorityURL,
 		"delegation_issuer_url", cfg.DelegationIssuerURL,
 		"delegation_key_curve", cfg.DelegationKeyCurve,
 	)
-	if cfg.CustodianURL != "" && (cfg.TrustRootURL == cfg.CustodianURL || cfg.DelegationIssuerURL == cfg.CustodianURL) {
-		slog.Warn("CUSTODIAN_URL is deprecated; use TRUST_ROOT_URL and DELEGATION_ISSUER_URL")
-	}
 
 	// Create metrics registry and metrics
 	metricsRegistry := prometheus.NewRegistry()

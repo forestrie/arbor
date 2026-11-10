@@ -15,12 +15,6 @@ import (
 	"github.com/fxamacker/cbor/v2"
 )
 
-// CustodianPublicKeyResponse holds the response from GET /api/keys/{keyId}/public.
-type CustodianPublicKeyResponse struct {
-	PublicKey string `cbor:"publicKey"` // PEM-encoded SPKI
-	Alg       string `cbor:"alg"`       // "ES256" or "KS256"
-}
-
 // CustodianSignRequest is the CBOR request body for POST /api/keys/{keyId}/sign.
 type CustodianSignRequest struct {
 	PayloadHash      []byte `cbor:"payloadHash"`      // SHA-256 digest (32 bytes)
@@ -30,57 +24,6 @@ type CustodianSignRequest struct {
 // CustodianSignResponse is the CBOR response from sign with rawSignatureOnly.
 type CustodianSignResponse struct {
 	Signature []byte `cbor:"signature"` // 64-byte IEEE P1363 r||s
-}
-
-// GetPublicKeyByLogID fetches the public key for a log ID from Custodian.
-// Uses GET /api/keys/{logIdHex}/public?log-id=true to resolve the custody key.
-//
-// Returns the PEM-encoded public key and algorithm ("ES256" or "KS256").
-func GetPublicKeyByLogID(
-	ctx context.Context,
-	httpClient *HTTPClient,
-	custodianURL string,
-	logIdHex string,
-) (publicKeyPEM string, alg string, err error) {
-	base := strings.TrimRight(strings.TrimSpace(custodianURL), "/")
-	if base == "" {
-		return "", "", fmt.Errorf("custodian URL is empty")
-	}
-
-	// URL-encode the log ID and add ?log-id=true
-	endpoint := fmt.Sprintf("%s/api/keys/%s/public?log-id=true", base, url.PathEscape(logIdHex))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Accept", "application/cbor")
-
-	resp, err := httpClient.Do(ctx, req)
-	if err != nil {
-		return "", "", fmt.Errorf("custodian request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return "", "", fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("custodian returned status=%d for log %s", resp.StatusCode, logIdHex)
-	}
-
-	var result CustodianPublicKeyResponse
-	if err := cbor.Unmarshal(body, &result); err != nil {
-		return "", "", fmt.Errorf("decode CBOR response: %w", err)
-	}
-
-	if result.PublicKey == "" {
-		return "", "", fmt.Errorf("custodian returned empty public key")
-	}
-
-	return result.PublicKey, result.Alg, nil
 }
 
 // SignDigestByLogID signs a SHA-256 digest using the custody key for a log ID.

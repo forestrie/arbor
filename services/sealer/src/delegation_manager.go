@@ -3,6 +3,7 @@ package sealer
 import (
 	"container/list"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -31,7 +32,6 @@ type leaseEntry struct {
 // DelegationLeaseManager manages per-log, time-limited delegation leases
 // for the sealer process. Uses LRU eviction when the cache is full.
 type DelegationLeaseManager struct {
-	trustRoot    TrustRootClient
 	resolver     AuthorityResolver
 	issuer       DelegationIssuer
 	erc1271      delegationcert.ERC1271Verifier
@@ -42,10 +42,16 @@ type DelegationLeaseManager struct {
 	ttl          time.Duration
 	renewBefore  time.Duration
 	delegateKeys *DelegateKeySet
+	// conflicted holds the logs univocity reported conflicted. The answer is
+	// final, so such a log is refused without asking again. Conflicts are
+	// rare alarms, so the set is not bounded.
+	conflicted map[string]struct{}
 }
 
+// NewDelegationLeaseManager returns a manager that takes root keys only from
+// resolver (univocity) and certificates from issuer.
 func NewDelegationLeaseManager(
-	trustRoot TrustRootClient,
+	resolver AuthorityResolver,
 	issuer DelegationIssuer,
 	ttl, renewBefore time.Duration,
 ) *DelegationLeaseManager {
@@ -56,8 +62,9 @@ func NewDelegationLeaseManager(
 		renewBefore = defaultRenewBefore
 	}
 	return &DelegationLeaseManager{
-		trustRoot:   trustRoot,
+		resolver:    resolver,
 		issuer:      issuer,
+		conflicted:  make(map[string]struct{}),
 		leases:      make(map[string]*list.Element),
 		lru:         list.New(),
 		maxLeases:   defaultMaxLeases,
@@ -66,22 +73,17 @@ func NewDelegationLeaseManager(
 	}
 }
 
-// SetAuthorityResolver enables the trusted univocity authority path. When set,
-// the manager resolves a log's root key (and chain binding) by logId from
-// univocity (which can resolve cold logs from the grant chain) rather than the
-// legacy trust-root-by-logId lookup.
+// SetERC1271Verifier sets the verifier for KS256 smart-account delegations.
 func (m *DelegationLeaseManager) SetERC1271Verifier(v delegationcert.ERC1271Verifier) {
 	m.erc1271 = v
-}
-
-func (m *DelegationLeaseManager) SetAuthorityResolver(a AuthorityResolver) {
-	m.resolver = a
 }
 
 // EnsureValidForLog returns a delegation lease for a specific log that is not
 // expired and has at least renewBefore remaining lifetime. If no such lease
 // exists, it requests a new one from the delegation issuer and verifies it
-// against the trust root before caching.
+// against the root key univocity reports before caching. A log univocity
+// has not anchored fails with ErrAuthorityPending; one it reported
+// conflicted fails with ErrLogConflicted, now and on every later call.
 func (m *DelegationLeaseManager) EnsureValidForLog(
 	ctx context.Context,
 	httpClient *HTTPClient,
@@ -93,12 +95,16 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if m.issuer == nil || (m.trustRoot == nil && m.resolver == nil) {
+	if m.issuer == nil || m.resolver == nil {
 		return nil, fmt.Errorf("delegation seams not configured")
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if _, ok := m.conflicted[logIdHex]; ok {
+		return nil, fmt.Errorf("%w: log %s", ErrLogConflicted, logIdHex)
+	}
 
 	now := time.Now().UTC()
 
@@ -129,9 +135,14 @@ func (m *DelegationLeaseManager) EnsureValidForLog(
 		return nil, ErrNoStandingDelegateKeys
 	}
 	lease, err := requestLogDelegationLease(
-		ctx, httpClient, m.trustRoot, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
+		ctx, httpClient, m.resolver, m.issuer, m.erc1271, curve, m.ttl,
 		logIdHex, mmrStart, mmrEnd, m.delegateKeys,
 	)
+	if errors.Is(err, ErrLogConflicted) {
+		m.conflicted[logIdHex] = struct{}{}
+		logger.Error("log authority conflicted; sealing stopped for good",
+			"log_id", logIdHex, "error", err)
+	}
 	if err != nil {
 		return nil, err
 	}
