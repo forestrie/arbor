@@ -338,21 +338,6 @@
     },
     {
       "check": "no-work-ids",
-      "path": "docs/adr/adr-0006-genesis-authoritative-byok-root-key.md",
-      "message": "bold header (use frontmatter) **Date:** in canon prose"
-    },
-    {
-      "check": "no-work-ids",
-      "path": "docs/adr/adr-0006-genesis-authoritative-byok-root-key.md",
-      "message": "bold header (use frontmatter) **Status:** in canon prose"
-    },
-    {
-      "check": "no-work-ids",
-      "path": "docs/adr/adr-0006-genesis-authoritative-byok-root-key.md",
-      "message": "tracker id FOR-123 in canon prose"
-    },
-    {
-      "check": "no-work-ids",
       "path": "docs/adr/adr-0007-low-latency-sealer-trigger.md",
       "message": "bold header (use frontmatter) **Date:** in canon prose"
     },
@@ -750,11 +735,6 @@
       "check": "schema",
       "path": "docs/adr/adr-0005-custodian-kms-ensure-and-e2e-software-keys.md",
       "message": "invalid YAML: while parsing a block mapping   in \"<unicode string>\", line 1, column 1:     Status: ACCEPTED     ^ expected <block end>, but found '<scalar>'   in \"<unicode string>\", line 3, column 21:     Related: [plan-0010](../plan-0010-custodian-kms-ensu ...                          ^"
-    },
-    {
-      "check": "schema",
-      "path": "docs/adr/adr-0006-genesis-authoritative-byok-root-key.md",
-      "message": "no YAML frontmatter (adr)"
     },
     {
       "check": "schema",
