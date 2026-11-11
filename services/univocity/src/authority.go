@@ -20,11 +20,13 @@ import (
 //	           bootstrap key through the stored grant chain
 //	committed  registered for sequencing; its leaf is not yet found
 //	sequenced  the create grant's leaf is in the owner's log
-//	anchored   the forest root's contract is deployed, or the log has a
-//	           published checkpoint matching its claim, or a published
-//	           checkpoint of the owner covers the create grant's leaf
+//	anchored   the forest root's contract is deployed and records no other
+//	           root, or the log has a published checkpoint matching its
+//	           claim, or a published checkpoint of the owner covers the
+//	           create grant's leaf
 //	conflicted the chain recorded a different owner or key at the log's
-//	           first checkpoint; final, and replaces any other state
+//	           first checkpoint, or the root's contract records another
+//	           root; final, and replaces any other state
 //
 // Only anchored grants authority, and only when no ancestor is blocked.
 const (
@@ -59,9 +61,10 @@ type Authority struct {
 	// amount of waiting resolves.
 	blockedByConflict bool
 	// Final is true once the answer cannot change: the forest root once its
-	// contract is deployed; any other log once its first checkpoint has been
-	// compared with its claim and its owner's answer is final too, since an
-	// owner anchored by its leaf can still turn out conflicted.
+	// contract records it as root; any other log once its first checkpoint
+	// has been compared with its claim and its owner's answer is final too,
+	// since an owner anchored by its leaf can still turn out conflicted; and
+	// a committed claim blocked by a conflicted ancestor, which never clears.
 	Final bool
 }
 
@@ -70,12 +73,12 @@ func (x Authority) usable() bool {
 	return x.State == stateAnchored && x.BlockedBy.IsZero()
 }
 
-// conflictsDetected counts first registrations found to differ from their
-// claim, for /metrics.
+// conflictsDetected counts conflicts found, for /metrics: a first
+// registration that differs from its claim, or a forest root whose contract
+// records another root.
 var conflictsDetected atomic.Uint64
 
-// ConflictsDetected returns the number of conflicting first registrations
-// detected since start.
+// ConflictsDetected returns the number of conflicts detected since start.
 func ConflictsDetected() uint64 { return conflictsDetected.Load() }
 
 // resolveAuthority answers a log's authority: from the cache when the answer
@@ -127,9 +130,12 @@ func (a API) authorityIn(
 }
 
 // rootAuthority: the root's key is the contract's bootstrap key, so the root
-// is anchored, finally, once the contract can be read, and pending while no
-// contract is deployed at the genesis address. A failed read of a deployed
-// contract is an outage, reported as an error.
+// is pending while no contract is deployed at the genesis address, and
+// anchored once the contract can be read. A contract takes one root, the
+// first root checkpoint published to it (platform rule P14), so the answer is
+// final once the contract records this root, and conflicted if it records
+// another. A failed read of a deployed contract is an outage, reported as an
+// error.
 func (a API) rootAuthority(
 	ctx context.Context,
 	forest ForestEntry,
@@ -152,8 +158,27 @@ func (a API) rootAuthority(
 	if err != nil {
 		return Authority{}, err
 	}
-	x.State, x.Final = stateAnchored, true
 	x.Alg, x.Key, x.Source = alg, append([]byte(nil), key...), "chain"
+	onChainRoot, err := reader.RootLogId(ctx)
+	if err != nil {
+		return Authority{}, fmt.Errorf("rootLogId: %w", err)
+	}
+	if !onChainRoot.IsZero() && onChainRoot != forest.R {
+		x.State, x.Final = stateConflicted, true
+		conflictsDetected.Add(1)
+		a.Logger.Error("forest root's contract is rooted at another log",
+			"alarm", "authority-conflict",
+			"R", forest.R.String(),
+			"contract", forest.Contract.Hex(),
+			"chainRoot", onChainRoot.String(),
+		)
+		return x, nil
+	}
+	// Before the root's first checkpoint the contract records no root: the
+	// root is anchored, since the sealer needs its key to seal that
+	// checkpoint, but another forest bound to the contract could still
+	// publish first.
+	x.State, x.Final = stateAnchored, onChainRoot == forest.R
 	return x, nil
 }
 
@@ -213,7 +238,10 @@ func (a API) childAuthority(
 	}
 	if x.blockedByConflict {
 		// The claim cannot verify through an ancestor the chain recorded
-		// differently, and confers nothing while that ancestor blocks it.
+		// differently, and confers nothing while that ancestor blocks it. A
+		// conflict is final, so a committed claim stays blocked for good; a
+		// reservation can lapse, and its log be claimed elsewhere.
+		x.Final = c.state != stateReserved
 		return x, nil
 	}
 	// Not on chain: the claim must verify to the bootstrap key.

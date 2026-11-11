@@ -52,7 +52,9 @@ func (a API) resolveForestForLog(
 		}
 		return a.withReader(forest)
 	}
+	var stamp uint64
 	if a.Forests != nil {
+		stamp = a.Forests.Stamp()
 		if e, ok, neg := a.Forests.Get(logID); neg {
 			return ForestEntry{}, nil, notResolved(
 				"log %s is not indexed by this univocity instance", logID)
@@ -114,7 +116,7 @@ func (a API) resolveForestForLog(
 		return ForestEntry{}, nil, fmt.Errorf("load forest: %w", err)
 	}
 	if a.Forests != nil {
-		a.Forests.PutNegative(logID)
+		a.Forests.PutNegative(logID, stamp)
 	}
 	return ForestEntry{}, nil, notResolved(
 		"log %s is not indexed by this univocity instance", logID)
@@ -164,6 +166,16 @@ func (a API) withReader(forest ForestEntry) (ForestEntry, ChainReader, error) {
 		return ForestEntry{}, nil, err
 	}
 	return forest, reader, nil
+}
+
+// forgetUnresolved drops a cached miss for logID. Every write that makes a
+// log resolvable (genesis, a reservation, a committed claim) calls it, or a
+// lookup just before the write would hide the log until the miss lapses.
+// It clears this process's cache only; other replicas wait out the TTL.
+func (a API) forgetUnresolved(logID logid.UUID) {
+	if a.Forests != nil {
+		a.Forests.ForgetNegative(logID)
+	}
 }
 
 func (a API) cachePositive(logID logid.UUID, e ForestEntry) {

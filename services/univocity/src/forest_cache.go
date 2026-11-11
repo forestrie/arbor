@@ -19,6 +19,10 @@ type ForestCache struct {
 	negTTL   time.Duration
 	order    []string
 	negOrder []string
+	// forgets counts ForgetNegative calls. A read's miss is cached only if
+	// none happened since the read began (Stamp), so a miss read before a
+	// write cannot hide the log after it.
+	forgets uint64
 }
 
 // NewForestCache builds a bounded resolution cache with a negative-entry TTL.
@@ -64,13 +68,35 @@ func (c *ForestCache) PutPositive(logID logid.UUID, e ForestEntry) {
 	}
 }
 
+// ForgetNegative drops logID's negative entry, so its next lookup reads the
+// store.
+func (c *ForestCache) ForgetNegative(logID logid.UUID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.negative, logID.String())
+	c.forgets++
+}
+
+// Stamp marks the start of a read that may end in PutNegative.
+func (c *ForestCache) Stamp() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.forgets
+}
+
 // PutNegative records an unknown logId, bounded by maxSize with evict-oldest —
 // the 404 path is public, so an unbounded map would be a memory-exhaustion
-// vector via random-logId spray (plan-2607-11 R3).
-func (c *ForestCache) PutNegative(logID logid.UUID) {
+// vector via random-logId spray (plan-2607-11 R3). The miss is dropped if
+// any write cleared a negative entry since stamp (Stamp, taken before the
+// read): that write may have made this log resolvable after the read
+// missed it. Writes are rare next to reads, so few misses are lost.
+func (c *ForestCache) PutNegative(logID logid.UUID, stamp uint64) {
 	key := logID.String()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.forgets != stamp {
+		return
+	}
 	if _, exists := c.negative[key]; !exists {
 		c.negOrder = append(c.negOrder, key)
 	}

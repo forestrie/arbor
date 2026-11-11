@@ -11,6 +11,7 @@ import (
 
 type mockChain struct {
 	rootLogId                logid.UUID
+	rootLogIdErr             error
 	bootstrapAlg             int64
 	bootstrapKey             []byte
 	logInitialized           bool
@@ -89,7 +90,7 @@ func (m *mockChain) callCount() int {
 }
 
 func (m *mockChain) RootLogId(context.Context) (logid.UUID, error) {
-	return m.rootLogId, nil
+	return m.rootLogId, m.rootLogIdErr
 }
 
 func (m *mockChain) BootstrapConfig(context.Context) (int64, []byte, error) {

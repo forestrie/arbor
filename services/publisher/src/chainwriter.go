@@ -614,6 +614,7 @@ const univocityErrorsABI = `[
   {"type":"error","name":"GrantRequirement","inputs":[{"name":"requiredGrant","type":"uint256"},{"name":"requiredRequest","type":"uint256"}]},
   {"type":"error","name":"ConsistencyReceiptSignatureInvalid","inputs":[]},
   {"type":"error","name":"InvalidConsistencyProof","inputs":[]},
+  {"type":"error","name":"ConsistencyRightPeakCountMismatch","inputs":[{"name":"expected","type":"uint256"},{"name":"actual","type":"uint256"}]},
   {"type":"error","name":"InvalidCheckpointCose","inputs":[]},
   {"type":"error","name":"SizeMustIncrease","inputs":[{"name":"current","type":"uint64"},{"name":"proposed","type":"uint64"}]},
   {"type":"error","name":"MaxHeightExceeded","inputs":[{"name":"size","type":"uint64"},{"name":"maxHeight","type":"uint64"}]},

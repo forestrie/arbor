@@ -124,7 +124,13 @@ func (a API) pollContract(ctx context.Context, c *watchedContract) error {
 // onRegistration recomputes a claimed log's authority at its first
 // checkpoint, which compares the chain's record with the claim, unless its
 // answer is already final. Logs this instance has not claimed are ignored.
+// A root registration (the log is its own grant log) also drops the pending
+// answers of every root bound to the contract: it is now the contract's
+// root, and any other is conflicted.
 func (a API) onRegistration(ctx context.Context, forest ForestEntry, reg LogRegistration) {
+	if reg.LogID == reg.GrantLogID {
+		a.Authorities.evictPendingRoots(forest.ChainID, forest.Contract)
+	}
 	a.Authorities.evict(reg.LogID)
 	x, err := a.resolveAuthority(ctx, reg.LogID, forest.R)
 	if errors.Is(err, ErrLogNotResolved) {

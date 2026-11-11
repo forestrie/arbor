@@ -200,6 +200,9 @@ var pinnedErrorSelectors = map[string]string{
 	// ADR-0066: signed checkpoint tree-size cross-check.
 	"ConsistencyReceiptSizeMismatch": "51ffdcf0",
 	"MissingSignedTreeSize":          "74fb9612",
+	// univocity v0.4.0: a consistency proof with the wrong number of right
+	// peaks.
+	"ConsistencyRightPeakCountMismatch": "ab81d424",
 }
 
 func TestUnivocityErrorsABISelectorsPinned(t *testing.T) {

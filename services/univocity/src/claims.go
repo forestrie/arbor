@@ -179,6 +179,7 @@ func (a API) reserveClaim(
 		if err != nil {
 			return claimResult{}, err
 		}
+		a.forgetUnresolved(subject)
 		return claimResult{created: created, state: stateReserved, expiresAt: expiresAt}, nil
 	}
 	return claimResult{}, ErrReservationChanged
@@ -228,6 +229,7 @@ func (a API) commitClaim(
 	if existing != root {
 		return claimResult{}, errLogInOtherForest
 	}
+	a.forgetUnresolved(subject)
 	// The conditional put guards only its own class's key, so look for a
 	// grant of either class first: a log has one create grant.
 	stored, err := a.Store.GetGrant(ctx, root, subject)

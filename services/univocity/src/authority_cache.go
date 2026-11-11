@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/forestrie/arbor/services/pkgs/logid"
 )
 
@@ -12,17 +13,24 @@ import (
 // ancestor that is only pending blocks it: that ancestor can still anchor.
 // A conflicted answer is kept outside the size bound, so it is detected and
 // alarmed once. An anchored answer that is not yet final is kept until
-// recheck: anchoring is permanent, so only the log's first checkpoint can
-// still change it, and the LogRegistered watcher evicts it as soon as that
-// happens. Anything else is recomputed on every read.
+// recheck. Only a registration on chain can still change it, and the
+// LogRegistered watcher evicts it as soon as one is seen: a child's own
+// first checkpoint, or for a forest root the first root checkpoint on its
+// contract, whichever root that is. Anything else is recomputed on every
+// read.
 type AuthorityCache struct {
 	mu        sync.Mutex
 	entries   map[logid.UUID]authorityEntry
 	conflicts map[logid.UUID]Authority
 	leaves    map[logid.UUID]struct{}
-	order     []logid.UUID
-	maxSize   int
-	recheck   time.Duration
+	// rooted holds the contracts a root registration has been seen on. A
+	// root answer for one that is not final is stale: the root is final or
+	// conflicted. It may come from a read in flight across the
+	// registration, or from an RPC backend that lags, so it is not cached.
+	rooted  map[watchedKey]struct{}
+	order   []logid.UUID
+	maxSize int
+	recheck time.Duration
 }
 
 type authorityEntry struct {
@@ -40,6 +48,7 @@ func NewAuthorityCache(maxSize int, recheck time.Duration) *AuthorityCache {
 		entries:   map[logid.UUID]authorityEntry{},
 		conflicts: map[logid.UUID]Authority{},
 		leaves:    map[logid.UUID]struct{}{},
+		rooted:    map[watchedKey]struct{}{},
 		maxSize:   maxSize,
 		recheck:   recheck,
 	}
@@ -86,7 +95,18 @@ func (c *AuthorityCache) put(x Authority, now time.Time) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.entries[x.LogID]; !exists {
+	if !x.Final && x.LogID == x.RootLogID {
+		if _, ok := c.rooted[watchedKey{chainID: x.ChainID, contract: x.Contract}]; ok {
+			return
+		}
+	}
+	old, exists := c.entries[x.LogID]
+	if exists && old.x.Final && !x.Final {
+		// A read that saw the chain a moment before the final answer must
+		// not replace it: a final answer never changes.
+		return
+	}
+	if !exists {
 		c.order = append(c.order, x.LogID)
 	}
 	c.entries[x.LogID] = authorityEntry{x: x, until: until}
@@ -106,6 +126,24 @@ func (c *AuthorityCache) evict(id logid.UUID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dropLocked(func(k logid.UUID, e authorityEntry) bool { return k == id && !e.x.Final })
+}
+
+// evictPendingRoots drops the answers, not yet final, of the forest roots
+// bound to a contract, and stops caching such answers for it. A contract
+// takes one root, the first to publish there, so a root registration on it
+// settles every such root: the one registered turns final, and any other
+// turns conflicted.
+func (c *AuthorityCache) evictPendingRoots(chainID uint64, contract common.Address) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.rooted[watchedKey{chainID: chainID, contract: contract}] = struct{}{}
+	c.dropLocked(func(k logid.UUID, e authorityEntry) bool {
+		return !e.x.Final && k == e.x.RootLogID &&
+			e.x.ChainID == chainID && e.x.Contract == contract
+	})
 }
 
 // dropLocked removes the answers drop selects, from the entries and from
