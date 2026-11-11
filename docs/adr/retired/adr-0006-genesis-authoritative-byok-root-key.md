@@ -1,10 +1,22 @@
+---
+id: adr-0006-genesis-authoritative-byok-root-key
+title: Genesis-authoritative root key for BYOK forests
+status: superseded
+created: 2026-06-23
+updated: 2026-11-11
+superseded-by: devdocs:ADR-0075
+refs: [devdocs:ARC-0022, arbor:ADR-0002, FOR-123]
+---
+
 # ADR-0006 — Genesis-authoritative root key for BYOK forests
 
-**Status:** Accepted  
-**Date:** 2026-06-23  
-**Linear:** FOR-123  
-**Related:** [ARC-0022 BYOK user-log delegation](https://github.com/forestrie/devdocs/blob/main/arc/arc-0022-byok-user-log-delegation-and-operator-hosted-sealing.md),
-[ADR-0002 univocity owned grant store](adr-0002-univocity-owned-grant-store-and-authority-correspondence.md)
+Superseded by
+[devdocs ADR-0075](https://github.com/forestrie/devdocs/blob/main/adr/adr-0075-sec-child-root-claimed-once.md):
+a forest root's key now comes only from the univocity contract, and a
+genesis whose key differs is refused. Kept as the historical record.
+
+Related: [ARC-0022 BYOK user-log delegation](https://github.com/forestrie/devdocs/blob/main/arc/arc-0022-byok-user-log-delegation-and-operator-hosted-sealing.md),
+[ADR-0002 univocity owned grant store](../adr-0002-univocity-owned-grant-store-and-authority-correspondence.md)
 
 ## Context
 
