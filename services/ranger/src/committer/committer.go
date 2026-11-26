@@ -167,15 +167,11 @@ func (c *Committer) CommitLogGroup(
 			return nil, fmt.Errorf("entry %d of log %s: id timestamp: %w", i, logIDHex, err)
 		}
 
-		var idTimestampBytes [8]byte
-		binary.BigEndian.PutUint64(idTimestampBytes[:], idTimestamp)
-
-		hasher := sha256.New()
-		hasher.Write(idTimestampBytes[:])
-		hasher.Write(entry.ContentHash)
-		leafHash := hasher.Sum(nil)
-
-		mmrSize, err = mc.AddIndexedEntry(leafHash)
+		// The leaf binds the index it is stored at, so it is built from the
+		// context that takes it, here and again after a rollover. Rolled
+		// forward in memory, the next massif starts where the full one
+		// ended, so both give the same index.
+		mmrSize, err = mc.AddIndexedEntry(leafHash(mc.RangeCount(), idTimestamp, entry.ContentHash))
 		if errors.Is(err, massifs.ErrMassifFull) {
 			if err = massifs.CommitContext(ctx, store, &mc); err != nil {
 				return nil, fmt.Errorf("commit on massif full: %w", err)
@@ -195,7 +191,7 @@ func (c *Committer) CommitLogGroup(
 				return nil, fmt.Errorf("start next massif after rollover: %w", err)
 			}
 
-			mmrSize, err = mc.AddIndexedEntry(leafHash)
+			mmrSize, err = mc.AddIndexedEntry(leafHash(mc.RangeCount(), idTimestamp, entry.ContentHash))
 			if err == nil {
 				c.logNotice(ctx,
 					"committed (massif full)",
@@ -242,6 +238,30 @@ func (c *Committer) CommitLogGroup(
 		FirstLeafIndex:   firstLeafIndex,
 		MassifObjectKeys: massifKeys,
 	}, nil
+}
+
+// leafHash returns the MMR leaf for an entry stored at mmrIndex, in the form
+// proposed for the COSE Receipts MMR profile (FOR-726, "option D"; see
+// ietf-wg-scitt/draft-ietf-scitt-receipts-mmr-profile#69):
+//
+//	H(0x00 || pos || H(tsLeafData) || contentHash), pos = mmrIndex + 1
+//
+// tsLeafData = 0x01 || idTimestamp is Forestrie's transparency service
+// contribution. pos and the idtimestamp are 8 bytes big-endian, as pos is
+// for interior nodes. The leading 0x00 and the 73-byte pre-image keep a
+// leaf distinct from an interior node's 72-byte pos || left || right.
+func leafHash(mmrIndex, idTimestamp uint64, contentHash []byte) []byte {
+	var tsLeafData [9]byte
+	tsLeafData[0] = 0x01
+	binary.BigEndian.PutUint64(tsLeafData[1:], idTimestamp)
+	tsLeafDataHash := sha256.Sum256(tsLeafData[:])
+
+	hasher := sha256.New()
+	hasher.Write([]byte{0x00})
+	mmr.HashWriteUint64(hasher, mmrIndex+1)
+	hasher.Write(tsLeafDataHash[:])
+	hasher.Write(contentHash)
+	return hasher.Sum(nil)
 }
 
 func (c *Committer) logNotice(ctx context.Context, msg string, args ...any) {

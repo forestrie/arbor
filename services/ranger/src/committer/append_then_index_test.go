@@ -3,7 +3,6 @@ package committer
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"testing"
 
 	"github.com/forestrie/go-merklelog/massifs"
@@ -18,16 +17,10 @@ func TestAppendThenIndexFlow_UsingAddIndexedEntry(t *testing.T) {
 	idTimestamp := uint64(0x0102030405060708)
 	contentHash := sha256.Sum256([]byte("content-1"))
 
-	// leafHash = H(idTimestampBytes || contentHash)
-	var idTimestampBytes [8]byte
-	binary.BigEndian.PutUint64(idTimestampBytes[:], idTimestamp)
-	h := sha256.New()
-	h.Write(idTimestampBytes[:])
-	h.Write(contentHash[:])
-	leafHash := h.Sum(nil)
-	require.Len(t, leafHash, massifs.ValueBytes)
+	leaf := leafHash(mc.RangeCount(), idTimestamp, contentHash[:])
+	require.Len(t, leaf, massifs.ValueBytes)
 
-	_, err = mc.AddIndexedEntry(leafHash)
+	_, err = mc.AddIndexedEntry(leaf)
 	require.NoError(t, err)
 
 	// Update v2 index structures (Urkle + Bloom).
