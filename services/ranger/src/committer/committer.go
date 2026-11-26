@@ -184,9 +184,15 @@ func (c *Committer) CommitLogGroup(
 
 			entriesSinceRollover := i - lastCommit
 			lastCommit = i
-			mc, err = massifs.GetAppendContext(ctx, store, uint32(c.commitmentEpoch), c.massifHeight)
-			if err != nil {
-				return nil, fmt.Errorf("get append context after rollover: %w", err)
+			// Roll the committed context forward in memory rather than
+			// re-reading the head massif. The batch must occupy contiguous
+			// leaves (limit-based ack, FOR-653); a re-read would pick up a
+			// massif another ranger created in the meantime and append after
+			// its leaves. Rolled forward, the new massif is created
+			// If-None-Match (FOR-656), so that ranger's massif fails this
+			// batch instead.
+			if err = massifs.InitAppendContext(ctx, store, &mc); err != nil {
+				return nil, fmt.Errorf("start next massif after rollover: %w", err)
 			}
 
 			mmrSize, err = mc.AddIndexedEntry(leafHash)

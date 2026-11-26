@@ -17,7 +17,7 @@ import (
 
 // newTestCommitter returns a committer over an in-memory store with
 // massifHeight 3 (4 leaves per massif), so a 10-entry batch rolls over.
-func newTestCommitter(t *testing.T, client *merklelogtest.MemClient) *Committer {
+func newTestCommitter(t *testing.T, client merklelog.ObjectClient) *Committer {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	const massifHeight = 3
