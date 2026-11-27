@@ -1,5 +1,9 @@
 ---
+id: adr-0008-publisher-never-sends-predicted-revert-acks-unpublishable
+title: Publisher never sends a predicted-revert tx; unpublishable checkpoints are acked, not retried
 status: accepted
+created: 2026-07-12
+updated: 2026-11-12
 refs: [FOR-377, plan-2607-02-publisher-revert-probing-remediation]
 ---
 

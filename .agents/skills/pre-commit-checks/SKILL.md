@@ -23,10 +23,14 @@ From repository root, use the first matching row:
 | Kustomize under `clusters/` | arbor-flux | `kustomize build` on changed paths |
 | Markdown-only | devdocs, product, forestrie-agents | Link check if available; no forced build |
 
+**Docs, in any repo with a `.dox.toml`:** also run `task docs:lint` where
+the Taskfile has it, else `dox lint --changed`. Apply each finding's
+`fix:`. See [dox](../../rules/dox/SKILL.md).
+
 ## Generic checklist
 
 1. Format / lint passes
-2. Typecheck passes (if applicable)
+2. Typecheck passes (if applicable); `dox lint` passes (if `.dox.toml`)
 3. Tests for changed behaviour pass
 4. No secrets or `.env` files staged
 5. Commit message follows [commit-conventions](../../rules/commit-conventions/SKILL.md)

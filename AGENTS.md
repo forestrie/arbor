@@ -45,8 +45,7 @@ and copy the `go.work` files from an existing checkout.
 `task bootstrap` clones the same repos itself (see each `.env.bootstrap`'s
 `GIT_CLONES`/`GIT_CHECKOUTS`). Every dep floats on a default branch there,
 including go-merklelog (`^main`) — fine for local/dev, but it means an
-arbor image tag alone would not identify its sealer/verifier code
-(FOR-568 review finding O1). So **anything that gets deployed** — the
+arbor image tag alone would not identify its sealer/verifier code. So **anything that gets deployed** — the
 one workflow that builds and pushes images,
 `.github/workflows/build-deploy.yml` — runs `task bootstrap:release`
 instead. `task bootstrap:release` runs plain `bootstrap` and then re-checks-out
@@ -72,8 +71,8 @@ rather than a bare commit SHA going forward.
 
 `.github/workflows/release.yaml` builds nothing: `task release:retag`
 adds `vX.Y.Z` to the digest build-deploy pushed as `main-<sha7>-<run>`
-for the tagged commit, and fails if there is none (FOR-611, devdocs
-plan-2610-05 D1), so a release image is the image lane A ran. Never add a
+for the tagged commit, and fails if there is none, so a release image
+is the image lane A ran. Never add a
 rebuild back to release.yaml, as a fallback or otherwise. build-deploy
 refuses to push a `main-*` tag that already exists (`task
 release:assert-unpushed`): a GitHub re-run keeps the run number and would
@@ -83,7 +82,7 @@ move it. Dispatch a new run instead.
 
 | Service | Role |
 |---------|------|
-| **ranger** | Queue consumer for Cloudflare Queue / R2 notifications |
+| **ranger** | Pulls canopy's ingress shards, commits massifs to R2, posts seal hints to the sealer queue |
 | **sharder** | Kubernetes operator for shard assignments |
 | **custodian** | KMS-backed key custody and signing |
 | **univocity** (`services/univocity`) | Grant store, authority resolver, trust-root HTTP |
@@ -94,12 +93,18 @@ Sibling repos: **canopy** (SCRAPI Workers), **forest-1** (GKE/Flux), **univocity
 ## Commands
 
 - **Build/test a service**: `cd services/<name> && go test ./...`
-- **Ranger locally**: configure env per `services/ranger/config.go`; health on `:9090`
+- **Ranger locally**: entry point `services/ranger/src/cmd/ranger/main.go`;
+  12-factor env per `services/ranger/src/config.go`. Required: `QUEUE_URL`,
+  `QUEUE_TOKEN`, `MASSIF_HEIGHT`, `R2_URL`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY` (or `R2_TOKEN`), `WORKER_CIDR`, `POD_IP`. Health
+  on `PORT` (default `9090`): `/healthz`, `/readyz`, `/version`
 - **Deploy**: GitOps via arbor-flux; see [devdocs ops](https://github.com/forestrie/devdocs/blob/main/ops/README.md) (private)
 
 ## Gotchas (critical)
 
-- Platform ADRs/ARCs live in **devdocs**, not this repo — see stubs under `docs/adr/`.
+- Platform ADRs/ARCs live in **devdocs**, not this repo. Arbor's own
+  decisions are in [docs/adr/](docs/adr/README.md) and its invariants in
+  [docs/rules.md](docs/rules.md).
 - Grant store and `logId → R` uniqueness: devdocs [ADR-0035](https://github.com/forestrie/devdocs/blob/main/adr/adr-0035-univocity-owned-grant-store-and-authority-correspondence.md), [ADR-0036](https://github.com/forestrie/devdocs/blob/main/adr/adr-0036-global-logid-r-uniqueness.md), [ADR-0037](https://github.com/forestrie/devdocs/blob/main/adr/adr-0037-forests-storage-and-uuid-log-ids.md) (private).
 - Never log raw secrets; ranger logs SHA-256 digests only.
 - The sealer takes each log's root key only from univocity
@@ -108,9 +113,7 @@ Sibling repos: **canopy** (SCRAPI Workers), **forest-1** (GKE/Flux), **univocity
 
 ## Documentation map
 
-- **Agent index**: [docs/agents/README.md](docs/agents/README.md)
-- **Plans**: [docs/plans/README.md](docs/plans/README.md) (flat `docs/plan-*.md` today)
+- **Decisions**: [docs/adr/](docs/adr/README.md); **rules**: [docs/rules.md](docs/rules.md)
+- **Plans and status**: [forestrie/work](https://github.com/forestrie/work) (private). None live in this repo.
 - **Platform**: [devdocs](https://github.com/forestrie/devdocs) — architecture, arc/, adr/ (private)
-- **Extended layout / service detail**: [docs/agents/services.md](docs/agents/services.md)
-- **Team rules and skills**: synced from [forestrie-agents](https://github.com/forestrie/forestrie-agents) (private) by `agentfiles sync` with `sync/arbor.manifest`. Rules in [.claude/rules/](.claude/rules/), skills in [.agents/skills/](.agents/skills/). Do not edit the copies; change forestrie-agents and re-sync.
-- **Cursor rules**: [.cursor/rules/](.cursor/rules/) (Cursor only; some are older hand-written copies of the team rules). Repo-specific: [types-single-responsibility](.cursor/rules/types-single-responsibility.mdc)
+- **Team rules and skills**: synced from [forestrie-agents](https://github.com/forestrie/forestrie-agents) (private) by `agentfiles sync` with `sync/arbor.manifest`. Rules in [.claude/rules/](.claude/rules/), skills in [.agents/skills/](.agents/skills/). Do not edit the copies; change forestrie-agents and re-sync. The exception is the rules digest, [.claude/rules/rules-of-the-road.md](.claude/rules/rules-of-the-road.md), which `dox digest` generates from `docs/rules.md` and the platform rules.
