@@ -1,11 +1,13 @@
-# ADR-0007 — Low-latency sealer trigger: ranger seal hints, R2 events demoted to backstop
+---
+id: adr-0007-low-latency-sealer-trigger
+title: "Low-latency sealer trigger: ranger seal hints, R2 events demoted to backstop"
+status: accepted
+created: 2026-07-10
+updated: 2026-11-12
+refs: [FOR-335, plan-2607-01-sealer-nudge-trigger, "https://github.com/forestrie/canopy/blob/main/docs/demo/scitt-hackathon.md"]
+---
 
-**Status:** Proposed  
-**Date:** 2026-07-10  
-**Linear:** FOR-335  
-**Related:** [plan-2607-01](../plans/plan-2607-01-sealer-nudge-trigger.md),
-[canopy scitt-hackathon demo — receipt latency](https://github.com/forestrie/canopy/blob/main/docs/demo/scitt-hackathon.md),
-*Self hosted, remote, sealer* initiative
+# ADR-0007 — Low-latency sealer trigger: ranger seal hints, R2 events demoted to backstop
 
 ## Context
 

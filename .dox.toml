@@ -1,5 +1,10 @@
-schema_ref = "v1.0.0"
+schema_ref = "v1.1.0"
 namespace = "arbor"
 root = "docs"
 types = ["adr", "arc", "named-doc", "rules"]
-baseline = ".dox-baseline.json"
+
+# Rules digest agents load: platform rules pinned at a protocol tag, then
+# this repo's docs/rules.md (devdocs ADR-0074).
+[digest]
+out = ".claude/rules/rules-of-the-road.md"
+include = ["protocol:rules/platform.md@rules-v1.0.0"]

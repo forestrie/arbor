@@ -6,7 +6,7 @@ Arbor contains backend services deployed to GKE that integrate with Cloudflare i
 
 ## Services
 
-- **ranger**: Queue consumer for processing Cloudflare Queue messages (R2 object notifications)
+- **ranger**: Pulls canopy's ingress shards, commits massifs to R2 and posts seal hints to the sealer queue
 - **sharder**: Kubernetes operator for managing shard assignments
 
 ## Quick Start
@@ -21,6 +21,4 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for:
 ## Documentation
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) - Development guide and project overview
-- [docs/arc-services.md](docs/arc-services.md) - Service architecture and design patterns
-- [docs/ops-ranger.md](docs/ops-ranger.md) - Ranger service operations
-- [docs/ops-first-deploy.md](docs/ops-first-deploy.md) - First deployment setup
+- [devdocs ARC-0006](https://github.com/forestrie/devdocs/blob/main/arc/arc-0006-services.md) - Service architecture and design patterns

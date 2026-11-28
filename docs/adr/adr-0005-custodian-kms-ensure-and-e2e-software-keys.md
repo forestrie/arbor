@@ -1,7 +1,10 @@
 ---
-Status: ACCEPTED
-Date: 2026-06-05
-Related: [plan-0010](../plan-0010-custodian-kms-ensure-and-e2e-key-hygiene.md), [ADR-0004](adr-0004-forests-storage-and-uuid-log-ids.md), [devdocs ADR-0033](https://github.com/forestrie/devdocs/blob/main/adr/adr-0033-custodian-key-service.md)
+id: adr-0005-custodian-kms-ensure-and-e2e-software-keys
+title: Custodian KMS ensure and e2e SOFTWARE keys
+status: accepted
+created: 2026-06-05
+updated: 2026-11-12
+refs: [devdocs:ADR-0033, devdocs:ADR-0037, plan-0010-custodian-kms-ensure-and-e2e-key-hygiene]
 ---
 
 # Custodian KMS ensure and e2e SOFTWARE keys

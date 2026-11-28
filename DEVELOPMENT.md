@@ -6,7 +6,7 @@ Arbor is a Go-based microservices repository containing backend services for the
 
 Arbor contains independently deployable microservices written in Go:
 
-- **ranger**: Queue consumer service that processes Cloudflare Queue messages for R2 object notifications
+- **ranger**: Pulls canopy's ingress shards, commits massifs to R2 and posts seal hints to the sealer queue
 - **sharder**: Kubernetes operator that manages shard assignments for distributed workloads
 
 Services follow 12-factor principles, use structured logging, and are designed for Kubernetes deployment.
@@ -15,13 +15,13 @@ Services follow 12-factor principles, use structured logging, and are designed f
 
 ### Canopy Integration
 
-Canopy (sibling repository) provides the SCITT/SCRAPI transparency log API and frontend. It manages Cloudflare R2 buckets and Queues. Ranger consumes messages from queues created and populated by Canopy's R2 event notifications.
+Canopy (sibling repository) provides the SCITT/SCRAPI transparency log API and frontend. It manages Cloudflare R2 buckets and the sharded ingress queue that Ranger pulls.
 
 **Message Flow**:
-1. Canopy Worker API receives requests and writes objects to R2
-2. R2 event notifications are sent to Cloudflare Queue
-3. Ranger consumes messages from the queue via HTTP pull
-4. Ranger processes notifications (currently extracts log metadata, validates hashes)
+1. Canopy's Worker API accepts entries and hash-routes each log to a fixed ingress shard
+2. Ranger discovers the shards (`GET /queue/shards`) and pulls them over HTTP, one goroutine per log group
+3. Ranger commits massif blobs to R2 and acks the entries
+4. Ranger posts a seal hint for each committed massif to the sealer's queue; R2 event notifications remain only as a backstop
 
 ### Forest-1 Infrastructure
 
@@ -59,9 +59,9 @@ services/
 All services use environment variables for configuration (12-factor):
 
 **Ranger**:
-- Required: `RANGER_QUEUE_URL`, `RANGER_QUEUE_API_TOKEN`
-- Optional: `PORT` (default: 9090), `LOG_LEVEL`, `POLL_INTERVAL`, `VISIBILITY_TIMEOUT`, `SHUTDOWN_TIMEOUT`
-- R2 integration: `R2_BUCKET_NAME`, `R2_ACCOUNT_ID`, `R2_PUBLIC_URL`, `TRUST_CANOPY`
+- Required: `QUEUE_URL`, `QUEUE_TOKEN`, `MASSIF_HEIGHT`, `R2_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (or `R2_TOKEN`), `WORKER_CIDR`, `POD_IP`
+- Optional: `PORT` (default: 9090), `LOG_LEVEL`, `SHUTDOWN_TIMEOUT`, `SEAL_HINT_QUEUE_URL`, `SEAL_HINT_QUEUE_TOKEN`
+- Full list: `services/ranger/src/config.go`
 
 ### Deployment
 
@@ -124,7 +124,7 @@ Arbor services use **Flux GitOps** for automated deployment, managed by the fore
 6. Flux Kustomization reconciles the deployment with the new image tag
 7. Deployment rolls out automatically to the lane A GKE cluster
 
-**Releases** (`.github/workflows/release.yaml`) do not build. auto-tag cuts `vX.Y.Z` on every merge; `task release:retag` adds that tag to the same digests as the commit's `main-*` images and fails if they are missing (FOR-611), so the image promoted to lane B is byte-for-byte the one lane A ran.
+**Releases** (`.github/workflows/release.yaml`) do not build. auto-tag cuts `vX.Y.Z` on every merge; `task release:retag` adds that tag to the same digests as the commit's `main-*` images and fails if they are missing, so the image promoted to lane B is byte-for-byte the one lane A ran.
 
 **GitHub Actions Workflow**:
 - Triggers on every push to `main` (no path filter) and on `workflow_dispatch`
@@ -142,7 +142,7 @@ Arbor services use **Flux GitOps** for automated deployment, managed by the fore
 
 Non-secret configuration, including the Cloudflare queue URL, lives in the `ranger-config` ConfigMap generated from `services/ranger/k8s/kustomization.yaml`.
 
-**See**: [ADR-001: Flux GitOps Deployment](docs/adr-001-flux-gitops-deployment.md) for detailed rationale and architecture.
+**See**: [devdocs ADR-0015: Flux GitOps Deployment](https://github.com/forestrie/devdocs/blob/main/adr/adr-0015-flux-gitops-deployment.md) for detailed rationale and architecture.
 
 ### Testing
 
@@ -165,17 +165,14 @@ task test:integration
 
 ### Ranger
 
-Queue consumer that processes Cloudflare Queue messages. Currently handles R2 object notifications by:
-- Extracting log metadata from object paths (`logs/{logID}/fence-{index}/{hash}`)
-- Validating SHA256 hashes (optional, configurable via `TRUST_CANOPY`)
-- Processing notifications asynchronously
+Pulls canopy's ingress shards, appends each log's entries to its massif and commits the massif blob to R2, then posts a seal hint to the sealer's queue. Commit success never depends on hint delivery.
 
 **Health Endpoints**:
 - `GET /healthz`: Liveness probe
 - `GET /readyz`: Readiness probe  
 - `GET /version`: Version information (version, commit, buildDate)
 
-**Configuration**: See `docs/ops-ranger.md` for detailed configuration and operational notes.
+**Configuration**: See `services/ranger/src/config.go`.
 
 ### Sharder
 
@@ -188,10 +185,8 @@ Kubernetes operator that manages shard assignments for distributed workloads. Pr
 
 ## Documentation
 
-- **Architecture**: `docs/arc-services.md` - Service architecture and design patterns
-- **Operations**: `docs/ops-*.md` - Deployment, configuration, and operational guides
-  - `docs/ops-ranger.md` - Ranger service operations and configuration
-  - `docs/ops-first-deploy.md` - First deployment setup guide
+- **Architecture**: [devdocs ARC-0006](https://github.com/forestrie/devdocs/blob/main/arc/arc-0006-services.md) - Service architecture and design patterns
+- **Decisions**: [docs/adr/](docs/adr/README.md); **rules**: [docs/rules.md](docs/rules.md)
 
 ## Build System
 

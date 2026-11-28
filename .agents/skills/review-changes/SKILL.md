@@ -24,7 +24,7 @@ Optional arguments (pass through if given):
 
 - Fixed point: branch, tag, commit, or `main` (default: stack-aware — step 2)
 - Linear issue id(s): e.g. `FOR-167`
-- Plan path: e.g. `docs/plans/plan-0028-*.md`
+- Plan id: e.g. `plan-2611-02-dox-adoption` (forestrie/work)
 - Scope override: `single-branch`, `full-stack`, `cross-repo`, or repo class:
   `canopy`, `arbor`, `univocity`, `infra`, `mandate`, `tools`
 
@@ -41,12 +41,12 @@ Read selectively before reviewing the diff:
 
 | Source | When |
 | ------ | ---- |
-| [Rules of the road](https://github.com/forestrie/forestrie-agents/tree/main/rules-of-the-road): `platform.md` + the one matching repo file (already loaded as `.claude/rules/rules-of-the-road-*.md` in a synced repo) | **Always** — fundamental invariants; run the [rules-of-the-road-review](../rules-of-the-road-review/SKILL.md) skill as the design-invariant pass |
+| Rules of the road: protocol `rules/platform.md` + the repo's `docs/rules.md` (the digest is already loaded as `.claude/rules/rules-of-the-road.md`) | **Always** — fundamental invariants; run the [rules-of-the-road-review](../rules-of-the-road-review/SKILL.md) skill as the design-invariant pass |
 | Repo `forest/agents/AGENTS.md` or root `AGENTS.md` | Repo overlay and precedence |
 | [forestrie-agents/workflow/rules/](../../rules/) | go-task, commits, TS/Go/Solidity rules, breaking-changes |
 | [forestrie-agents/vendored/matt-skills/skills/engineering/tdd/](../../../vendored/matt-skills/skills/engineering/tdd/SKILL.md) | Testability, coverage |
 | The matching `arc-*` glossary skill (`arc-canopy`, `arc-arbor`, `arc-univocity`, `arc-infra`, `arc-mandate`, `arc-tools`, `arc-company`) | Domain terms for touched area |
-| [devdocs/glossary.md](https://github.com/forestrie/protocol/blob/main/glossary.md) | Shared vocabulary |
+| [protocol glossary.md](https://github.com/forestrie/protocol/blob/main/glossary.md) | Shared vocabulary |
 
 ### 1.2 Repo-specific routers (read one matching repo)
 
@@ -63,8 +63,8 @@ Read selectively before reviewing the diff:
 
 ### 1.3 Design invariants (read on demand)
 
-The fundamental invariants are already the distilled
-[rules-of-the-road](https://github.com/forestrie/forestrie-agents/tree/main/rules-of-the-road) loaded in §1.1 — check
+The fundamental invariants are already the distilled rules of the road
+loaded in §1.1 — check
 the diff against those **first**. Use the indexes below only when a finding
 needs the deeper rationale behind a rule (each rule links to its ADR/ARC).
 Select a **tight** subset from touched paths. Start at indexes; do not bulk-read
@@ -102,7 +102,7 @@ Resolve in order:
 
 1. User-supplied plan path or Linear id
 2. `FOR-*` in branch name, PR title, or commit messages
-3. Matching `docs/plans/plan-*.md` in the repo (or devdocs/plans for platform)
+3. The forestrie/work plan whose `issues:` names the `FOR-*` id
 4. PR body: `gh pr view --json url,title,body`
 
 If no spec exists, review design invariants + code quality only.
@@ -143,7 +143,17 @@ gt branch info --branch "$BR"
 | User: `full-stack` | Cumulative `$TRUNK...HEAD` plus per-PR slices |
 | Cross-repo coupled work | **Cross-repo** — primary review in current repo; Linear for sibling gaps |
 
-### 2.3 Collect diffs
+### 2.3 Docs inputs (repos with a `.dox.toml`)
+
+Run [dox](../../rules/dox/SKILL.md) on the branch and treat its output as
+review input, not a substitute for reading:
+
+- `dox lint --json`: every error is a finding; a `--skip` or a grown
+  `.dox-baseline.json` without a reason in the PR is a finding too.
+- Retiring or superseding a document: `dox graph --json`. Live docs left
+  citing it (`into_retired`) and new `orphans` are findings.
+
+### 2.4 Collect diffs
 
 **Single branch:** `git log $TRUNK..HEAD --oneline`, `git diff $TRUNK...HEAD`,
 `gh pr view` if exists.
@@ -190,10 +200,11 @@ Bullets with doc/spec citations.
 
 ## 5. Output: remediation plan
 
-Write under the repo's `docs/plans/` (or devdocs/plans for platform-wide):
+Persist it as a plan in [forestrie/work](https://github.com/forestrie/work)
+`plans/` with [persist-plan](../persist-plan/SKILL.md)
+(`dox new plan <slug>-review-remediation`), never in a code repo:
 
-- **Path:** `docs/plans/plan-NNNN-{slug}-review-remediation.md`
-- **Header:** Status DRAFT, Date, Related (spec, Linear, branches/PRs)
+- **Frontmatter:** `status: draft`, `issues`, `refs` (spec, branches/PRs)
 - **Sections:** scope summary; remediation items with acceptance criteria;
   branch assignment (current stack vs new branch vs sibling repo); deferred (Low)
 
@@ -223,6 +234,6 @@ No secrets.
 2. Graphite scope determined
 3. Diffs for correct range(s)
 4. Review dimensions applied
-5. Remediation plan in `docs/plans/` (if Medium+ findings)
+5. Remediation plan in forestrie/work `plans/` (if Medium+ findings)
 6. Linear comments + off-stack issues
 7. Summary: worst finding, counts, plan path, Linear ids touched

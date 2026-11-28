@@ -1,94 +1,80 @@
 ---
 name: persist-plan
-description: Persist an approved plan (plan-mode output, a Cursor plan file, or an ad hoc design discussion) as a canonical Forestrie plan document.
+description: Persist an approved plan (plan-mode output, a Cursor plan file, or an ad hoc design discussion) as a plan document in forestrie/work.
 when_to_use: Immediately after the user approves a plan, before implementation begins.
-argument-hint: "[target repo]"
+argument-hint: "[slug] [--dir]"
 ---
 
 # persist-plan
 
-Persist an approved plan — Claude Code plan-mode output, a Cursor
-`.cursor/plans/*.plan.md`, or an ad hoc design discussion — as a canonical
-Forestrie plan document. Read [plan-docs](../../rules/plan-docs/SKILL.md) first for
-the full format spec; this skill is the step-by-step "do it" version.
+Write an approved plan (Claude Code plan-mode output, a Cursor
+`.cursor/plans/*.plan.md`, or an ad hoc design discussion) as a plan in
+[forestrie/work](https://github.com/forestrie/work) `plans/`. Every
+Forestrie plan lives there, whichever repos it changes. Layout, ids and
+frontmatter follow [docs-layout](../../rules/docs-layout/SKILL.md).
 
-Run this immediately after the user approves a plan, before any
-implementation begins.
-
+Run it right after approval, before implementation.
 
 Arguments: `$ARGUMENTS`
 
-## 1. Determine scope and location
+## 1. Get a forestrie/work worktree
 
-- List every Forestrie repo the plan will change.
-- One repo → `<repo>/docs/plans/`.
-- Two or more → `devdocs/plans/` (a multi-repo plan regardless of which repo
-  ends up with the most changed files).
+Reuse the work worktree in the current task container if there is one;
+otherwise `git -C <work clone> worktree add ../.worktrees/work-<slug> -b <branch> origin/main`.
+Never write on the primary clone's `main`.
 
-## 2. Assign the number
+## 2. Allocate the id
 
-- Check `main` for the target location (fetch/pull if the local worktree
-  might be behind).
-- Find the highest `plan-NNNN` under `docs/plans/` **and**
-  `docs/plans/archived/`.
-- Use max + 1, zero-padded to 4 digits.
-- If a collision surfaces later (two worktrees branched close together),
-  don't renumber — disambiguate with a distinct slug under the shared number
-  instead (see [plan-docs](../../rules/plan-docs/SKILL.md#numbering)).
+From the work worktree, allocate and scaffold with
+[dox](../../rules/dox/SKILL.md):
 
-## 3. Write the file
-
-`docs/plans/plan-NNNN-<slug>.md`, header per
-[plan-docs](../../rules/plan-docs/SKILL.md#required-header):
-
-```
-# Plan NNNN — <Title>
-
-**Status:** DRAFT
-**Date:** <today, YYYY-MM-DD>
-**Scope:** single-repo | multi-repo — <repos>
-**Related:** <Linear issue>, <sibling-repo links as GitHub URLs>
+```bash
+dox new plan <slug>          # plans/plan-YYMM-NN-<slug>.md
+dox new plan <slug> --dir    # plans/plan-YYMM-NN-<slug>/README.md
 ```
 
-Body: outcomes, context, decisions, open questions — whatever the approved
-plan actually contains. This is a persistence step, not a rewrite; don't
-invent structure beyond what the plan carries.
+It takes the next ordinal for the current month from origin's default
+branch and open PRs. `/plan-new` (the personal `core:plan-new` skill) runs
+the same command. Never hand-pick.
 
-Drop harness-only scaffolding (Cursor's `.plan.md` metadata, a plan-mode
-preamble) — only the substance survives into the committed doc.
+## 3. Write the plan
 
-## 4. Referencing siblings
+Fill the scaffold dox wrote:
 
-If a single-repo plan needs to point at another repo's doc or code, link the
-full GitHub URL, not a relative path — add the local sibling path as a
-parenthetical only for the human reading it locally:
-
+```yaml
+---
+id: plan-YYMM-NN-<slug>
+title: <title>
+status: draft
+created: <today>
+updated: <today>
+repos: [<every repo the plan changes>]
+issues: [FOR-<n>]
+refs: [<canon it serves, e.g. devdocs:ADR-0071, canopy:ARC-0004>]
+---
 ```
-See [canopy ADR-0007](https://github.com/forestrie/canopy/blob/main/docs/adr/adr-0007-x.md)
-(local: `../canopy/docs/adr/adr-0007-x.md`).
-```
 
-## 5. Decide if this forks into subplans
+Body: what the approved plan actually contains (outcomes, context,
+decisions, open questions). This is persistence, not a rewrite. Drop
+harness scaffolding (Cursor plan metadata, plan-mode preambles).
 
-Stays flat unless the plan already decomposes into two or more independently
-landable workstreams. If it does, promote per
-[plan-docs#forking-a-plan-into-subplans](../../rules/plan-docs/SKILL.md#forking-a-plan-into-subplans):
-create `plan-NNNN-slug/{README.md, overview.md, subplan-01-*.md, ...}`,
-moving the just-written content into `overview.md`.
+Always include a `## Rules check` section: each rule of the road the plan
+touches (platform `P#`, repo rule ids), marked honoured or amendment
+proposed with a link. An unjustified violation blocks the plan.
 
-## 6. Update the index
+## 4. Directory plans
 
-Add or update a row in the target location's `docs/plans/README.md` status
-table.
+Stay flat unless the plan has two or more independently landable slices.
+Then use `plan-YYMM-NN-<slug>/README.md` (the plan, with a slice table),
+`01-<slug>.md`, `02-<slug>.md`, and optionally `handoff.md` and
+`decisions.md`. Only `README.md` carries frontmatter.
 
-## 7. Handoff
+## 5. Hand off
 
-Continue with [plan-with-linear](../plan-with-linear/SKILL.md) step 5
-(branch/worktree creation). The plan doc's filename does not need to match
-the branch name — link them via the Linear issue instead (see
-[plan-docs#relationship-to-branches-and-worktrees](../../rules/plan-docs/SKILL.md#relationship-to-branches-and-worktrees--deliberately-independent)).
+Run `dox lint --changed`, commit, open the forestrie/work PR, and link
+the plan from the Linear issue. Then continue with [plan-with-linear](../plan-with-linear/SKILL.md)
+step 5. Code PRs link the plan; they do not carry it.
 
-In Claude Code, [require-worktree](../../../harness/claude-code.md#hooks) is a
-`PreToolUse` hook on `ExitPlanMode` that blocks execution from a repo's home
-clone and asks for a worktree — it fires before this skill's persistence
-step matters, not instead of it.
+In Claude Code, the `require-worktree` hook
+([harness/claude-code.md](../../../harness/claude-code.md#hooks)) blocks
+leaving plan mode from a repo's primary clone.

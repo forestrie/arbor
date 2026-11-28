@@ -1,15 +1,15 @@
 # ADRs (Arbor)
 
-Repo-local decisions for the arbor services. Platform-wide decisions live in
-[devdocs/adr](../../../devdocs/adr/) — that series and this one number
-independently; cross-repo references should link by URL, not bare id.
+Repo-local decisions for the arbor services. Platform-wide decisions live
+in [devdocs](https://github.com/forestrie/devdocs/tree/main/adr); the two
+series number independently, so cite across them as `devdocs:ADR-NNNN`.
+Retired decisions are in [retired/](retired/).
 
-| ADR | Decision | Status |
-|-----|----------|--------|
-| [adr-0002](adr-0002-univocity-owned-grant-store-and-authority-correspondence.md) | Univocity-owned grant store and authority correspondence | — |
-| [adr-0003](adr-0003-global-logid-r-uniqueness.md) | Global logId R uniqueness | — |
-| [adr-0004](adr-0004-forests-storage-and-uuid-log-ids.md) | Forests storage and UUID log ids | — |
-| [adr-0005](adr-0005-custodian-kms-ensure-and-e2e-software-keys.md) | Custodian KMS ensure and e2e software keys | Accepted |
-| [adr-0006](retired/adr-0006-genesis-authoritative-byok-root-key.md) | Genesis-authoritative root key for BYOK forests | Superseded by [devdocs ADR-0075](https://github.com/forestrie/devdocs/blob/main/adr/adr-0075-sec-child-root-claimed-once.md) |
-| [adr-0007](adr-0007-low-latency-sealer-trigger.md) | Low-latency sealer trigger: ranger seal hints, R2 events demoted to backstop | Proposed |
-| [adr-0008](adr-0008-publisher-never-sends-predicted-revert-acks-unpublishable.md) | Publisher never sends a predicted-revert tx; unpublishable checkpoints acked (self-heal), not retried | Accepted |
+<!-- dox:index:begin -->
+| Id | Title | Status |
+|----|-------|--------|
+| [adr-0005-custodian-kms-ensure-and-e2e-software-keys](adr-0005-custodian-kms-ensure-and-e2e-software-keys.md) | Custodian KMS ensure and e2e SOFTWARE keys | accepted |
+| [adr-0007-low-latency-sealer-trigger](adr-0007-low-latency-sealer-trigger.md) | Low-latency sealer trigger: ranger seal hints, R2 events demoted to backstop | accepted |
+| [adr-0008-publisher-never-sends-predicted-revert-acks-unpublishable](adr-0008-publisher-never-sends-predicted-revert-acks-unpublishable.md) | Publisher never sends a predicted-revert tx; unpublishable checkpoints are acked, not retried | accepted |
+| [adr-0009-univocity-index-and-hint-resolution](adr-0009-univocity-index-and-hint-resolution.md) | Univocity index and hint resolution | accepted |
+<!-- dox:index:end -->

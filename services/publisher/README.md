@@ -4,7 +4,8 @@ Anchors sealed v3 checkpoints on-chain. It reads each checkpoint object from
 public R2, resolves the forest's `(chainId, contract)` from public genesis
 (ADR-0047), builds the `publishCheckpoint` calldata with `publishproof`, and
 submits it from a **gas-only EOA** — authority stays with the grant/signature
-chain ("postmark, not gatekeeper"). Multi-forest, multi-chain (plan-2607-02).
+chain ("postmark, not gatekeeper"). Multi-forest, multi-chain. It never sends a transaction it predicts will
+revert ([ADR-0008](../../docs/adr/adr-0008-publisher-never-sends-predicted-revert-acks-unpublishable.md)).
 
 - **Daemon** (default): Cloudflare-queue consumer on the `v2/merklelog/checkpoints/`
   prefix → batched per-chain submitter → per-message ack.
